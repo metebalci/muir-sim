@@ -753,7 +753,7 @@ Default: 32, the two million words.
 `quux` only: how much main memory, in whole megawords with the unit
 written, `--main-memory-size 32MW`. QUUX has no memory boards, so its
 memory is an amount. Revision 13 takes 1MW to 64MW and revision 12 1MW to 3MW, the
-whole megawords below its sixty 64K-word boards' 3.75 M words.
+whole megawords below its sixty 64K-word boards' 3.75MW.
 
 Nothing else is taken: no other unit (`32KW`, `32MB`), no fraction
 (`1.5MW`), no bare number, and never a bare M (`32M`), which could be read

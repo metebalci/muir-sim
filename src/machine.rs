@@ -41,7 +41,7 @@ pub const QUUX_PROM_BASE: u16 = 0o36000;
 /// Physical pages above the memory are devices, or nothing.
 pub const MAIN_WORDS: usize = 2 * 1024 * 1024;
 
-/// Revision 13's main memory by default: 32 M words, what both boards
+/// Revision 13's main memory by default: 32MW, what both boards
 /// have (contract G2 §3), 512 boards of 64K.
 pub const MAIN_WORDS_13: usize = 32 * 1024 * 1024;
 
@@ -57,7 +57,7 @@ pub fn megawords(words: usize) -> String {
     }
 }
 
-/// The most main memory revision 13 has: 64 M words, 1,024 boards of 64K
+/// The most main memory revision 13 has: 64MW, 1,024 boards of 64K
 /// (contract G1 §3.2, "32 M words to begin, up to 64 M"). Its physical
 /// space has nothing from there to the frame buffer window.
 pub const MAX_MAIN_WORDS_13: usize = 64 * 1024 * 1024;
@@ -339,7 +339,7 @@ impl Geometry {
     /// QUUX's main memory in whole megawords, as `--main-memory-size` takes
     /// it: from 1MW to as many whole MW as [`Geometry::max_memory_boards`]
     /// holds --- 64MW on revision 13, and on revision 12 3MW, its sixty
-    /// boards being 3.75 M words.
+    /// boards being 3.75MW.
     pub fn main_memory_mw(self) -> std::ops::RangeInclusive<usize> {
         1..=self.max_memory_boards() >> 4
     }

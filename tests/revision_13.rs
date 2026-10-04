@@ -966,7 +966,7 @@ const REGISTER_PAGE: u32 = 0o1777777400;
 const OLD_REGISTER_PAGE: u32 = 0o17777400;
 const WINDOW: u32 = 0o1760000000;
 const HIGH: u32 = 0o20000000;
-/// Main memory for the space tests: 4M words and a page, so that [`HIGH`]
+/// Main memory for the space tests: 4MW and a page, so that [`HIGH`]
 /// and the old Unibus window are in it.
 const MAIN_13: usize = 0o20002000;
 const SPY: u32 = 0o17773000;

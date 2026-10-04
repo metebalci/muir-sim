@@ -5,15 +5,15 @@
 //!
 //! It is muir-sys's hand-over of System 2001, microcode 2001 and PROM 2001,
 //! none of them released, published as the pre-release
-//! `handover-2001-c44fe06` and fetched by `tools/fetch-handover-2001.sh`
-//! into the gitignored `ref/band-2001-c44fe06`: System 2001's release disk,
+//! `handover-2001-81b3973` and fetched by `tools/fetch-handover-2001.sh`
+//! into the gitignored `ref/band-2001-81b3973`: System 2001's release disk,
 //! a GPT disk of 853,359 blocks as a dynamic VHD, which QUUX boots as it is,
 //! with microcode 2001 in its current `MCR1`, "MCR1 UCADR 2001", the band,
 //! "LOD1 System 2001", in its current `LOD1`, and a `PAGE` partition of
 //! 128MW; the microcode's and the PROM's files, the PROM being muir's
 //! built-in `data/quux-promh.mcr` byte for byte (`tests/quux_prom.rs`); and
 //! the sources the band was built from, which unpack to
-//! `release-2001-c44fe06/`. Without it the tests skip and say so.
+//! `release-2001-81b3973/`. Without it the tests skip and say so.
 //!
 //! The band boots on both engines at 2MW of main memory, which G2 §3
 //! allows tests, and at revision 13's 32MW; it restores its own band
@@ -38,18 +38,18 @@ const CHAOS: (u16, u16) = (0o177201, 0o177200);
 
 /// muir-sys's hand-over of System 2001, as `tools/fetch-handover-2001.sh`
 /// leaves it.
-const BAND_2001: &str = "ref/band-2001-c44fe06";
+const BAND_2001: &str = "ref/band-2001-81b3973";
 
 /// The hand-over's disk, decompressed by the fetch.
-const DISK: &str = "handover-2001-c44fe06-disk.vhd";
+const DISK: &str = "handover-2001-81b3973-disk.vhd";
 
 /// The hand-over's sources.
-const SOURCES: &str = "handover-2001-c44fe06-sys.tar.gz";
+const SOURCES: &str = "handover-2001-81b3973-sys.tar.gz";
 
 /// The directory the hand-over's tree unpacks to.
-const TREE: &str = "release-2001-c44fe06";
+const TREE: &str = "release-2001-81b3973";
 
-/// Main memory for most runs, in 64K-word boards: 2 M words (G2 §3: "tests
+/// Main memory for most runs, in 64K-word boards: 2MW (G2 §3: "tests
 /// may run at 2 M words").
 const BOARDS: usize = 32;
 
@@ -435,12 +435,15 @@ fn type_slow(e: &mut Micro, k: &mut muir::terminal::keyboard::Keyboard, text: &s
 /// device**, on `micro`: at its listener word 110 reads 401, timer 0 on,
 /// periodic, under its interrupt enable (its flag, `<1>`, masked), and word
 /// 111 16,667; over 10 s of simulated time `INTR-TICK` executes 600 times,
-/// give or take one. Then, logged in, it reads a form from
-/// `HOST://home//lispm//in` and writes to `HOST://home//lispm//versions`,
-/// through the file device, 3, its microcode's version, its machine type,
-/// its herald's line, `most-positive-fixnum` --- 2^31 - 1 on a 40-bit band
-/// (G1 §2.2) --- the form it read, and the count `(time)` moved over a
-/// `process-sleep` of 60.
+/// give or take one. Then, logged in, it writes its herald,
+/// `si:print-herald`, to `HOST://home//lispm//herald`, whose Machine Type
+/// line names the board from feature words 20-24, "QUUX on muir-sim", and
+/// whose memory line says 2MW of main memory and 128MW of virtual; it
+/// reads a form from `HOST://home//lispm//in` and writes to
+/// `HOST://home//lispm//versions`, through the file device, 3, its
+/// microcode's version, its machine type, its herald's line,
+/// `most-positive-fixnum` --- 2^31 - 1 on a 40-bit band (G1 §2.2) --- the
+/// form it read, and the count `(time)` moved over a `process-sleep` of 60.
 #[test]
 fn system_2001_ticks_and_says_what_it_is_through_the_file_device() {
     use muir::machine::Timers;
@@ -470,11 +473,13 @@ fn system_2001_ticks_and_says_what_it_is_through_the_file_device() {
     type_slow(
         &mut e,
         &mut k,
-        "(let ((t0 (time)) (in (with-open-file (s \"HOST://home//lispm//in\") (read s)))) \
+        "(progn (with-open-file (s \"HOST://home//lispm//herald\" :direction :output) \
+         (si:print-herald s)) \
+         (let ((t0 (time)) (in (with-open-file (s \"HOST://home//lispm//in\") (read s)))) \
          (process-sleep 60.) (with-open-file (s \"HOST://home//lispm//versions\" :direction \
          :output) (format s \"~S ~S ~S ~S END~%\" (list (+ 1 2) %microcode-version-number \
          (si:machine-type) (si:system-version-info)) most-positive-fixnum in \
-         (time-difference (time) t0))))\n",
+         (time-difference (time) t0)))))\n",
     );
     let file = root.join("home/lispm/versions");
     let t = e.machine().ns;
@@ -497,6 +502,22 @@ fn system_2001_ticks_and_says_what_it_is_through_the_file_device() {
     );
     let moved: u32 = moved.parse().unwrap();
     assert!((60..90).contains(&moved), "(time) moved {moved} over a second's sleep");
+    let herald = std::fs::read_to_string(root.join("home/lispm/herald")).unwrap();
+    eprintln!("its herald:\n{herald}");
+    let line = |starts: &str| {
+        herald
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .find(|l| l.starts_with(starts))
+            .unwrap_or_else(|| panic!("no line {starts:?} in the herald {herald:?}"))
+    };
+    assert_eq!(line("Machine Type"), "Machine Type QUUX on muir-sim", "the herald's machine");
+    assert_eq!(line("Microcode"), "Microcode 2001", "the herald's microcode");
+    assert_eq!(
+        line("2048K"),
+        "2048K physical memory, 131072K virtual memory.",
+        "the herald's memory: 2MW main, 128MW virtual"
+    );
 }
 
 /// Steps `e` until the microcode's main loop, `QMLP`, has run once with

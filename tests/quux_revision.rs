@@ -65,7 +65,7 @@ fn refused(out: &std::process::Output, says: &str) {
 }
 
 /// **`MUIR_QUUX_REVISION=13` runs revision 13**: a 40-bit word, its
-/// MACHINE-ID saying 13, 32 M words of main memory (G2 §3), PROM 2001
+/// MACHINE-ID saying 13, 32MW of main memory (G2 §3), PROM 2001
 /// built in, and on `rtl` the memory cache's 8-word lines. The checkpoint is the machine the run
 /// built; the start says the same.
 #[test]
@@ -84,7 +84,7 @@ fn the_switch_runs_revision_13() {
         assert_eq!(g, Geometry::QUUX_13, "{engine}: the machine built");
         assert_eq!(g.machine_id.map(|id| id >> 4 & 0o7777), Some(13), "{engine}: MACHINE-ID");
         assert_eq!(bits, 40, "{engine}: the word");
-        assert_eq!(boards << 16, 32 << 20, "{engine}: 32 M words of main memory");
+        assert_eq!(boards << 16, 32 << 20, "{engine}: 32MW of main memory");
         assert!(t.contains("memory: 32MW\n"), "{engine}: {t}");
         assert!(t.contains("machine: quux, revision 13: "), "{engine}: {t}");
         assert!(!t.contains("machine: quux, revision 12"), "{engine}: {t}");
@@ -102,7 +102,7 @@ fn the_switch_runs_revision_13() {
     assert!(t.contains("cache: 8192 words, lines of 8, 2-way"), "{t}");
 }
 
-/// **Unset, or 12, is revision 12**, as it was: a 32-bit word, 2 M words,
+/// **Unset, or 12, is revision 12**, as it was: a 32-bit word, 2MW,
 /// PROM 2000 built in, 4-word lines.
 #[test]
 fn unset_is_revision_12() {

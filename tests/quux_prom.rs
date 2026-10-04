@@ -297,10 +297,10 @@ const HALTS_2001: [(u64, &str); 4] = [
 ];
 
 /// muir-sys's hand-over of System 2001, where PROM 2001 came from: the
-/// gitignored `ref/band-2001-c44fe06`, which `tools/fetch-handover-2001.sh`
-/// fills with the pre-release `handover-2001-c44fe06`, its sources' `sys/ubin/`
+/// gitignored `ref/band-2001-81b3973`, which `tools/fetch-handover-2001.sh`
+/// fills with the pre-release `handover-2001-81b3973`, its sources' `sys/ubin/`
 /// files among them (`tests/system_2001.rs`).
-const BAND_2001: &str = "ref/band-2001-c44fe06";
+const BAND_2001: &str = "ref/band-2001-81b3973";
 
 /// **PROM 2001 is read from 36000, in partition order**, as PROM 2000 is
 /// ([`a_quux_prom_file_is_read_from_36000`]): 36000 is `JUMP GO`, `GO`
@@ -343,7 +343,7 @@ fn prom_2001_is_read_from_36000_in_partition_order() {
 }
 
 /// **PROM 2001 is muir-sys's hand-over's, byte for byte**, where the
-/// hand-over (`ref/band-2001-c44fe06`) is present: its `promh.mcr`, assembled
+/// hand-over (`ref/band-2001-81b3973`) is present: its `promh.mcr`, assembled
 /// from muir-sys's `promh.text` at the commit the hand-over names; its
 /// symbols and error table say version 2001, 3721 octal, and put `GO`,
 /// the end and the halts of [`HALTS_2001`] where this file's constants

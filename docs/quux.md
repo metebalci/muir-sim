@@ -1831,8 +1831,8 @@ the dispatch memory section reaches entry 2,048
 
 **System 2001**, muir-sys's first 40-bit band, boots on revision 13
 (`tests/system_2001.rs`, which skips without muir-sys's hand-over, the
-pre-release `handover-2001-c44fe06` that `tools/fetch-handover-2001.sh`
-fetches into the gitignored `ref/band-2001-c44fe06`): System 2001's
+pre-release `handover-2001-81b3973` that `tools/fetch-handover-2001.sh`
+fetches into the gitignored `ref/band-2001-81b3973`): System 2001's
 release disk, a GPT disk of 853,359 blocks in a dynamic VHD, with
 microcode 2001 in its current `MCR1`, the band in its current `LOD1` and
 a `PAGE` partition of 655,360 blocks, 128MW. At 2MW of main
@@ -1845,22 +1845,25 @@ controller's words a line at 1280 by 1024 and 1024 by 768, and at 1920 by
 to the listener again; the
 PROM writes words 104 and 111 before the disk, and at the listener timer
 0 is on, periodic, under its interrupt enable, with `INTR-TICK` 600 times
-in 10 s of the machine's time; through the file device it reads a form
-and writes what it is, `(3 2001 "QUUX" "Experimental System 2001,
-microcode 2001")`, and `most-positive-fixnum`, 2147483647; and microcode
+in 10 s of the machine's time; through the file device it writes its
+herald, whose Machine Type line names the board from feature words 20-24,
+"QUUX on muir-sim", and whose memory line says "2048K physical memory,
+131072K virtual memory", 2MW and 128MW; it reads a form and writes what
+it is, `(3 2001 "QUUX" "Experimental System 2001, microcode 2001")`, and
+`most-positive-fixnum`, 2147483647; and microcode
 2001 fills the MACRO DISPATCH MEMORY with 36 specialised entries and
 boots with returns fused under the checkers of
 `tests/support/macro_dispatch.rs`, with its own fill and with the
 generic one, finding nothing, and fills a stale memory again.
 
-**Main memory** is 32 M words by default, the boards' (G2 §3), and
+**Main memory** is 32MW by default, the boards' (G2 §3), and
 `--main-memory-size` gives it in whole megawords, 1MW to 64MW (G1 §3.2), where
 revision 12 takes 1MW to 3MW, 2MW by default (`tests/quux_main_memory.rs`).
-At 32 M words muir holds 256 MiB for it, 8 bytes a word. A
+At 32MW muir holds 256 MiB for it, 8 bytes a word. A
 checkpoint's body is 168,204,521 bytes, main memory 5 bytes a word; the
 file packs runs of zeros, and is 248 bytes of an empty memory and
 167,772,410 of one full of other words, against 8,388,854 for revision
-12's 2 M words full. Writing that full checkpoint on `micro` peaked at
+12's 2MW full. Writing that full checkpoint on `micro` peaked at
 757 MB of host memory, against 44 MB for revision 12's.
 
 ## Not modeled

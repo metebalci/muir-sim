@@ -192,7 +192,7 @@ jobs:
       - name: Cache the hand-over of System 2001
         uses: actions/cache@v4
         with:
-          path: ref/band-2001-c44fe06
+          path: ref/band-2001-81b3973
           key: handover-2001-${{ hashFiles('tools/fetch-handover-2001.sh') }}
 
       - name: Fetch the hand-over of System 2001

@@ -7,24 +7,24 @@
 # System 2001, microcode 2001 and PROM 2001 are not released. muir-sys
 # publishes each hand-over of them as a GitHub pre-release of
 # https://github.com/metebalci/muir-sys whose tag never moves; this script is
-# pinned to one, `handover-2001-c44fe06`, by its tag and every file's SHA-256, and
+# pinned to one, `handover-2001-81b3973`, by its tag and every file's SHA-256, and
 # a newer hand-over is taken by a commit that changes them. It goes when
 # release-2001 exists, and a fetch of that release takes its place.
 #
-# The pre-release's files, all kept in ref/band-2001-c44fe06/, which is in
+# The pre-release's files, all kept in ref/band-2001-81b3973/, which is in
 # .gitignore:
 #
 #   SHA256SUMS                     the pre-release's own sums
 #   README                         what the files are, and the hand-over's
 #                                  note: the commit it was built from and
 #                                  how it was checked
-#   handover-2001-c44fe06-sys.tar.gz   the sources the band was built from,
+#   handover-2001-81b3973-sys.tar.gz   the sources the band was built from,
 #                                      with the QFASLs and `sys/ubin/`; it
-#                                      unpacks to release-2001-c44fe06/
-#   handover-2001-c44fe06-disk.vhd.gz  the disk, a dynamic VHD holding a
+#                                      unpacks to release-2001-81b3973/
+#   handover-2001-81b3973-disk.vhd.gz  the disk, a dynamic VHD holding a
 #                                      GPT, decompressed beside it to
-#                                      handover-2001-c44fe06-disk.vhd
-#   handover-2001-c44fe06-promh.mcr    PROM 2001; `quux`'s own revision-13
+#                                      handover-2001-81b3973-disk.vhd
+#   handover-2001-81b3973-promh.mcr    PROM 2001; `quux`'s own revision-13
 #                                      PROM, data/quux-promh.mcr, is the
 #                                      same
 #
@@ -52,10 +52,10 @@
 
 set -eu
 muir=$(cd "$(dirname "$0")/.." && pwd)
-tag=handover-2001-c44fe06
+tag=handover-2001-81b3973
 base=${HANDOVER_2001_BASE:-https://github.com/metebalci/muir-sys/releases/download/$tag}
-dir=$muir/ref/band-2001-c44fe06
-rdir=ref/band-2001-c44fe06
+dir=$muir/ref/band-2001-81b3973
+rdir=ref/band-2001-81b3973
 sources=$tag-sys.tar.gz
 disk=$tag-disk.vhd
 prom=$tag-promh.mcr
@@ -65,12 +65,12 @@ ubin="ucadr.mcr ucadr.sym ucadr.tbl ucadr.locs promh.mcr promh.sym promh.tbl pro
 # The SHA-256 of each file, as the pre-release's SHA256SUMS gives them.
 sum_of() {
     case $1 in
-    SHA256SUMS) echo 8f747b112dfffb919cd288affb433d59086b320b46985546c16f05b16bfbb650 ;;
-    README) echo 4f6a90284d63854e786401380f80e4bf27f31e018113cd11074292a505309fe3 ;;
-    handover-2001-c44fe06-sys.tar.gz) echo e1c36292a87c7f38c6c246ddfde477577d500baa92e2afe39f3b17143975b652 ;;
-    handover-2001-c44fe06-disk.vhd.gz) echo 093326f99dc8f6c467e07cdfdc0276d79ff27145683b18e1343453beb03bfbbb ;;
-    handover-2001-c44fe06-disk.vhd) echo ed7486573e6078296e22c03a366b6e9f71f55f5291e52b820af3c8fd79fcb636 ;;
-    handover-2001-c44fe06-promh.mcr) echo 5917bae4a5e21806acd40fa9af7bc89a307e45f49cc974ee880c9e4ba002b9ca ;;
+    SHA256SUMS) echo 157535c07244e08195398735383bf417741bccbe350484be2aa917f923d1cfa8 ;;
+    README) echo 2511954bfa89272e2b6d2d959bf70c7308724863ef47e5816947a053fa2de0cc ;;
+    handover-2001-81b3973-sys.tar.gz) echo a11d3527f53450cccdaf30b41d37cc69529d686109eb061d1acd19133fee52ae ;;
+    handover-2001-81b3973-disk.vhd.gz) echo 6607f93a20854e52ab823eb145cd68de99d9566f2fab77dda45da9b130b2e71e ;;
+    handover-2001-81b3973-disk.vhd) echo 9034de8b512f660c4e9506b7e5a6c70500b8f988bb91fc67bde3d588dc65f872 ;;
+    handover-2001-81b3973-promh.mcr) echo 5917bae4a5e21806acd40fa9af7bc89a307e45f49cc974ee880c9e4ba002b9ca ;;
     esac
 }
 

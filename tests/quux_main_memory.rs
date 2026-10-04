@@ -68,7 +68,7 @@ fn runs_with(rev: &str, n: usize) {
         assert!(out.status.success(), "{rev} {engine} {amount}: {t}");
         assert!(t.contains(&format!("memory: {n}MW\n")), "{rev} {engine}: the start:\n{t}");
         let mut m = checkpointed(&chk);
-        assert_eq!(m.main.len(), n << 20, "{rev} {engine}: {n} M words");
+        assert_eq!(m.main.len(), n << 20, "{rev} {engine}: {n}MW");
         let end = (n << 20) as u32;
         assert!(answers(&mut m, end - 1), "{rev} {engine}: the last word of {amount}");
         assert!(!answers(&mut m, end), "{rev} {engine}: the word past {amount}");
@@ -104,7 +104,7 @@ fn the_default_by_revision() {
         assert!(out.status.success(), "{rev}: {t}");
         assert!(t.contains(&format!("memory: {n}MW\n")), "{rev}: the start:\n{t}");
         let m = checkpointed(&chk);
-        assert_eq!(m.main.len(), n << 20, "{rev}: {n} M words by default");
+        assert_eq!(m.main.len(), n << 20, "{rev}: {n}MW by default");
         assert_eq!(m.geometry.wide(), rev == "13", "{rev}: the revision built");
     }
     // Without the switch it is revision 12.
