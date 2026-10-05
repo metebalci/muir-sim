@@ -155,6 +155,9 @@ pub struct MemoryPort {
     memory_free_at: u64,
     /// When the write buffer is free again.
     buffer_free_at: u64,
+    /// Revision 14: when the port has done a reference's write-back, which
+    /// precedes its cycle (A14.6). Kept in a checkpoint of revision 14.
+    write_back_until: u64,
     /// Whose clock the timeout's oscillator is measured on: the engine's,
     /// [`MemoryPort::keep_timing_model`]. Not in a checkpoint.
     model: TimingModel,
@@ -224,6 +227,7 @@ impl MemoryPort {
             timing: MemoryTiming::NOMINAL,
             memory_free_at: 0,
             buffer_free_at: 0,
+            write_back_until: 0,
             model: TimingModel::Sync { cycle_ticks: 4, ilong_ticks: 0 },
             prefetch: Some(Reach::Page),
             prefetched: None,
@@ -383,6 +387,8 @@ impl MemoryPort {
     /// hit time; a miss or a write when main memory has done it, a buffered
     /// write after the hit time or when the buffer is free.
     fn memory_cycle(&mut self, now: u64) -> u64 {
+        // Revision 14: after the reference's write-back (A14.6).
+        let now = now.max(self.write_back_until);
         let hit_ns = self.cache.config.hit_ns;
         if !self.write && self.cache.read(self.addr) {
             return now + hit_ns;
@@ -430,6 +436,29 @@ impl MemoryPort {
         let done = now.max(self.memory_free_at) + self.fill_ns_at(phys);
         self.memory_free_at = done;
         done
+    }
+
+    /// **The write of revision 14's write-back** (A14.6) at main memory's
+    /// word `phys`, from `now`: through the write buffer, as every write is,
+    /// answered after the hit time or when the buffer is free, main memory
+    /// doing it behind. When it is answered.
+    pub fn walk_write(&mut self, now: u64, phys: u32) -> u64 {
+        let _ = phys;
+        let done = now.max(self.memory_free_at) + self.timing.write_ns;
+        self.memory_free_at = done;
+        if self.cache.config.write_buffer {
+            let at = (now + self.cache.config.hit_ns).max(self.buffer_free_at);
+            self.buffer_free_at = done;
+            at
+        } else {
+            done
+        }
+    }
+
+    /// The reference's cycle, requested next, is taken no sooner than `at`,
+    /// when its write-back is done (A14.6).
+    pub fn write_back_until(&mut self, at: u64) {
+        self.write_back_until = self.write_back_until.max(at);
     }
 
     /// Advances to `now` and reports the acknowledgement if it has come.
@@ -490,6 +519,7 @@ impl MemoryPort {
             timing,
             memory_free_at,
             buffer_free_at,
+            write_back_until,
             model: _,
             // The prefetch's reach is the engine's setting; its counts are
             // the profile's.
@@ -530,6 +560,9 @@ impl MemoryPort {
             w.word(p.word);
         });
         w.opt(*fetch_vaddr, |w, v| w.u32(v));
+        if self.paged {
+            w.u64(*write_back_until);
+        }
     }
 
     pub fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()> {
@@ -562,6 +595,9 @@ impl MemoryPort {
         if self.prefetch.is_some() {
             self.prefetched = prefetched;
             self.fetch_vaddr = fetch_vaddr;
+        }
+        if self.paged {
+            self.write_back_until = r.u64()?;
         }
         Ok(())
     }

@@ -168,6 +168,67 @@ pub fn walk(main: &[crate::machine::Word], base: u32, va: u32) -> Walk {
     Walk { reads: [Some(dir_at), Some(page_at)], entry }
 }
 
+/// A page entry's accessed bit, `<28>` (A14.2, A14.6).
+pub const ACCESSED: u32 = 1 << 28;
+/// Its modified bit, `<29>`.
+pub const MODIFIED: u32 = 1 << 29;
+/// Its ephemeral-reference bit, `<19>` (A14.8).
+pub const EPHEMERAL: u32 = 1 << 19;
+
+/// The data types' field of the ephemeral space, `VA<31:28>` = `1101`
+/// (A14.1, A14.8).
+pub const EPHEMERAL_SPACE: u32 = 0b1101;
+
+/// **The bits a reference through `entry` asks to write back** (A14.6,
+/// A14.8), `entry` being the TLB entry the reference latched: accessed when
+/// it is 0; on a write, modified when it is 0, and ephemeral-reference when
+/// it is 0 and `ephemeral`, the setter's other conditions on the word
+/// written and the enable. A faulting reference asks for none: the caller
+/// asks only for one that does not fault.
+pub fn write_back_bits(entry: u32, write: bool, ephemeral: bool) -> u32 {
+    let mut bits = ACCESSED & !entry;
+    if write {
+        bits |= MODIFIED & !entry;
+        if ephemeral {
+            bits |= EPHEMERAL & !entry;
+        }
+    }
+    bits
+}
+
+/// What a write-back read and wrote, for `rtl` to time (A14.6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteBack {
+    /// The directory entry and the page entry re-read, as a walk reads them.
+    pub reads: [Option<u32>; 2],
+    /// The page entry written, or `None` when the guard refused.
+    pub write: Option<u32>,
+}
+
+/// **The write-back's read-modify-write** of the table for `va` in `main`
+/// (A14.6): the directory entry and the page entry read again; the page
+/// entry written with `bits` ORed in only when it is in core, status 2 to
+/// 6, with the frame `frame` of the TLB entry the reference went through.
+/// Every other bit of the word stays the table's: an OR, never a copy of
+/// the TLB entry. Whether it wrote is [`WriteBack::write`].
+pub fn write_back(
+    main: &mut [crate::machine::Word],
+    base: u32,
+    va: u32,
+    frame: u32,
+    bits: u32,
+) -> WriteBack {
+    let w = walk(main, base, va);
+    let write = w.reads[1].filter(|&at| {
+        let page = main[at as usize];
+        (2..=6).contains(&status(page)) && page as u32 & 0o777777 == frame & 0o777777
+    });
+    if let Some(at) = write {
+        main[at as usize] |= u64::from(bits);
+    }
+    WriteBack { reads: w.reads, write }
+}
+
 /// The TLB's contents and its counts.
 #[derive(Clone, Debug)]
 pub struct Tlb {
@@ -181,6 +242,12 @@ pub struct Tlb {
     pub walks: u64,
     /// Sweeps made, at reset and for an empty. Not in a checkpoint.
     pub sweeps: u64,
+    /// Write-backs made (A14.6), and of them those carrying accessed,
+    /// modified and ephemeral-reference, and those the guard refused. Not
+    /// in a checkpoint: the profile's.
+    pub write_backs: u64,
+    pub written_bits: [u64; 3],
+    pub refusals: u64,
     /// On `rtl`, the time the processor was held for walks and sweeps. Not
     /// in a checkpoint.
     pub held_ns: u64,
@@ -210,6 +277,9 @@ impl Tlb {
             k: entries.trailing_zeros(),
             walks: 0,
             sweeps: 0,
+            write_backs: 0,
+            written_bits: [0; 3],
+            refusals: 0,
             held_ns: 0,
             sweep_until: 0,
         }
@@ -252,6 +322,14 @@ impl Tlb {
     pub fn load(&mut self, va: u32, entry: u32) {
         let i = self.index(va);
         self.entries[i] = VALID | self.tag(va) << 32 | u64::from(entry & ENTRY_BITS);
+    }
+
+    /// ORs `bits` into the entry for `va`, if the TLB holds it.
+    pub fn or(&mut self, va: u32, bits: u32) {
+        if self.lookup(va).is_some() {
+            let i = self.index(va);
+            self.entries[i] |= u64::from(bits & ENTRY_BITS);
+        }
     }
 
     /// Clears the entry at `va`'s index, whatever its tag.

@@ -1636,8 +1636,31 @@ reading 0 (`no_entry_faults_and_loads_nothing`,
 `a_walk_with_no_directory_reads_nothing`,
 `a_not_in_core_entry_faults_and_map_md_reads_it_without_a_walk`). Faults
 are the entry's access code, `<27>` read and `<26>` write, as revision 13's.
-Accessed and modified are not written back yet, and status 5 faults as its
-access code says.
+Status 5 faults as its access code says: the PDL buffer redirect is not
+built.
+
+**The write-backs.** A reference to a paged address that does not fault
+sets bits in its page's entry: accessed `<28>` by the first read, write
+or fetch through an entry with it 0; modified `<29>` by the first write;
+and ephemeral-reference `<19>` by a write when the enable, word 221 `<0>`,
+is 1, the word written has its data type in the pointer-type register and
+`<31:28>` = `1101`, and the entry has it 0 (A14.8). `MAP(MD)`'s and a
+dispatch's walks set nothing, nor does a window's address. The bits are
+ORed into the TLB entry at once, and into the table by one write-back a
+reference, ahead of the reference's own cycle: the directory entry and the
+page entry are read again, and the page entry written with the bits ORed
+in, only if it is in core, status 2 to 6, with the frame of the TLB entry
+the reference went through. Otherwise nothing is written and word 224
+counts one. The write is an OR, so the table keeps its own bits where a TLB
+entry written directly differs from it (`accessed_is_set_by_the_first_reference_that_does_not_fault`,
+`modified_is_set_by_the_first_write_and_the_table_keeps_its_bits`,
+`the_guard_refuses_a_write_through_a_stale_entry`,
+`the_setter_marks_a_store_of_an_ephemeral_pointer`). On `rtl` the
+write-back's reads go through the cache, unless the walk has just made
+them, and its write through the write buffer, and the reference's cycle
+waits behind it (`a_write_back_holds_the_reference_on_rtl`); on `micro` a
+read's write-back is made at its start and a write's as it goes out, with
+the word it writes.
 
 **The TLB** is direct-mapped, `--tlb <entries>` of them, a power of two from
 1,024 to 32,768, 4,096 by default, on both engines (`quux` refuses `--tlb`
@@ -1686,7 +1709,8 @@ sum shifted. The stepper counts over all 34 bits, and a fetch takes
 **The register page** gains the memory system's words, 220-227: 220 the
 directory base, 221 `<0>` the ephemeral-reference enable, 222 and 223 the
 pointer-type register, types 0-31 and 32-63, all read and written; 224 a
-count of refused write-backs, which a write clears; 225-227 reserved.
+count of the write-backs the guard refused, which a write clears; 225-227
+reserved.
 `-RESET` clears them, `RESET-DEVICES` does not
 (`the_memory_system_words_read_back_and_set_the_directory`). The feature
 page says revision 14 in word 0, 0 in word 1 (no level-1 map), the TLB's

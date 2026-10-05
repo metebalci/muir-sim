@@ -160,6 +160,10 @@ pub struct Micro {
     /// A write started and not yet gone out: the physical address, and
     /// when it goes out ([`Micro::start_write`]).
     write_out: Option<(u32, WriteOut)>,
+    /// Revision 14: the virtual address of that write, for its write-back
+    /// as it goes out, which carries the setter's bit from the word written
+    /// (A14.6, A14.8). Kept in a checkpoint of revision 14 alone.
+    write_va: Option<u32>,
     /// The PDL buffer write an instruction hands to the next microcycle's
     /// write phase, `PDLWRITED`: the address and the word, the address
     /// [`PDL_AT_INDEX`] for a write by PDL-INDEX.
@@ -253,6 +257,7 @@ impl Micro {
             memstart: false,
             memop: false,
             write_out: None,
+            write_va: None,
             pdl_write: None,
             spc_write: None,
             opc: [0; 8],
@@ -311,6 +316,7 @@ impl Micro {
             self.m.macro_dispatch.reset();
             // `-RESET` clears `MEMSTART` (`Rtl::reset`).
             self.write_out = None;
+            self.write_va = None;
             // Revision 14's TLB is swept, at once here, and its memory
             // system's words cleared (A14.4, A14.9).
             self.m.reset_memory_system(self.m.ns);
@@ -1190,6 +1196,7 @@ impl Micro {
         let lost = self.memstart && self.m.geometry.unibus;
         if lost {
             self.write_out = None;
+            self.write_va = None;
             self.new_md_delay = 0;
         } else if self.memstart {
             self.write_goes_out();
@@ -1247,13 +1254,20 @@ impl Micro {
                 WriteOut::Started
             };
             self.write_out = Some((t.physical, when));
+            self.write_va = self.m.geometry.paged().then_some(self.m.vma as u32);
         }
     }
 
     /// The write waiting to go out goes out, with `MD` as it stands.
+    ///
+    /// On revision 14 its write-back goes first, with the word it writes
+    /// (A14.6).
     fn write_goes_out(&mut self) {
         if let Some((physical, _)) = self.write_out.take() {
             let md = self.m.md;
+            if let Some(va) = self.write_va.take() {
+                self.m.write_back(va, self.lvmo, true, md);
+            }
             self.m.bus_write(physical, md);
         }
     }
@@ -1310,6 +1324,10 @@ impl Micro {
     fn start_read(&mut self) {
         self.start_cycle(false);
         if self.m.translate(self.m.vma as u32).access_permitted {
+            // Revision 14's write-back, before the read (A14.6).
+            if self.m.geometry.paged() {
+                self.m.write_back(self.m.vma as u32, self.lvmo, false, 0);
+            }
             self.new_md = self.read(self.m.vma as u32);
             self.new_md_delay = 2;
         } else {
@@ -1926,6 +1944,7 @@ impl Engine for Micro {
         // `-RESET` clears `MEMSTART` (`Rtl::reset`): a write not yet gone
         // out never does.
         self.write_out = None;
+        self.write_va = None;
         // Revision 14's TLB swept and its memory system's words cleared.
         self.m.reset_memory_system(self.m.ns);
     }
@@ -1976,6 +1995,7 @@ impl Engine for Micro {
             memstart,
             memop,
             write_out,
+            write_va,
             pdl_write,
             spc_write,
             opc,
@@ -2048,6 +2068,10 @@ impl Engine for Micro {
         w.u16s(opc);
         w.bool(*opc_ck);
         w.bool(*trap);
+        // Revision 14's pending write's address (A14.14).
+        if m.geometry.paged() {
+            w.opt(*write_va, crate::checkpoint::Writer::u32);
+        }
     }
 
     fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()> {
@@ -2111,6 +2135,9 @@ impl Engine for Micro {
         r.u16s_into(&mut self.opc)?;
         self.opc_ck = r.bool()?;
         self.trap = r.bool()?;
+        if self.m.geometry.paged() {
+            self.write_va = r.opt(crate::checkpoint::Reader::u32)?;
+        }
         Ok(())
     }
 

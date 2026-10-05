@@ -2394,6 +2394,28 @@ impl Rtl {
         true
     }
 
+    /// **Revision 14's write-back** (A14.6, A14.8) of the cycle going out
+    /// now, `write` its direction, with `MD` the word it writes: the bits
+    /// [`Machine::write_back`] sets, and the port's time for them, which
+    /// the cycle waits behind. The directory entry and the page entry are
+    /// read again through the cache unless this microcycle's walk has just
+    /// read them, and the page entry is written through the write buffer.
+    fn write_back(&mut self, write: bool) {
+        let va = self.m.vma as u32;
+        let Some(wb) = self.m.write_back(va, self.lvmo, write, self.m.md) else { return };
+        let Bus::Quux(p) = &mut self.bus else { return };
+        let mut t = self.ns;
+        if !self.walked[0] {
+            for phys in wb.reads.into_iter().flatten() {
+                t = p.walk_read(t, phys);
+            }
+        }
+        if let Some(phys) = wb.write {
+            t = p.walk_write(t, phys);
+        }
+        p.write_back_until(t);
+    }
+
     /// The MD interlock: the instruction reads `MD` while a read is in
     /// progress, and waits for its word --- `-WAIT`'s `USE.MD AND MBUSY AND
     /// -MEMGRANT` before the grant, `-HANG`'s `RD.IN.PROGRESS AND USE.MD`
@@ -2651,6 +2673,9 @@ impl Rtl {
                 if std::mem::take(&mut self.m.dma_written) {
                     self.bus.invalidate_cache();
                 }
+                if self.m.geometry.paged() {
+                    self.write_back(wrcyc);
+                }
                 self.bus.request_at(wrcyc, self.bus_addr);
                 if self.memstart_fetch
                     && let Bus::Quux(p) = &mut self.bus
@@ -2727,7 +2752,6 @@ impl Rtl {
         // What the edge captures is what stood before it, so the instruction
         // being replaced is still needed after `IR` has moved on.
         let was_ir = self.ir;
-        self.walked = [false; 2];
         // page IREG: the OA registers substitute fields as the word loads
         let iob = r.i | ((r.ob & 0x003f_ffff) << 26) | (r.ob & 0x03ff_ffff);
         let mut ir = r.i;
@@ -2951,6 +2975,7 @@ impl Rtl {
         // leaves it, below: a cycle going out at the edge that starts
         // another takes the new one's direction.
         self.start_bus_cycle(r, if r.memop { r.memwr } else { self.wrcyc });
+        self.walked = [false; 2];
         // `WRCYC` and `RDCYC` are one flip-flop: 1C23's 74S175 on `CLK2A`,
         // whose D comes off the 74S51 at 1D16 as
         // `NOT((MEMPREPARE AND -MEMWR) OR (-MEMPREPARE AND RDCYC))`.  With

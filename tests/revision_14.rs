@@ -334,19 +334,29 @@ fn the_windows_never_touch_the_tlb() {
 /// **The physical memory window aliases a translated frame, coherently**
 /// (A14.1): a word written through a page translated to frame F reads back
 /// through `36000000000` + F's address, and the reverse; a write through
-/// the window sets no bit in the page's entry. **Fails** a window that is
-/// not physical = `VA<27:0>`, or one that sets accessed or modified.
+/// the window sets no bit in a page's entry, where the translated
+/// references set accessed and modified. **Fails** a window that is not
+/// physical = `VA<27:0>`, or one that sets accessed or modified.
 #[test]
 fn the_physical_memory_window_aliases_a_translated_frame() {
     const VA: u32 = 0o12345 << 10;
     const FRAME: u32 = 0o200;
+    const OTHER_VA: u32 = 0o12346 << 10;
+    const OTHER: u32 = 0o201;
     let mut p = Prog::default();
     p.write(w(0o025, 0x1111), (VA | 5) as Word, 0o10);
     p.read(phys_va(FRAME << 10 | 5), 0o11, 0o12);
     p.write(w(0o025, 0x2222), phys_va(FRAME << 10 | 6), 0o13);
     p.read((VA | 6) as Word, 0o14, 0o15);
+    // A frame whose page is never referenced, written and read through the
+    // window alone.
+    p.write(w(0o025, 0x3333), phys_va(OTHER << 10 | 7), 0o16);
+    p.read(phys_va(OTHER << 10 | 7), 0o17, 0o16);
     p.stop();
-    let setup = |m: &mut Machine| map_page(m, VA, rw(FRAME));
+    let setup = |m: &mut Machine| {
+        map_page(m, VA, rw(FRAME));
+        map_page(m, OTHER_VA, rw(OTHER));
+    };
     let ms = run_with(&p, &setup, &|_| {});
     expect(
         &ms,
@@ -357,11 +367,20 @@ fn the_physical_memory_window_aliases_a_translated_frame() {
             (0o13, 0, "the window's write"),
             (0o14, w(0o025, 0x2222), "read through the page"),
             (0o15, 0, "no fault"),
+            (0o16, 0, "no fault"),
+            (0o17, w(0o025, 0x3333), "the other frame through the window"),
         ],
     );
     for (engine, mut m) in ms {
+        let at = entry_at(&mut m, OTHER_VA);
+        assert_eq!(m.main[at], rw(OTHER), "{engine}: the window set no bit in its entry");
         let at = entry_at(&mut m, VA);
-        assert_eq!(m.main[at], rw(FRAME), "{engine}: the entry as written");
+        let am = Word::from(tlb::ACCESSED | tlb::MODIFIED);
+        assert_eq!(
+            m.main[at],
+            rw(FRAME) | am,
+            "{engine}: the translated page's, accessed and modified"
+        );
     }
 }
 
@@ -500,24 +519,30 @@ fn two_pages_sharing_an_index_translate_to_their_own_frames() {
 }
 
 /// **Across 2^31 words** (A14 revision 3): the pages at `17777776000`,
-/// the last below 2^31, and `20000000000`, the first above, read
-/// alternately, each translate to their own frame. **Fails** a signed
-/// compare or sign extension anywhere in the decode, index or tag.
+/// the last below 2^31, `20000000000`, the first above, and `27777776000`,
+/// above 2^31 with the first's index and another tag, read in turn, each
+/// translate to their own frame. **Fails** a signed compare or sign
+/// extension anywhere in the decode, index or tag, and a TLB that ignores
+/// the tag's top bits.
 #[test]
 fn pages_either_side_of_2_31_translate_to_their_own_frames() {
     const BELOW: u32 = 0o17777776000;
     const ABOVE: u32 = 0o20000000000;
+    const SAME_INDEX: u32 = 0o27777776000;
     let mut p = Prog::default();
     for k in 0..2 {
-        p.read(BELOW as Word, 0o10 + 2 * k, 0o20);
-        p.read(ABOVE as Word, 0o11 + 2 * k, 0o20);
+        p.read(BELOW as Word, 0o10 + 3 * k, 0o20);
+        p.read(ABOVE as Word, 0o11 + 3 * k, 0o20);
+        p.read(SAME_INDEX as Word, 0o12 + 3 * k, 0o20);
     }
     p.stop();
     let setup = |m: &mut Machine| {
         map_page(m, BELOW, rw(0o200));
         map_page(m, ABOVE, rw(0o201));
+        map_page(m, SAME_INDEX, rw(0o202));
         m.main[0o200 << 10] = w(0o025, 1);
         m.main[0o201 << 10] = w(0o025, 2);
+        m.main[0o202 << 10] = w(0o025, 3);
     };
     let ms = run_with(&p, &setup, &|_| {});
     expect(
@@ -525,8 +550,10 @@ fn pages_either_side_of_2_31_translate_to_their_own_frames() {
         &[
             (0o10, w(0o025, 1), "below 2^31"),
             (0o11, w(0o025, 2), "above 2^31"),
-            (0o12, w(0o025, 1), "below again"),
-            (0o13, w(0o025, 2), "above again"),
+            (0o12, w(0o025, 3), "above 2^31, the same index as below"),
+            (0o13, w(0o025, 1), "below again"),
+            (0o14, w(0o025, 2), "above again"),
+            (0o15, w(0o025, 3), "the same index again"),
             (0o20, 0, "no fault"),
         ],
     );
@@ -1173,4 +1200,253 @@ fn a_revision_13_checkpoint_records_revision_13() {
     m.save(&mut wr);
     let g = Machine::checkpointed_geometry_at(&wr.finish(), 40).unwrap();
     assert_eq!(g.revision(), Some(13));
+}
+
+// --- the write-backs and the setter (A14.6, A14.8; slice S1b) ---------------
+
+/// Accessed, modified and ephemeral-reference as page-entry bits.
+const A: Word = tlb::ACCESSED as Word;
+const M: Word = tlb::MODIFIED as Word;
+const E: Word = tlb::EPHEMERAL as Word;
+
+/// The table's entry for `va` on each engine.
+fn table(ms: &[(&str, Machine)], va: u32) -> [Word; 2] {
+    let at = |m: &Machine| {
+        let mut m = m.clone();
+        entry_at(&mut m, va)
+    };
+    [ms[0].1.main[at(&ms[0].1)], ms[1].1.main[at(&ms[1].1)]]
+}
+
+/// Write-backs each engine made.
+fn write_backs(ms: &[(&str, Machine)]) -> [u64; 2] {
+    [ms[0].1.tlb.write_backs, ms[1].1.tlb.write_backs]
+}
+
+/// **Accessed is set by the first reference that does not fault** (A14.6):
+/// `MAP(MD)`'s walk loads the entry with accessed 0 and writes nothing back;
+/// the first read then sets it in the TLB entry and in the table, and a
+/// second read writes nothing back; a write that faults on a read-only page
+/// sets nothing. **Fails** accessed set by the walk, a write-back on every
+/// reference, and one by a faulting reference.
+#[test]
+fn accessed_is_set_by_the_first_reference_that_does_not_fault() {
+    const PAGE: u32 = 0o1001 << 10;
+    const RO: u32 = 0o1002 << 10;
+    let mut p = Prog::default();
+    p.map(PAGE as Word, 0o10);
+    p.read(PAGE as Word, 0o33, 0o11);
+    p.map(PAGE as Word, 0o12);
+    p.read(PAGE as Word, 0o33, 0o11);
+    p.write(w(0o025, 1), RO as Word, 0o13);
+    p.stop();
+    let setup = |m: &mut Machine| {
+        map_page(m, PAGE, rw(0o200));
+        map_page(m, RO, entry(2, 2, 0o201));
+    };
+    let ms = run_with(&p, &setup, &|_| {});
+    expect(&ms, &[(0o11, 0, "the reads do not fault"), (0o13, 1, "the write faults")]);
+    for (engine, m) in &ms {
+        assert_eq!(m.mmem[0o10] & A, 0, "{engine}: MAP(MD)'s walk sets no accessed");
+        assert_eq!(m.mmem[0o12] & A, A, "{engine}: the read's accessed, in the TLB entry");
+    }
+    assert_eq!(table(&ms, PAGE), [rw(0o200) | A; 2], "accessed written back");
+    assert_eq!(table(&ms, RO), [entry(2, 2, 0o201); 2], "nothing for the faulting write");
+    assert_eq!(write_backs(&ms), [1, 1], "one write-back, the first read's");
+}
+
+/// **Modified is set by the first write, and the write-back is an OR**
+/// (A14.6; S1's check): a read sets accessed, a write modified, a second
+/// write nothing. A TLB entry written directly with `<18>` 0 over a table
+/// entry with `<18>` 1, and one with access `11` over a read-only table
+/// entry, as FORCE-WR-RDONLY does, leave the table's `<18>` and access code
+/// as they were after a write sets accessed and modified. **Fails** a
+/// write-back that copies the TLB entry into the table, and modified set by
+/// a read.
+#[test]
+fn modified_is_set_by_the_first_write_and_the_table_keeps_its_bits() {
+    const PAGE: u32 = 0o1011 << 10;
+    const PLANTED: u32 = 0o1012 << 10;
+    const FORCED: u32 = 0o1013 << 10;
+    let table_18 = rw(0o202) | 1 << 18;
+    let read_only = entry(2, 2, 0o203);
+    let mut p = Prog::default();
+    p.read(PAGE as Word, 0o33, 0o10);
+    p.map(PAGE as Word, 0o11);
+    p.write(w(0o025, 1), PAGE as Word, 0o10);
+    p.write(w(0o025, 2), PAGE as Word, 0o10);
+    p.tlb_op(1, PLANTED as Word, rw(0o202) & tlb::ENTRY_BITS as Word);
+    p.write(w(0o025, 3), PLANTED as Word, 0o10);
+    p.tlb_op(1, FORCED as Word, (read_only | 3 << 26) & tlb::ENTRY_BITS as Word);
+    p.write(w(0o025, 4), FORCED as Word, 0o10);
+    p.stop();
+    let setup = |m: &mut Machine| {
+        map_page(m, PAGE, rw(0o200));
+        map_page(m, PLANTED, table_18);
+        map_page(m, FORCED, read_only);
+    };
+    let ms = run_with(&p, &setup, &|_| {});
+    expect(&ms, &[(0o10, 0, "no fault")]);
+    for (engine, m) in &ms {
+        assert_eq!(m.mmem[0o11] & (A | M), A, "{engine}: the read set accessed alone");
+    }
+    assert_eq!(table(&ms, PAGE), [rw(0o200) | A | M; 2], "accessed, then modified");
+    assert_eq!(table(&ms, PLANTED), [table_18 | A | M; 2], "the table's <18> kept");
+    assert_eq!(table(&ms, FORCED), [read_only | A | M; 2], "the table's access code kept");
+    assert_eq!(write_backs(&ms), [4, 4], "the read, the first write, and one each planted");
+}
+
+/// **The guard** (A14.6; S1's planted race): a page read, so its entry is
+/// in the TLB with accessed set, then its table entry made status 1 in
+/// memory with no invalidation; a write through the stale TLB entry writes
+/// nothing to the table and counts one in word 224. Another page's entry
+/// moved to another frame the same way counts a second. A write of word 224
+/// clears it. **Fails** a write-back with no guard, which ORs modified into
+/// the status-1 entry's slot, and one that compares no frame.
+#[test]
+fn the_guard_refuses_a_write_through_a_stale_entry() {
+    const SWAPPED: u32 = 0o1021 << 10;
+    const MOVED: u32 = 0o1022 << 10;
+    let not_in_core = FIX | 1 << 24 | 3 << 22 | 0o12345;
+    let moved = rw(0o205);
+    let reg = |k: u32| (tlb::REGISTER_PAGE + k) as Word;
+    let at = |va: u32| {
+        let mut probe = Machine::new();
+        entry_at(&mut probe, va) as u32
+    };
+    let mut p = Prog::default();
+    p.read(SWAPPED as Word, 0o33, 0o10);
+    p.read(MOVED as Word, 0o33, 0o10);
+    p.write(not_in_core, phys_va(at(SWAPPED)), 0o10);
+    p.write(moved, phys_va(at(MOVED)), 0o10);
+    p.write(w(0o025, 1), SWAPPED as Word, 0o10);
+    p.read(reg(0o224), 0o11, 0o10);
+    p.write(w(0o025, 2), MOVED as Word, 0o10);
+    p.read(reg(0o224), 0o12, 0o10);
+    p.write(0, reg(0o224), 0o10);
+    p.read(reg(0o224), 0o13, 0o10);
+    p.stop();
+    let setup = |m: &mut Machine| {
+        map_page(m, SWAPPED, rw(0o200));
+        map_page(m, MOVED, rw(0o201));
+    };
+    let ms = run_with(&p, &setup, &|_| {});
+    expect(
+        &ms,
+        &[
+            (0o10, 0, "no fault: the stale entries still permit"),
+            (0o11, 1, "word 224: one refused"),
+            (0o12, 2, "two refused"),
+            (0o13, 0, "cleared by its write"),
+        ],
+    );
+    assert_eq!(table(&ms, SWAPPED), [not_in_core; 2], "the status-1 entry untouched");
+    assert_eq!(table(&ms, MOVED), [moved; 2], "the moved entry untouched");
+}
+
+/// The setter's program: the enable, then a list pointer and a fixnum into
+/// ephemeral space and list pointers below it and past 2^31, each stored to
+/// a page of its own, the first twice; and a store through the physical
+/// memory window to a mapped page's frame.
+const SET_PAGES: [u32; 5] = [0o1031 << 10, 0o1032 << 10, 0o1033 << 10, 0o1034 << 10, 0o1035 << 10];
+
+fn setter(enable: Word) -> Prog {
+    let reg = |k: u32| (tlb::REGISTER_PAGE + k) as Word;
+    let mut p = Prog::default();
+    p.write(enable, reg(0o221), 0o10);
+    p.write(1 << 0o16, reg(0o222), 0o10);
+    let young = LIST | 0o32000000000;
+    for (word, page) in [
+        (young, SET_PAGES[0]),
+        (young | 7, SET_PAGES[0]),
+        (FIX | 0o32000000000, SET_PAGES[1]),
+        (LIST | 0o31777777777, SET_PAGES[2]),
+        (LIST | 0o20000000000, SET_PAGES[3]),
+    ] {
+        p.write(word, page as Word, 0o10);
+    }
+    p.write(young, phys_va(0o204 << 10), 0o10);
+    p.stop();
+    p
+}
+
+fn setter_tables(m: &mut Machine) {
+    for (k, &page) in SET_PAGES.iter().enumerate() {
+        map_page(m, page, rw(0o200 + k as u32));
+    }
+}
+
+/// **The ephemeral-reference setter** (A14.8): with the enable 1 and the
+/// list type in the pointer-type register, a list pointer to
+/// `32000000000` stored sets `<19>` with accessed and modified in one
+/// write-back, and a second store writes nothing back; a fixnum whose field
+/// is `32000000000`, a list pointer to `31777777777` and one to
+/// `20000000000` (`MD<31:28>` = `1000`, past 2^31) set nothing; a store
+/// through the physical memory window sets no bit at all. With the enable
+/// 0, nothing. **Fails** a setter that ignores the pointer-type register,
+/// the `1101` compare (or compares magnitudes), or the enable, and one
+/// write-back per bit.
+#[test]
+fn the_setter_marks_a_store_of_an_ephemeral_pointer() {
+    let ms = run_with(&setter(1), &setter_tables, &|_| {});
+    expect(&ms, &[(0o10, 0, "no fault")]);
+    let am = rw(0o200) | A | M;
+    assert_eq!(table(&ms, SET_PAGES[0]), [am | E; 2], "the young list pointer marks");
+    for (k, what) in [(1, "a fixnum"), (2, "below ephemeral space"), (3, "past 2^31, 1000")] {
+        let want = rw(0o200 + k as u32) | A | M;
+        assert_eq!(table(&ms, SET_PAGES[k]), [want; 2], "{what} marks nothing");
+    }
+    assert_eq!(table(&ms, SET_PAGES[4]), [rw(0o204); 2], "the window's store sets nothing");
+    assert_eq!(write_backs(&ms), [4, 4], "one write-back a page, the second store none");
+    for (engine, m) in &ms {
+        assert_eq!(m.tlb.written_bits, [4, 4, 1], "{engine}: accessed, modified, <19>");
+    }
+    let ms = run_with(&setter(0), &setter_tables, &|_| {});
+    assert_eq!(table(&ms, SET_PAGES[0]), [am; 2], "the enable 0: nothing");
+}
+
+/// **On `rtl` a write-back holds the reference** (A14.6): a page read once,
+/// its line then in the cache, its table entry rewritten through the
+/// physical memory window with accessed 0 or 1 and its TLB entry
+/// invalidated, read again right after a write: with accessed 0 the walk
+/// is followed by a write-back, and the read, a hit in the cache, waits
+/// behind its write, which waits for the write buffer; `micro` takes the
+/// same time either way. **Fails** a
+/// write-back the reference's cycle does not wait for.
+#[test]
+fn a_write_back_holds_the_reference_on_rtl() {
+    const PAGE: u32 = 0o1041 << 10;
+    let at = {
+        let mut probe = Machine::new();
+        entry_at(&mut probe, PAGE) as u32
+    };
+    let time = |e: Word| {
+        let mut p = Prog::default();
+        p.read(PAGE as Word, 0o33, 0o10);
+        p.write(rw(0o200) | e, phys_va(at), 0o10);
+        p.tlb_op(2, PAGE as Word, 0);
+        // A write to another word just before, so that the write buffer is
+        // full when the write-back's write comes.
+        let (junk, page) = (p.k(phys_va(0o300 << 10)), p.k(PAGE as Word));
+        p.op(ALU | SETA | a_src(junk) | START_WRITE);
+        p.op(ALU | SETA | a_src(page) | START_READ);
+        p.fill(1);
+        p.op(ALU | SETM | SRC_MD | m_dest(0o11));
+        p.stop();
+        let setup = |m: &mut Machine| map_page(m, PAGE, rw(0o200) | A);
+        let mut r = Rtl::new(machine(&p, &setup));
+        r.boot();
+        with_directory(r.machine_mut());
+        finish(&mut r, "rtl");
+        let mut u = Micro::new(machine(&p, &setup));
+        u.boot();
+        with_directory(u.machine_mut());
+        finish(&mut u, "micro");
+        (r.ns(), u.machine().ns, r.machine().tlb.write_backs)
+    };
+    let (r0, u0, wb0) = time(0);
+    let (r1, u1, wb1) = time(A);
+    assert_eq!((wb0, wb1), (1, 0), "the second read writes accessed back, or not");
+    assert!(r0 > r1, "rtl: the write-back holds the read: {r0} ns against {r1}");
+    assert_eq!(u0, u1, "micro times no write-back");
 }

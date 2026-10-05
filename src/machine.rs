@@ -1669,6 +1669,47 @@ impl Machine {
         Some(walk)
     }
 
+    /// **A reference's write-back** (A14.6, A14.8), as its cycle goes out
+    /// and before it: a reference to the paged address `va` that did not
+    /// fault, through the TLB entry `entry` it latched, a write when
+    /// `write` with `md` the word written. The bits it sets are ORed into
+    /// the TLB entry at once and into the table by the guarded
+    /// read-modify-write, a refusal counted in word 224. A window's address
+    /// writes nothing back. `None` when it asked for no bit.
+    pub fn write_back(
+        &mut self,
+        va: u32,
+        entry: u32,
+        write: bool,
+        md: Word,
+    ) -> Option<crate::tlb::WriteBack> {
+        if crate::tlb::region(va) != crate::tlb::Region::Paged {
+            return None;
+        }
+        let words = self.memory_words;
+        let ephemeral = words.ephemeral
+            && words.pointer_type(md)
+            && (md as u32) >> 28 == crate::tlb::EPHEMERAL_SPACE;
+        let bits = crate::tlb::write_back_bits(entry, write, ephemeral);
+        if bits == 0 {
+            return None;
+        }
+        self.tlb.or(va, bits);
+        let wb = crate::tlb::write_back(&mut self.main, words.directory, va, entry, bits);
+        self.tlb.write_backs += 1;
+        for (k, bit) in [crate::tlb::ACCESSED, crate::tlb::MODIFIED, crate::tlb::EPHEMERAL]
+            .into_iter()
+            .enumerate()
+        {
+            self.tlb.written_bits[k] += u64::from(bits & bit != 0);
+        }
+        if wb.write.is_none() {
+            self.tlb.refusals += 1;
+            self.memory_words.refused = self.memory_words.refused.wrapping_add(1);
+        }
+        Some(wb)
+    }
+
     /// **A `WRITE-MAP` operation** landing (A14.4), at `now`: a direct
     /// write, an invalidation, or an empty, which sweeps the TLB and, on
     /// `rtl`, holds starts and port-B lookups until `now` + N ticks.
