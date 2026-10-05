@@ -2658,7 +2658,7 @@ fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry) -> Vec<Ins
     let parsed = if geometry == crate::machine::Geometry::CADR {
         crate::prom::parse_mcr(&bytes)
     } else {
-        crate::prom::parse_quux_mcr(&bytes)
+        crate::prom::parse_quux_mcr(&bytes, geometry)
     };
     parsed.unwrap_or_else(|e| usage(&format!("--prom {}: {e}", shown(path))))
 }

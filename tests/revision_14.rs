@@ -1662,3 +1662,172 @@ fn a_redirect_inside_holds_one_microcycle_on_rtl() {
     assert_eq!(held2 - held1, 40, "one microcycle of 40 ns held for the second");
     assert_eq!(cycles2, cycles1, "no memory cycle inside the buffer");
 }
+
+// --- the .mcr's section 6 (A14.13) ----------------------------------------------
+
+/// A 32-bit word as MIT's `.mcr` puts it out: the high half, then the low,
+/// each little-endian.
+fn out32(b: &mut Vec<u8>, v: u32) {
+    b.extend_from_slice(&((v >> 16) as u16).to_le_bytes());
+    b.extend_from_slice(&(v as u16).to_le_bytes());
+}
+
+/// Section 6: code 6, start 0, count 1, the hardware revision.
+fn section_6(b: &mut Vec<u8>, revision: u32) {
+    for v in [6, 0, 1, revision] {
+        out32(b, v);
+    }
+}
+
+/// Where section 6 goes in a synthetic `.mcr`, if anywhere.
+#[derive(Clone, Copy)]
+enum Six {
+    None,
+    First(u32),
+    Second(u32),
+}
+
+/// A small microcode `.mcr` at 40 bits, in partition order: one control
+/// store word, `10000` dispatch entries, and A memory as section 5 with
+/// A-VERSION at 40, `2002`; section 6 where `six` says.
+fn microcode_mcr(six: Six) -> Vec<u8> {
+    let mut b = Vec::new();
+    if let Six::First(r) = six {
+        section_6(&mut b, r);
+    }
+    for v in [1, 0, 1] {
+        out32(&mut b, v);
+    }
+    for half in [0u16, 0o1234, 0o5670, 0o1357] {
+        b.extend_from_slice(&half.to_le_bytes());
+    }
+    if let Six::Second(r) = six {
+        section_6(&mut b, r);
+    }
+    for v in [2, 0, 0o10000] {
+        out32(&mut b, v);
+    }
+    for _ in 0..0o10000 {
+        out32(&mut b, 0);
+    }
+    for v in [5, 0o40, 1, 2002, 0o005] {
+        out32(&mut b, v);
+    }
+    b.resize(b.len().next_multiple_of(1024), 0);
+    muir::mcr::swap_halves(&b).unwrap()
+}
+
+/// A small QUUX boot PROM `.mcr`, in partition order: the control store
+/// from 0 to 36000, zero below the PROM's base and one word at it, then an
+/// empty A memory section; section 6 where `six` says.
+fn prom_mcr(six: Six) -> Vec<u8> {
+    let mut b = Vec::new();
+    if let Six::First(r) = six {
+        section_6(&mut b, r);
+    }
+    for v in [1, 0, 0o36001] {
+        out32(&mut b, v);
+    }
+    for k in 0..0o36001 {
+        let word: [u16; 4] = if k == 0o36000 { [0, 0, 0, 0o1] } else { [0; 4] };
+        for half in word {
+            b.extend_from_slice(&half.to_le_bytes());
+        }
+    }
+    if let Six::Second(r) = six {
+        section_6(&mut b, r);
+    }
+    for v in [4, 0, 0] {
+        out32(&mut b, v);
+    }
+    b.resize(b.len().next_multiple_of(1024), 0);
+    muir::mcr::swap_halves(&b).unwrap()
+}
+
+/// `quux --prom` of `bytes` on revision `rev`, stopping after a
+/// microcycle.
+fn run_prom(dir: &support::Scratch, name: &str, bytes: &[u8], rev: &str) -> (bool, i32, String) {
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    let out = support::quux()
+        .env("MUIR_QUUX_REVISION", rev)
+        .args(["--micro", "--prom"])
+        .arg(&path)
+        .args(["--stop-after", "1"])
+        .output()
+        .unwrap();
+    (out.status.success(), out.status.code().unwrap_or(-1), support::text(&out))
+}
+
+/// **Section 6 = 14 first loads on revision 14** (A14.13), as microcode
+/// and as a boot PROM. Fails a reader that knows no section 6.
+#[test]
+fn section_6_of_14_loads_on_revision_14() {
+    let m = muir::mcr::parse_quux_microcode(&microcode_mcr(Six::First(14)), REV14).unwrap();
+    assert_eq!(m.hardware_revision, Some(14), "section 6's word");
+    assert_eq!(m.imem.len(), 1, "the control store section after it");
+    assert_eq!(m.version(), Some(2002), "A-VERSION");
+    let dir = support::scratch("rev14-section-6-loads");
+    let (ok, _, t) = run_prom(&dir, "prom.mcr", &prom_mcr(Six::First(14)), "14");
+    assert!(ok, "--prom on revision 14:\n{t}");
+}
+
+/// **Section 6 on revision 13 is refused, naming the revision** (A14.13:
+/// PROM 2001 halts at ERROR-BAD-SECTION-TYPE), not as an unknown section.
+/// Fails a reader that skips section 6 unchecked.
+#[test]
+fn section_6_is_refused_on_revision_13() {
+    let e = muir::mcr::parse_quux_microcode(&microcode_mcr(Six::First(14)), Geometry::QUUX)
+        .unwrap_err();
+    assert!(e.contains("section 6") && e.contains("revision 13"), "{e}");
+    assert!(!e.contains("unknown section"), "not a parse error: {e}");
+    let dir = support::scratch("rev14-section-6-on-13");
+    let (ok, code, t) = run_prom(&dir, "prom.mcr", &prom_mcr(Six::First(14)), "13");
+    assert!(!ok && code == 2, "refused at the start:\n{t}");
+    assert!(t.contains("section 6") && t.contains("revision 13"), "{t}");
+    assert!(!t.contains("unknown section"), "not a parse error: {t}");
+}
+
+/// **Section 6 must say 14 on revision 14.** Fails a reader that skips
+/// section 6 unchecked.
+#[test]
+fn section_6_of_another_revision_is_refused_on_revision_14() {
+    let dir = support::scratch("rev14-section-6-other");
+    for r in [13, 15, 0] {
+        let e = muir::mcr::parse_quux_microcode(&microcode_mcr(Six::First(r)), REV14).unwrap_err();
+        assert!(e.contains("section 6") && e.contains(&format!("revision {r}")), "{r}: {e}");
+        let (ok, code, t) = run_prom(&dir, "prom.mcr", &prom_mcr(Six::First(r)), "14");
+        assert!(!ok && code == 2, "{r}: refused at the start:\n{t}");
+        assert!(t.contains("section 6") && t.contains(&format!("revision {r}")), "{r}: {t}");
+    }
+}
+
+/// **Section 6 anywhere but first is refused**, by the reader itself.
+#[test]
+fn section_6_not_first_is_refused() {
+    let e = muir::mcr::parse_partition_order(&microcode_mcr(Six::Second(14))).unwrap_err();
+    assert!(e.contains("section 6") && e.contains("first"), "{e}");
+    let e = muir::mcr::parse_quux_microcode(&microcode_mcr(Six::Second(14)), REV14).unwrap_err();
+    assert!(e.contains("section 6") && e.contains("first"), "{e}");
+    let dir = support::scratch("rev14-section-6-second");
+    let (ok, code, t) = run_prom(&dir, "prom.mcr", &prom_mcr(Six::Second(14)), "14");
+    assert!(!ok && code == 2, "refused at the start:\n{t}");
+    assert!(t.contains("section 6") && t.contains("first"), "{t}");
+}
+
+/// **A revision-13 `.mcr` loads on revision 13 as before; its microcode
+/// is refused on revision 14** (A14.13: a revision-13 disk on revision 14
+/// stops). Fails a reader that takes a missing section 6 on revision 14.
+#[test]
+fn a_revision_13_mcr_loads_on_13_and_its_microcode_not_on_14() {
+    let file = microcode_mcr(Six::None);
+    let m = muir::mcr::parse_quux_microcode(&file, Geometry::QUUX).unwrap();
+    let plain = muir::mcr::parse_partition_order(&file).unwrap();
+    assert_eq!(format!("{m:?}"), format!("{plain:?}"), "what the reader read before");
+    assert_eq!(m.hardware_revision, None);
+    let e = muir::mcr::parse_quux_microcode(&file, REV14).unwrap_err();
+    assert!(e.contains("section 6") && e.contains("revision 14"), "{e}");
+    let dir = support::scratch("rev14-no-section-6");
+    let (ok, _, t) = run_prom(&dir, "prom.mcr", &prom_mcr(Six::None), "13");
+    assert!(ok, "a revision-13 PROM on revision 13:\n{t}");
+}

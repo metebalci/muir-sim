@@ -154,21 +154,22 @@ const HALTS_2001: [(u64, &str); 4] = [
 fn prom_2001_is_read_from_36000_in_partition_order() {
     use muir::mcr::{parse, parse_partition_order, swap_halves};
     use muir::prom::parse_quux_mcr;
+    const G: muir::machine::Geometry = muir::machine::Geometry::QUUX;
     let file = include_bytes!("../data/quux-promh.mcr");
-    let words = parse_quux_mcr(file).unwrap();
+    let words = parse_quux_mcr(file, G).unwrap();
     assert_eq!(words.len(), 1024);
     assert_eq!(words[0].raw() >> 43 & 3, 1, "a jump");
     assert_eq!(words[0].jump().target as u64, GO);
     let base = 0o36000;
     assert_ne!(words[LAST_2001 - base].raw(), 0, "the last word");
     assert!(words[LAST_2001 - base + 1..].iter().all(|w| w.raw() == 0), "nothing past it");
-    let err = parse_quux_mcr(&swap_halves(file).unwrap()).unwrap_err();
+    let err = parse_quux_mcr(&swap_halves(file).unwrap(), G).unwrap_err();
     assert!(err.contains("MIT's order"), "{err}");
     // MIT's own PROM, which is in MIT's order and assembled at 0.
     let mit_file = include_bytes!("../mit/sys/ubin/promh.mcr");
-    let err = parse_quux_mcr(mit_file).unwrap_err();
+    let err = parse_quux_mcr(mit_file, G).unwrap_err();
     assert!(err.contains("MIT's order"), "{err}");
-    let err = parse_quux_mcr(&swap_halves(mit_file).unwrap()).unwrap_err();
+    let err = parse_quux_mcr(&swap_halves(mit_file).unwrap(), G).unwrap_err();
     assert!(err.contains("QUUX's PROM is assembled at 36000"), "MIT's, at 0: {err}");
     assert_eq!(words, muir::prom::quux_boot_prom(), "the built-in PROM");
     let quux = parse_partition_order(file).unwrap();

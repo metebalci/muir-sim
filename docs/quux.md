@@ -1745,6 +1745,18 @@ reset's sweep (`a_checkpoint_keeps_the_34_bit_counter_and_the_words`).
 `quux` refuses a checkpoint of revision 13 on revision 14 and the reverse,
 naming the revision that wrote it (`tests/quux_revision.rs`).
 
+**The `.mcr`'s section 6** (A14.13) is revision 14's: code 6, start 0,
+count 1, then one 32-bit word, the hardware revision, 14, and it is the
+file's first section, in microcode and boot PROM alike. The reader refuses
+it anywhere else, or of another shape. A file with section 6 is refused
+below revision 14, where PROM 2001 reads no section 6 and halts at
+`ERROR-BAD-SECTION-TYPE`, and on revision 14 unless its word is 14;
+microcode without section 6, revision 13's, is refused on revision 14, as
+PROM 2002 refuses such a partition. `quux --prom` holds a boot PROM to the
+same rules, except that a PROM without section 6 is still taken on
+revision 14 (`Mcr::check_revision` in `src/mcr.rs`;
+`tests/revision_14.rs`).
+
 ## Not modeled
 
 `chip` is the CADR's boards, netlist for netlist, and QUUX has none:

@@ -39,6 +39,11 @@
 //! dispatch memory section of `10000` entries and A memory as section 5,
 //! 40-bit words, each location two 32-bit words: `<31:0>`, then `<39:32>`
 //! in `<7:0>`.
+//!
+//! **QUUX revision 14's `.mcr`** (contract G3 revision 14, appendix A14.13)
+//! opens with section 6, microcode and boot PROM alike: code 6, start 0,
+//! count 1, then one 32-bit word, the hardware revision, 14.
+//! [`Mcr::check_revision`] holds a file to the machine it is loaded on.
 
 use crate::isa::Insn;
 
@@ -85,6 +90,9 @@ pub struct Mcr {
     /// The main-memory section, where the file has one: its relative disk
     /// block and its number of blocks ([`parse`] says which field is which).
     pub main_memory: Option<(u32, u32)>,
+    /// Section 6's word, the hardware revision the file is for, where the
+    /// file has one (contract G3 revision 14, appendix A14.13).
+    pub hardware_revision: Option<u32>,
 }
 
 impl Mcr {
@@ -99,6 +107,37 @@ impl Mcr {
     pub fn version(&self) -> Option<u32> {
         let i = 0o40usize.checked_sub(self.amem_start as usize)?;
         self.amem.get(i).map(|&w| w as u32 & 0o77777777)
+    }
+
+    /// Whether the file is for a machine of `geometry`'s revision, by its
+    /// section 6 (contract G3 revision 14, appendix A14.13). A file with
+    /// section 6 is revision 14's: below 14, and on the CADR, no boot PROM
+    /// reads section 6 (PROM 2001 halts at ERROR-BAD-SECTION-TYPE), and on
+    /// revision 14 its word must be 14. A `microcode` file without one is
+    /// revision 13's, which revision 14's PROM 2002 refuses; a boot PROM
+    /// without one is not refused here.
+    pub fn check_revision(
+        &self,
+        geometry: crate::machine::Geometry,
+        microcode: bool,
+    ) -> Result<(), String> {
+        match (self.hardware_revision, geometry.revision()) {
+            (Some(r), None) => Err(format!(
+                "section 6 says hardware revision {r}, and the CADR reads no section 6"
+            )),
+            (Some(r), Some(ours)) if ours < 14 => Err(format!(
+                "section 6 says hardware revision {r}, and this is revision {ours}, \
+                 which reads no section 6"
+            )),
+            (Some(r), Some(ours)) if r != ours => {
+                Err(format!("section 6 says hardware revision {r}, and this is revision {ours}"))
+            }
+            (None, Some(ours)) if ours >= 14 && microcode => Err(format!(
+                "no section 6 first: microcode for revision 13 or below, \
+                 and revision {ours} loads microcode whose section 6 says {ours}"
+            )),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -229,10 +268,39 @@ pub fn parse(bytes: &[u8]) -> Result<Mcr, String> {
                 }
                 break;
             }
+            // Revision 14's hardware revision, one word from 0, and the
+            // file's first section (A14.13).
+            6 => {
+                let at = r.at - 12;
+                if at != 0 {
+                    return Err(format!(
+                        "section 6, the hardware revision, at offset {at}: \
+                         it is the file's first section"
+                    ));
+                }
+                if start != 0 || size != 1 {
+                    return Err(format!(
+                        "section 6 starts at {start:o} for {size:o} words: \
+                         it is one word, the hardware revision, at 0"
+                    ));
+                }
+                mcr.hardware_revision = Some(r.u32_pdp()?);
+            }
             _ => return Err(format!("unknown section code {code:o} at offset {}", r.at - 12)),
         }
     }
     mcr.trailing_bytes = bytes.len() - r.at;
+    Ok(mcr)
+}
+
+/// A QUUX microcode file in partition order, refused unless it is for a
+/// machine of `geometry`'s revision ([`Mcr::check_revision`]).
+pub fn parse_quux_microcode(
+    bytes: &[u8],
+    geometry: crate::machine::Geometry,
+) -> Result<Mcr, String> {
+    let mcr = parse_partition_order(bytes)?;
+    mcr.check_revision(geometry, true)?;
     Ok(mcr)
 }
 

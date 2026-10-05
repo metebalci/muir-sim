@@ -73,7 +73,7 @@ const QUUX_PROMH: &[u8] = include_bytes!("../data/quux-promh.mcr");
 /// QUUX's boot PROM's microinstructions, [`PROM_WORDS`] of them, from
 /// 36000 up: PROM 2001.
 pub fn quux_boot_prom() -> Vec<Insn> {
-    parse_quux_mcr(QUUX_PROMH).expect("data/quux-promh.mcr")
+    parse_quux_mcr(QUUX_PROMH, crate::machine::Geometry::QUUX).expect("data/quux-promh.mcr")
 }
 
 /// A QUUX boot PROM out of an MCR file in QUUX's partition order
@@ -82,11 +82,17 @@ pub fn quux_boot_prom() -> Vec<Insn> {
 /// assembler writes the control store section from 0, so the words are
 /// taken from the PROM's base, and a file with anything assembled below
 /// it, or past the top of the control store, is refused; so is a word
-/// setting `IR<46>`, as for the CADR's, and a file in MIT's order.
-pub fn parse_quux_mcr(bytes: &[u8]) -> Result<Vec<Insn>, String> {
+/// setting `IR<46>`, as for the CADR's, a file in MIT's order, and a file
+/// whose section 6 is not `geometry`'s revision
+/// ([`crate::mcr::Mcr::check_revision`]).
+pub fn parse_quux_mcr(
+    bytes: &[u8],
+    geometry: crate::machine::Geometry,
+) -> Result<Vec<Insn>, String> {
     let base = crate::machine::QUUX_PROM_BASE as usize;
     let mcr = crate::mcr::parse_partition_order(bytes)
         .map_err(|e| format!("not QUUX's MCR microcode file, as promh.mcr is: {e}"))?;
+    mcr.check_revision(geometry, false)?;
     if mcr.imem_start != 0 {
         return Err(format!("the control store section starts at {:o}, not 0", mcr.imem_start));
     }
@@ -136,6 +142,7 @@ pub fn parse_mcr(bytes: &[u8]) -> Result<Vec<Insn>, String> {
     // little to someone who has handed muir the wrong file altogether.
     let mcr = crate::mcr::parse(bytes)
         .map_err(|e| format!("not an MCR microcode file, as promh.mcr is: {e}"))?;
+    mcr.check_revision(crate::machine::Geometry::CADR, false)?;
     if mcr.imem.is_empty() {
         return Err("no control store section: the file holds no program".to_string());
     }
