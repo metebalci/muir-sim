@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! **Checkers for QUUX's fused return and operand address** (contract H8a,
-//! revision 12, §6 items 4 and 5), outside the engines: they watch a run
+//! §6 items 4 and 5), outside the engines: they watch a run
 //! microcycle by microcycle and count what breaks the contract, and the
 //! engines never consult them.
 //!
@@ -33,7 +33,7 @@
 //!   own write pulse, after its read, where today's path runs the main
 //!   loop's dispatch and push in between.
 //!
-//! - **The prefetched word** (contract H8a §3.5, revision 12 on `rtl`): a
+//! - **The prefetched word** (contract H8a §3.5, on `rtl`): a
 //!   fused return that needs a fetch took its word from the prefetch's
 //!   buffer, and the microcycle after it starts the stream's fetch of that
 //!   word. After it, M 31 holds main memory's word at the
@@ -121,7 +121,7 @@ impl Write {
 /// with the functional destination `IR<23:19>` (`IR<24>` in no decode).
 /// Functional destinations 1 and 2 are the location counter and
 /// INTERRUPT-CONTROL, 13 PDL-INDEX (`ir.bits`' `FUNCTIONAL DESTINATIONS`),
-/// and 5 to 7 QUUX's from revision 12.
+/// and 5 to 7 QUUX's.
 pub fn writes(i: Insn, register: u32) -> Vec<Write> {
     let mut w = Vec::new();
     if !matches!(i.op(), Op::Alu | Op::Byte) {
@@ -617,9 +617,9 @@ impl Checker {
     }
 }
 
-/// **Microcode 2000's opcodes whose halfword's `<8:0>` is a register and a
+/// **Microcode 2001's opcodes whose halfword's `<8:0>` is a register and a
 /// delta** whatever its sub-opcode: CALL to ND3, 0 to 13, and their twins
-/// with `<13>` set, 31 to 33 (`OPDTB`, `uc-macrocode.lisp:91-122`). Not
+/// with `<13>` set, 31 to 33 (`OPDTB`, `uc-macrocode.lisp:95-126`). Not
 /// BRANCH (14, 34) or MISC (15, 35), whose `<8:0>` is a displacement and a
 /// function number, nor AREFI-NEW (20) or the unused codes. ND4 (16, 36)
 /// has one only for some sub-opcodes, [`ND4_OPERAND_SUB_OPCODES`].

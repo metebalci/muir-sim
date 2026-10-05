@@ -3,24 +3,19 @@
 
 //! Where a band's microcycles go, workload by workload.
 //!
-//! Boots the CADR's release, System 1002 (`tools/fetch-system-for-cadr.sh`),
-//! on the CADR, and QUUX's, System 2000 (`tools/fetch-system-for-quux.sh`),
-//! or another band (`MUIR_BAND`), System 2000's or, on revision 13,
-//! System 2001's, on QUUX, with the test
-//! harness's Chaosnet server at OZ,
+//! Boots the CADR's release, System 1003 (`tools/fetch-system-for-cadr.sh`),
+//! on the CADR, and on QUUX the band `MUIR_BAND` names, System 2001's,
+//! with the test harness's Chaosnet server at OZ,
 //! logs in, defines a set of workloads at the listener and runs them one at
 //! a time, counting every control-store address the engine executes. Each workload ends by writing a marker
 //! file through the FILE service, which is how the run knows it is over:
 //! nothing here reads the screen.
 //!
-//!     cargo run --release --example profile -- [micro|rtl] [cadr|quux|quux-11|quux-13|quux-4k|quux-16k] [workload ...]
+//!     cargo run --release --example profile -- [micro|rtl] [cadr|quux|quux-4k|quux-16k] [workload ...]
 //!
-//! The machine is the CADR unless `quux` is named: QUUX, as the `quux`
-//! executable runs it.
-//! `quux-4k` and `quux-16k` are QUUX with a PDL buffer of 4K or 16K words,
-//! the sizes being measured for its next revision. `quux-11` is QUUX at
-//! revision 11, without the fused return (contract H8a). `quux-13` is QUUX
-//! at revision 13, the 40-bit word (contract G2).
+//! The machine is the CADR unless `quux` is named: QUUX, revision 13, as
+//! the `quux` executable runs it.
+//! `quux-4k` and `quux-16k` are QUUX with a PDL buffer of 4K or 16K words.
 //!
 //! On QUUX, `MUIR_H8A` fills the MACRO DISPATCH MEMORY with the generic
 //! handlers, `OPDTB`'s entry for each index's opcode, and enables the
@@ -34,17 +29,15 @@
 //! writes the register itself, and the checkers watch from its first
 //! main-loop return with the register enabled. Either way the run is
 //! watched by that file's checkers, each workload says what they counted,
-//! and the whole run's counts close the output. On `rtl`, revision 12 has
-//! QUUX's cache-only prefetch (`muir::memory_port`, contract H8a §3.5),
-//! looking for the next word in the fetched word's line; each workload
-//! then says what it took, and how often a fused return used it. For
-//! measurement, `MUIR_PREFETCH=page` fits it with the page's reach, which
-//! is no revision's, and `MUIR_PREFETCH=off` takes it out; `line` is
-//! revision 12's own.
+//! and the whole run's counts close the output. On `rtl`, QUUX has its
+//! cache-only prefetch (`muir::memory_port`, contract H8a §3.5), looking
+//! for the next word in the fetched word's page; each workload then says
+//! what it took, and how often a fused return used it. For measurement,
+//! `MUIR_PREFETCH=line` fits it with the line's reach alone, and
+//! `MUIR_PREFETCH=off` takes it out; `page` is QUUX's own.
 //! `MUIR_MAIN_MEMORY_SIZE=<n>MW` gives QUUX `n` megawords of main memory,
 //! as `--main-memory-size` does and written as it takes it; 2MW if not
-//! given, on every revision. Each revision boots its own built-in PROM, PROM 2001 on
-//! revision 13 and PROM 2000 below it.
+//! given. QUUX boots its built-in PROM, PROM 2001.
 //! `MUIR_RTC=<s>`
 //! counts QUUX's real-time clock from second `s` of the Unix epoch in the
 //! machine's own time, as `--rtc` does, in place of the host's clock, so
@@ -765,8 +758,6 @@ fn main() {
     let geometry = match args.first().map(String::as_str) {
         Some("cadr") => Some(Geometry::CADR),
         Some("quux") => Some(Geometry::QUUX),
-        Some("quux-11") => Some(Geometry::QUUX_11),
-        Some("quux-13") => Some(Geometry::QUUX_13),
         Some("quux-4k") => Some(Geometry { pdl_bits: 12, ..Geometry::QUUX }),
         Some("quux-16k") => Some(Geometry { pdl_bits: 14, ..Geometry::QUUX }),
         _ => None,
@@ -854,19 +845,14 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
 ) {
     let on_quux = geometry != muir::machine::Geometry::CADR;
     let dir = support::scratch("profile");
-    // QUUX runs muir-sys's systems: QUUX's release, System 2000, or
-    // `MUIR_BAND`, a directory holding a band's GPT disk (a `.vhd`, or a
-    // raw `.img`) and the tree it was built from, which unpacks to one
-    // `release-*` directory. The CADR runs the CADR's release.
+    // QUUX runs muir-sys's systems: `MUIR_BAND`, a directory holding a
+    // band's GPT disk (a `.vhd`, or a raw `.img`) and the tree it was built
+    // from, which unpacks to one `release-*` directory, such as System
+    // 2001's release disk and its sources. The CADR runs the CADR's release.
     let quux_band = std::env::var_os("MUIR_BAND").map(PathBuf::from);
     let (pack, sources) = if on_quux && quux_band.is_none() {
-        let (Some(pack), Some(sources)) = (
-            support::vendor(&["run", &format!("{}-disk.vhd", support::QUUX_RELEASE)]),
-            support::quux_release(&[]),
-        ) else {
-            return;
-        };
-        (pack, sources)
+        eprintln!("skipped: QUUX's band is MUIR_BAND's, a directory with its disk and its tree");
+        return;
     } else if let Some(band) = quux_band.filter(|_| on_quux) {
         let file = |suffixes: &[&str]| {
             std::fs::read_dir(&band)
@@ -891,7 +877,7 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
         (file(&[".vhd", ".img"]), release)
     } else {
         let (Some(pack), Some(sources)) =
-            (support::vendor(&["run", "release-1002-pack.img"]), support::vendor(&["system-1002"]))
+            (support::vendor(&["run", "release-1003-pack.img"]), support::vendor(&["system-1003"]))
         else {
             return;
         };
@@ -973,8 +959,8 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
         // the file device serving the root as HOST's `/` and its `sys` and
         // `site` as `/sys` and `/site`, where the band's `SYS:` is.
         // `MUIR_MAIN_MEMORY_SIZE=<n>MW`: main memory in whole megawords, as
-        // `--main-memory-size` takes it, within the revision's range; 2MW if
-        // not given, on every revision.
+        // `--main-memory-size` takes it, within QUUX's range; 2MW if not
+        // given.
         let boards =
             std::env::var("MUIR_MAIN_MEMORY_SIZE").map_or(muir::machine::MAIN_WORDS >> 16, |v| {
                 let n = v
@@ -990,16 +976,15 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
                 let range = geometry.main_memory_mw();
                 assert!(
                     range.contains(&n),
-                    "MUIR_MAIN_MEMORY_SIZE={v}: this revision's main memory is {}MW to {}MW",
+                    "MUIR_MAIN_MEMORY_SIZE={v}: QUUX's main memory is {}MW to {}MW",
                     range.start(),
                     range.end()
                 );
                 n << 4
             });
         let mut m = muir::machine::Machine::with_geometry(geometry, boards);
-        // The revision's own PROM: PROM 2001 on revision 13, PROM 2000
-        // below it.
-        m.load_prom(&muir::prom::quux_boot_prom_for(geometry));
+        // QUUX's own PROM, PROM 2001.
+        m.load_prom(&muir::prom::quux_boot_prom());
         let mut d = muir::block_disk::BlockDisk::new(muir::block_disk::BLOCK_NS);
         d.attach(muir::disk_image::Disk::open_rw(&copy).unwrap());
         m.block_disk = Some(d);

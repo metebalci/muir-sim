@@ -4,41 +4,43 @@
 //! QUUX's block-disk, `--disk-controller block-disk`: the CADR disk
 //! controller's four registers and command list, with a linear block
 //! number for the disk address, read and write the only commands, and a
-//! fixed time a block.
+//! fixed time a block. These take the 4-byte transfer, 4 blocks a page;
+//! `tests/revision_13_memory.rs` holds the packed one.
 
 use muir::block_disk::{self, BlockDisk};
 use muir::disk_image::Disk;
 use muir::disk_unit::{BLOCK_WORDS, Geometry};
-use muir::machine::{Geometry as MachineGeometry, Machine, bus_error};
+use muir::machine::{Geometry as MachineGeometry, Machine, UNBOXED_TAG, Word, bus_error};
 
 /// A blank disk of a T-300's blocks with block `k` holding `k << 16 |
 /// word`.
 fn pack() -> Disk {
     let mut d = Disk::blank(Geometry::T300.blocks());
-    for k in 0..8u32 {
+    for k in 0..16u32 {
         let block: [u32; BLOCK_WORDS] = std::array::from_fn(|w| k << 16 | w as u32);
         assert!(d.write_block(k, &block));
     }
     d
 }
 
-/// A disk with `pack` and the command list at 100: pages 1000 and 1400,
+/// A disk with `pack` and the command list at 100: pages 2000 and 4000,
 /// the first with More set.
-fn disk_and_memory() -> (BlockDisk, Vec<u32>) {
+fn disk_and_memory() -> (BlockDisk, Vec<Word>) {
     let mut d = BlockDisk::new(block_disk::BLOCK_NS);
     d.attach(pack());
-    let mut main = vec![0u32; 1 << 16];
-    main[0o100] = 0o1000 | 1;
-    main[0o101] = 0o1400;
+    let mut main = vec![0; 1 << 16];
+    main[0o100] = 0o2000 | 1;
+    main[0o101] = 0o4000;
     (d, main)
 }
 
 const READ: u32 = 0;
 const WRITE: u32 = 0o11;
+const FOUR_BYTE: u32 = 1 << 12;
 const DONE_INTERRUPT: u32 = 1 << 11;
 
-/// **A read moves the blocks the list names into memory**, the disk
-/// address counting up from the one given and left at the last block
+/// **A read moves the blocks the list names into memory**, 4 a page, the
+/// disk address counting up from the one given and left at the last block
 /// moved, and the controller is busy for a block's time each.
 #[test]
 fn a_read_moves_the_listed_blocks() {
@@ -46,17 +48,20 @@ fn a_read_moves_the_listed_blocks() {
     d.advance(0);
     d.write(block_disk::CLP, 0o100, &mut main);
     d.write(block_disk::DA, 3, &mut main);
-    d.write(block_disk::COMMAND, READ | DONE_INTERRUPT, &mut main);
+    d.write(block_disk::COMMAND, READ | FOUR_BYTE | DONE_INTERRUPT, &mut main);
     d.write(block_disk::START, 0, &mut main);
-    assert_eq!(main[0o1000], 3 << 16);
-    assert_eq!(main[0o1377], 3 << 16 | 0o377);
-    assert_eq!(main[0o1400 + 5], 4 << 16 | 5);
-    assert_eq!(d.read(block_disk::DA), 4, "the last block moved");
+    let word = |k: u32, w: u32| UNBOXED_TAG | Word::from(k << 16 | w);
+    assert_eq!(main[0o2000], word(3, 0));
+    assert_eq!(main[0o2377], word(3, 0o377));
+    assert_eq!(main[0o2400], word(4, 0));
+    assert_eq!(main[0o3777], word(6, 0o377));
+    assert_eq!(main[0o4000 + 5], word(7, 5));
+    assert_eq!(d.read(block_disk::DA), 10, "the last block moved");
     assert_eq!(d.read(block_disk::STATUS) & 1, 0, "busy");
     assert!(!d.interrupt());
-    d.advance(2 * block_disk::BLOCK_NS - 1);
-    assert_eq!(d.read(block_disk::STATUS) & 1, 0, "busy until two blocks' time");
-    d.advance(2 * block_disk::BLOCK_NS);
+    d.advance(8 * block_disk::BLOCK_NS - 1);
+    assert_eq!(d.read(block_disk::STATUS) & 1, 0, "busy until eight blocks' time");
+    d.advance(8 * block_disk::BLOCK_NS);
     let status = d.read(block_disk::STATUS);
     assert_eq!(status & 1, 1, "not active");
     assert_eq!(status & (1 << 13), 0, "no error");
@@ -68,12 +73,12 @@ fn a_read_moves_the_listed_blocks() {
 #[test]
 fn a_write_moves_the_pages_to_the_blocks() {
     let (mut d, mut main) = disk_and_memory();
-    for (k, w) in main[0o1000..0o2000].iter_mut().enumerate() {
-        *w = 0o7000000 + k as u32;
+    for (k, w) in main[0o2000..0o6000].iter_mut().enumerate() {
+        *w = UNBOXED_TAG | (0o7000000 + k as Word);
     }
     d.write(block_disk::CLP, 0o100, &mut main);
     d.write(block_disk::DA, 100, &mut main);
-    d.write(block_disk::COMMAND, WRITE, &mut main);
+    d.write(block_disk::COMMAND, WRITE | FOUR_BYTE, &mut main);
     d.write(block_disk::START, 0, &mut main);
     let u = d.disk_mut().unwrap();
     assert_eq!(u.read_block(100).unwrap()[7], 0o7000007);
@@ -90,7 +95,7 @@ fn past_the_end_stops_by_error() {
     let last = Geometry::T300.blocks() - 1;
     d.write(block_disk::CLP, 0o100, &mut main);
     d.write(block_disk::DA, last, &mut main);
-    d.write(block_disk::COMMAND, READ, &mut main);
+    d.write(block_disk::COMMAND, READ | FOUR_BYTE, &mut main);
     d.write(block_disk::START, 0, &mut main);
     d.advance(u64::MAX / 2);
     let status = d.read(block_disk::STATUS);
@@ -104,7 +109,7 @@ fn past_the_end_stops_by_error() {
 fn a_list_outside_memory_is_nxm() {
     let (mut d, mut main) = disk_and_memory();
     d.write(block_disk::CLP, 1 << 20, &mut main);
-    d.write(block_disk::COMMAND, READ, &mut main);
+    d.write(block_disk::COMMAND, READ | FOUR_BYTE, &mut main);
     d.write(block_disk::START, 0, &mut main);
     d.advance(u64::MAX / 2);
     let status = d.read(block_disk::STATUS);
@@ -121,35 +126,35 @@ fn any_other_command_stops_by_error() {
     d.write(block_disk::COMMAND, 0o04, &mut main);
     d.write(block_disk::START, 0, &mut main);
     assert_ne!(d.read(block_disk::STATUS) & (1 << 13), 0);
-    assert_eq!(main[0o1000], 0, "nothing moved");
+    assert_eq!(main[0o2000], 0, "nothing moved");
 }
 
 /// **On QUUX the registers are block-disk's, at words 200-203 of the
-/// register page**, `17777600` (contract Q13): 200 status and command, 201
-/// the last memory address and the command list pointer, 202 the disk
-/// address, 203 START. A read through them lands the block, and nothing
-/// fails; the CADR controller's old place, `17377774`, is nothing there.
+/// register page**, `1777777600` (contract Q13): 200 status and command,
+/// 201 the last memory address and the command list pointer, 202 the disk
+/// address, 203 START. A read through them lands the page, and nothing
+/// fails; the CADR controller's place, `17377774`, is nothing there on a
+/// machine of 2MW, past its main memory.
 #[test]
 fn on_quux_the_registers_are_the_block_disk_s() {
-    const REGS: u32 = 0o17777600;
+    const REGS: u32 = 0o1777777600;
     assert_eq!(block_disk::REGS, REGS);
-    let mut m = Machine::new();
-    m.geometry = MachineGeometry::QUUX;
+    let mut m = Machine::with_geometry(MachineGeometry::QUUX, 32);
     let mut d = BlockDisk::new(block_disk::BLOCK_NS);
     d.attach(pack());
     m.block_disk = Some(d);
-    m.main[0o777] = 0o1000;
+    m.main[0o777] = 0o2000;
     m.bus_write(REGS + 1, 0o777);
     m.bus_write(REGS + 2, 2);
-    m.bus_write(REGS, READ.into());
+    m.bus_write(REGS, (READ | FOUR_BYTE).into());
     m.bus_write(REGS + 3, 0);
-    assert_eq!(m.main[0o1000 + 9], 2 << 16 | 9);
-    assert_eq!(m.bus_read(REGS + 2), 2, "the disk address");
-    assert_eq!(m.bus_read(REGS + 1), 0o1377, "the last memory address");
+    assert_eq!(m.main[0o2000 + 9], UNBOXED_TAG | 2 << 16 | 9);
+    assert_eq!(m.bus_read(REGS + 2), 5, "the disk address");
+    assert_eq!(m.bus_read(REGS + 1), 0o3777, "the last memory address");
     assert_eq!(m.bus_read(REGS + 3), 0, "START reads 0");
     assert_eq!(m.bus_error & bus_error::XBUS_NXM, 0);
     assert!(m.dma_written, "the cache is told memory was written");
-    m.ns += block_disk::BLOCK_NS;
+    m.ns += 4 * block_disk::BLOCK_NS;
     assert_eq!(m.bus_read(REGS) & 1, 1, "not active");
     for old in 0o17377774..=0o17377777 {
         m.bus_error = 0;
@@ -166,7 +171,7 @@ fn a_checkpoint_keeps_it() {
     let (mut d, mut main) = disk_and_memory();
     d.write(block_disk::CLP, 0o100, &mut main);
     d.write(block_disk::DA, 50, &mut main);
-    d.write(block_disk::COMMAND, WRITE, &mut main);
+    d.write(block_disk::COMMAND, WRITE | FOUR_BYTE, &mut main);
     d.write(block_disk::START, 0, &mut main);
     let mut w = Writer::new();
     d.save(&mut w);
@@ -174,10 +179,10 @@ fn a_checkpoint_keeps_it() {
     let mut back = BlockDisk::new(block_disk::BLOCK_NS);
     back.attach(Disk::blank(Geometry::T300.blocks()));
     back.load(&mut Reader::new(&body)).unwrap();
-    for status_at in [0, 2 * block_disk::BLOCK_NS] {
+    for status_at in [0, 8 * block_disk::BLOCK_NS] {
         d.advance(status_at);
         back.advance(status_at);
         assert_eq!(back.read(block_disk::STATUS), d.read(block_disk::STATUS));
     }
-    assert_eq!(back.read(block_disk::DA), 51);
+    assert_eq!(back.read(block_disk::DA), 57);
 }

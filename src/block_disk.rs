@@ -4,16 +4,16 @@
 //! QUUX's block-disk: a disk of numbered blocks behind the CADR disk
 //! controller's own programming interface, `--disk-controller block-disk`.
 //!
-//! Its four registers are words 200-203 of the register page, `17777600`
-//! to `17777603` (contract Q13).
+//! Its four registers are words 200-203 of the register page, `1777777600`
+//! to `1777777603` (contract Q13).
 //!
 //! What stays the CADR's (`sys/doc/disk.text`, and `crate::disk_controller`,
 //! which models MIT's board): the four registers --- status and command,
 //! the command list pointer, the disk address, and START, in the order the
-//! CADR has them at Xbus `17377774` --- and the command list itself, one command word a
-//! 256-word block, `<23:8>` the page's physical address and `<0>` More; the
-//! done interrupt enable, command `<11>`; and the disk address left at the
-//! last block moved, or at the one that failed.
+//! CADR has them at Xbus `17377774` --- and the command list itself, one
+//! command word a page, its `<0>` More; the done interrupt enable, command
+//! `<11>`; and the disk address left at the last block moved, or at the
+//! one that failed.
 //!
 //! What goes: cylinders, heads and sectors, seeks, the ECC, Read All and
 //! Write All, the drive's own states. The disk address is a block number
@@ -27,25 +27,23 @@
 //! controller then stays busy for [`BLOCK_NS`] a block moved, which is when
 //! it goes not-active and the done interrupt comes.
 //!
-//! **Revision 13** ([`BlockDisk::write_40`]; contract G2 §4.2, appendix
-//! A1.11) moves 1024-word pages of 40-bit words, one a command list entry,
-//! `<27:10>` the page and `<0>` More, `<9:1>` and `<39:28>` ignored; its
-//! registers take 28-bit addresses. Command `<12>` chooses the transfer:
-//! 0 the **packed transfer**, 5 blocks a page, the 5,120 bytes as main
-//! memory holds them (G1 §4.1: word w at bytes 5w to 5w + 4, `<7:0>` first
-//! and the tag last); 1 the **4-byte transfer**, 4 blocks a page, `<31:0>`
-//! of word w at bytes 4w to 4w + 3, a read writing tag `005` and a write
-//! dropping the tag. A page is read whole before memory is written, so a
-//! transfer that runs past the end of the disk leaves the page it stopped
-//! in as it was.
+//! **Pages** (contract G2 §4.2, appendix A1.11): a transfer moves 1024-word
+//! pages of 40-bit words, one a command list entry, `<27:10>` the page and
+//! `<0>` More, `<9:1>` and `<39:28>` ignored; the registers take 28-bit
+//! addresses. Command `<12>` chooses the transfer: 0 the **packed
+//! transfer**, 5 blocks a page, the 5,120 bytes as main memory holds them
+//! (G1 §4.1: word w at bytes 5w to 5w + 4, `<7:0>` first and the tag
+//! last); 1 the **4-byte transfer**, 4 blocks a page, `<31:0>` of word w at
+//! bytes 4w to 4w + 3, a read writing tag `005` and a write dropping the
+//! tag. A page is read whole before memory is written, so a transfer that
+//! runs past the end of the disk leaves the page it stopped in as it was.
 
 use crate::disk_image::Disk;
 use crate::disk_unit::BLOCK_WORDS;
-use crate::machine::MemoryWord;
 
 /// The registers' first physical address: word 200 of the register page
 /// (contract Q13).
-pub const REGS: u32 = 0o17777600;
+pub const REGS: u32 = 0o1777777600;
 /// The four registers, by number. Status reads and command writes are the
 /// first; START is written, and reads 0.
 pub const STATUS: u32 = 0;
@@ -66,7 +64,8 @@ pub struct Transfer {
     pub write: bool,
     /// The block, from the start of the disk.
     pub block: u32,
-    /// The first of the 256 words of physical memory it moved to or from.
+    /// The first of the 1024 words of physical memory, the page, it moved
+    /// to or from.
     pub page: u32,
 }
 
@@ -178,18 +177,25 @@ impl BlockDisk {
         }
     }
 
-    /// Revision 13's registers and transfers ([module docs](self)): the
-    /// command list pointer 28 bits, and a transfer of pages. `main` is
-    /// physical memory, main memory's words from 0.
-    pub fn write_40(&mut self, register: u32, v: u32, main: &mut [crate::machine::Word]) {
+    /// A register written ([module docs](self)): the command list pointer
+    /// and the disk address 28 bits, and START a transfer of pages. `main`
+    /// is physical memory, main memory's words from 0, which a transfer
+    /// reads and writes directly, the disk being a bus master.
+    pub fn write(&mut self, register: u32, v: u32, main: &mut [crate::machine::Word]) {
         match register & 3 {
-            START => self.start_40(main),
+            COMMAND => {
+                self.cmd = v;
+                self.past_end = false;
+                self.nxm = false;
+                self.bad_command = false;
+            }
             CLP => self.clp = v & 0o1777777777,
-            _ => self.write(register, v, main),
+            DA => self.da = v & 0o1777777777,
+            _ => self.start(main),
         }
     }
 
-    fn start_40(&mut self, main: &mut [crate::machine::Word]) {
+    fn start(&mut self, main: &mut [crate::machine::Word]) {
         use crate::machine::{UNBOXED_TAG, Word};
         const PAGE: usize = 1024;
         self.past_end = false;
@@ -277,86 +283,6 @@ impl BlockDisk {
             self.last_memory_address = (page + PAGE - 1) as u32;
             moved += per_page as u64;
             block += per_page as u32 - 1;
-            if ccw & 1 == 0 {
-                break;
-            }
-            n += 1;
-            block += 1;
-        }
-        // The last block moved, or the one that failed.
-        self.da = block;
-        self.disk = Some(disk);
-        self.done_at = self.now + moved * self.block_ns;
-    }
-
-    /// `main` is physical memory, which a transfer reads and writes
-    /// directly, the disk being a bus master.
-    pub fn write<W: MemoryWord>(&mut self, register: u32, v: u32, main: &mut [W]) {
-        match register & 3 {
-            COMMAND => {
-                self.cmd = v;
-                self.past_end = false;
-                self.nxm = false;
-                self.bad_command = false;
-            }
-            CLP => self.clp = v,
-            DA => self.da = v & 0o1777777777,
-            _ => self.start(main),
-        }
-    }
-
-    fn start<W: MemoryWord>(&mut self, main: &mut [W]) {
-        self.past_end = false;
-        self.nxm = false;
-        self.bad_command = false;
-        let read = match self.cmd & 0o17 {
-            0o00 => true,
-            0o11 => false,
-            _ => {
-                self.bad_command = true;
-                return;
-            }
-        };
-        let Some(mut disk) = self.disk.take() else { return };
-        let mut moved = 0u64;
-        let mut n = 0u32;
-        let mut block = self.da;
-        loop {
-            // "Only bits <15:0> of the CLP can count", as on the CADR.
-            let clp = self.clp & !0xffff | (self.clp.wrapping_add(n)) & 0xffff;
-            self.last_memory_address = clp;
-            let Some(ccw) = main.get(clp as usize).map(|&w| w.low()) else {
-                self.nxm = true;
-                break;
-            };
-            let page = (ccw & 0x003f_ff00) as usize;
-            if page + BLOCK_WORDS > main.len() {
-                self.nxm = true;
-                break;
-            }
-            let ok = if read {
-                match disk.read_block(block) {
-                    Some(b) => {
-                        for (m, &d) in main[page..page + BLOCK_WORDS].iter_mut().zip(&b) {
-                            *m = W::of(d);
-                        }
-                        true
-                    }
-                    None => false,
-                }
-            } else {
-                let b: [u32; BLOCK_WORDS] = std::array::from_fn(|k| main[page + k].low());
-                disk.write_block(block, &b)
-            };
-            if !ok {
-                self.past_end = true;
-                break;
-            }
-            if let Some(log) = self.log.as_mut() {
-                log.push(Transfer { write: !read, block, page: page as u32 });
-            }
-            self.last_memory_address = (page + BLOCK_WORDS - 1) as u32;
-            moved += 1;
             if ccw & 1 == 0 {
                 break;
             }

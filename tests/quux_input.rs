@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! QUUX's keyboard and mouse (contract Q3), on the register page at
-//! `17777400`: word 120 the keyboard's status, 121 its data, 122 the mouse,
+//! `1777777400`: word 120 the keyboard's status, 121 its data, 122 the mouse,
 //! 123 the mouse's status. No CADR keyboard timing and no quadrature: a
 //! FIFO of 64 of the key words the CADR's keyboard gives, and the CADR's
 //! twelve-bit mouse counts with the host's motion added to them.
@@ -10,7 +10,7 @@
 use muir::machine::{Geometry, Machine, bus_error};
 use muir::quux_input::KeyboardMouse;
 
-const PAGE: u32 = 0o17777400;
+const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
 const INTERRUPTS: u32 = PAGE + 0o100;
 const KBD_STATUS: u32 = PAGE + 0o120;
 const KBD_DATA: u32 = PAGE + 0o121;
@@ -197,8 +197,7 @@ fn both_engines_read_the_fifo() {
         words[..prom.len()].copy_from_slice(&prom);
         m.load_prom(&words);
         support::prom_program_in_ram(&mut m);
-        m.l2_map[1] = (1 << 23) | (1 << 22) | 0o37777;
-        m.mmem[1] = (1 << 8) | 0o121;
+        m.mmem[1] = support::quux_map(&mut m, 1, PAGE | 0o121).into();
         m.quux_input.press(0o101);
         m.quux_input.press(0o102);
         m

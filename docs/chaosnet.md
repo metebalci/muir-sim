@@ -704,8 +704,9 @@ release's trimmed one.
 not unverified: it never reaches a listener.** The band's routing table is
 96 entries --- `(DEFCONST ROUTING-TABLE-SIZE 96.)` at
 `vendor/system-100-0/sys/network/chaos/chsncp.lisp:253`, where muir-sys's
-System 1002 has `256.` at
-`vendor/system-1002/sys/network/chaos/chsncp.lisp:259` --- and
+System 1003 has `256.` at
+`vendor/system-1003/sys/network/chaos/chsncp.lisp:259`, as System 1002
+has --- and
 `RESET-ROUTING-TABLE` writes `(AREF ROUTING-TABLE MY-SUBNET)`, and the cost
 and type tables likewise, with no bounds test (System 100's file, lines 311
 to 317);

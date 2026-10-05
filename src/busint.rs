@@ -1083,37 +1083,15 @@ pub fn decode_with(phys: u32, memory_words: usize, color_tv: bool) -> Responder 
 /// [`decode_with`] with the main display's buffer `tv_words` long, and
 /// `tv_regs` its control registers that answer, a bit each
 /// (`Tv::control_registers`). QUUX does not decode by this, but by
-/// [`decode_quux`].
-/// **QUUX's decode** (contracts Q5, Q7 and Q13): `tv_words` of frame
-/// buffer from `17000000`, on the memory bus with main memory; the register
-/// page, `17777400`-`17777777`, a device; main memory below `17000000`, up
-/// to `memory_words`; and nothing else. Nothing answers at the old register
-/// page (`17377000`), the CADR's display and disk registers after it, or
-/// the rest of the old Unibus window below the page: an access there
-/// fails at once. The page is decided before the buffer, which may reach
-/// up to `17777377` ([`crate::tv::VIDEO_MAX_WORDS`]) and no further.
-pub fn decode_quux(phys: u32, memory_words: usize, tv_words: u32) -> Responder {
-    let page = (phys >> 8) & 0o37777;
-    if page == crate::machine::Geometry::FEATURE_PAGE {
-        Responder::Device
-    } else if phys.wrapping_sub(tv::BUFFER) < tv_words {
-        // The memory port reads no board number.
-        Responder::Memory(0)
-    } else if page < 0o36000 && (phys as usize) < memory_words {
-        Responder::Memory((phys >> 16) as u8)
-    } else {
-        Responder::NoXbus
-    }
-}
-
-/// **Revision 13's decode** (contract G1 §3.2, G2 §3-§4): 28-bit
+/// [`decode_quux_13`].
+/// **QUUX's decode** (contracts Q5, Q7 and Q13; G1 §3.2, G2 §3-§4): 28-bit
 /// physical word addresses. The register page,
 /// [`crate::machine::REGISTER_PAGE_13`], a device; the frame buffer window
 /// from [`crate::machine::WINDOW_13`], `tv_words` of it, on the memory bus
 /// with main memory; main memory from 0 up to `memory_words`, below the
-/// window; and nothing else, revision 12's page at `17777400` and its
-/// frame buffer at `17000000` among it, which are main memory's addresses
-/// when there is that much of it.
+/// window; and nothing else. An access to nothing fails at once. The
+/// CADR's addresses from `17000000` up, its Unibus window among them, are
+/// main memory's when there is that much of it.
 pub fn decode_quux_13(phys: u32, memory_words: usize, tv_words: u32) -> Responder {
     use crate::machine::{REGISTER_PAGE_13, WINDOW_13};
     if phys & !0o377 == REGISTER_PAGE_13 {

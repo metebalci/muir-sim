@@ -3,9 +3,8 @@
 
 //! **The word width as a parameter of the engines** (contract G2 §8.1):
 //! `micro`, `rtl`, the machine, main memory and the checkpoint carry a word
-//! of 32 or 40 bits, as [`Geometry::word_bits`] says. The CADR and QUUX
-//! revisions 11 and 12 are 32; revision 13, [`Geometry::QUUX_13`], is 40,
-//! and no machine the executables run is 40 yet.
+//! of 32 or 40 bits, as [`Geometry::word_bits`] says. The CADR is 32;
+//! QUUX, revision 13, [`Geometry::QUUX`], is 40.
 //!
 //! Revision 13's geometry runs a hand program that moves words with `<39:32>` set through every
 //! word register G2 §2.1 widens: main memory into `MD`, `MD` into M, M
@@ -36,7 +35,7 @@ use muir::rtl::Rtl;
 mod support;
 
 /// QUUX's 40-bit geometry, revision 13.
-const WIDE: Geometry = Geometry::QUUX_13;
+const WIDE: Geometry = Geometry::QUUX;
 
 /// The words the program moves, each with `<39:32>` set, and `W1`'s and
 /// `W3`'s `<31>` too so that a sign extension would show. `W2`'s `<31:0>`
@@ -118,7 +117,7 @@ fn program() -> Vec<Insn> {
 /// The machine the program runs on, with its words in main memory and its
 /// addresses in A memory, and the page they are on mapped to itself,
 /// readable and writable: on revision 13 page 0 of 1024 words, its
-/// level-2 entry's access bits `<27:26>` (appendix A1.7); on a 32-bit QUUX
+/// level-2 entry's access bits `<27:26>` (appendix A1.7); on the CADR
 /// page 1 of 256, `<23:22>`.
 fn machine(geometry: Geometry) -> Machine {
     let mut m = Machine::new();
@@ -267,7 +266,7 @@ fn a_checkpoint_keeps_40_bit_words_at_every_microcycle() {
     every("rtl", Rtl::new);
 }
 
-/// **On a 32-bit machine the same program leaves 32-bit words**: main
+/// **On a 32-bit machine, the CADR, the same program leaves 32-bit words**: main
 /// memory holds `<31:0>` of what was put there, and nothing above bit 31
 /// appears anywhere. So a 32-bit machine's words stay 32 bits, whatever the
 /// type that holds them.
@@ -288,18 +287,16 @@ fn a_32_bit_machine_keeps_32_bits() {
         .enumerate()
         .map(|(k, w)| if k == 12 { (low(W1) + low(W2)) & 0xffff_ffff } else { low(w) })
         .collect();
-    check("micro", &run(Micro::new(machine(Geometry::QUUX))), &expect);
-    check("rtl", &run(Rtl::new(machine(Geometry::QUUX))), &expect);
+    check("micro", &run(Micro::new(machine(Geometry::CADR))), &expect);
+    check("rtl", &run(Rtl::new(machine(Geometry::CADR))), &expect);
 }
 
-/// **The machines the executables run are 32 bits wide**; only revision 13,
-/// which a test builds, is 40.
+/// **The CADR is 32 bits wide, and QUUX 40.**
 #[test]
-fn the_cadr_and_quux_are_32_bits_wide() {
-    for g in [Geometry::CADR, Geometry::QUUX, Geometry::QUUX_11] {
-        assert_eq!(g.word_bits, 32, "{g:?}");
-        assert_eq!(g.word_mask(), 0xffff_ffff, "{g:?}");
-    }
+fn the_cadr_is_32_bits_wide_and_quux_40() {
+    assert_eq!(Geometry::CADR.word_bits, 32);
+    assert_eq!(Geometry::CADR.word_mask(), 0xffff_ffff);
+    assert_eq!(WIDE.word_bits, 40);
     assert_eq!(WIDE.word_mask(), 0xff_ffff_ffff);
 }
 
@@ -308,7 +305,7 @@ fn the_cadr_and_quux_are_32_bits_wide() {
 #[test]
 fn a_40_bit_machine_writes_a_checkpoint_file() {
     assert_eq!(machine(WIDE).checkpoint_refusal(), None);
-    assert_eq!(machine(Geometry::QUUX).checkpoint_refusal(), None);
+    assert_eq!(machine(Geometry::CADR).checkpoint_refusal(), None);
 }
 
 /// **A 32-bit machine's checkpoint is the bytes it always was**: every
@@ -326,7 +323,7 @@ fn a_32_bit_checkpoint_writes_four_bytes_a_word() {
     let words = 1024 + 32 + muir::machine::PDL_WORDS + 3 + muir::machine::MAIN_WORDS;
     let entries = (4096 - 2048) + (8192 - 2048) + (4096 - 2048);
     assert_eq!(
-        body(WIDE) - body(Geometry::QUUX),
+        body(WIDE) - body(Geometry::CADR),
         words + 1 + 1 + 4 * entries,
         "a byte a word, the width, the overflow flag, and 4 bytes a new entry"
     );

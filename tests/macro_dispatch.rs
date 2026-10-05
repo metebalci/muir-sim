@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! QUUX's MACRO-DISPATCH register, its MACRO DISPATCH MEMORY, the fused
-//! return and the operand address (contract H8a, revision 12), on
-//! hand-written microcode.
+//! return and the operand address (contract H8a), on hand-written
+//! microcode.
 //!
 //! Functional destination 5 writes the register (`<13:0>` the main loop's
 //! address, `<31>` the enable), 6 the memory's index and 7 the entry at it.
@@ -17,15 +17,15 @@
 //! LOCAL or ARG, PDL-INDEX is loaded with the operand's address at the end
 //! of the microcycle after the return.
 //!
-//! On `rtl`, revision 12 has the cache-only prefetch too, with the line's
-//! reach (contract H8a §3.5): a return that needs the next word in sequence
-//! fuses when the fetch before left it in the buffer. `micro` has no cache
-//! and fuses only the returns that need no fetch, so on revision 12 the two
+//! On `rtl`, QUUX has the cache-only prefetch too, with the page's reach
+//! (contract H8a §3.5, G2 §9): a return that needs the next word in
+//! sequence fuses when the fetch before left it in the buffer. `micro` has
+//! no cache and fuses only the returns that need no fetch, so the two
 //! engines fuse different returns and take different microcycles, and leave
 //! the same state wherever the handlers keep §3.3's rule; the tests that
 //! compare them count each engine's fused returns ([`fused_on`]).
 //!
-//! The main loop here is made as microcode 2000's `QMLP` is
+//! The main loop here is made as microcode 2001's `QMLP` is
 //! (`uc-macrocode.lisp:9-13`): the condition-6 call, `M-INST-BUFFER <- MD`,
 //! `(DISPATCH-XCT-NEXT M-INST-OP OPDTB)` on the halfword's `<13:9>`, and the
 //! push of `A-MAIN-DISPATCH` back.
@@ -61,9 +61,12 @@ const STOP: u16 = 0o177;
 /// The handler a specialised entry names ([`specialised`]): it counts in
 /// M 7.
 const SPECIAL: u64 = 0o300;
-/// The main loop's `<13:9>` rotate, `IR<4:0>` = 23: the field at `<9>`
-/// brought to `<0>`.
-const OP_ROTATE: u64 = 32 - 9;
+/// The main loop's `<13:9>` rotate, `IR<4:0>`: the field at `<9>` brought
+/// to `<0>`, 23 in the CADR's ring of 32, and 31 in QUUX's ring of 40, LC
+/// byte mode adding 24 for halfword 0 (contract G2 appendix A1.2).
+fn op_rotate(geometry: Geometry) -> u64 {
+    geometry.word_bits as u64 - 9
+}
 
 /// A halfword: `<13:9>` the opcode and `<8:6>` the register.
 const fn hw(op: u32, reg: u32) -> u32 {
@@ -75,9 +78,9 @@ const fn hwd(op: u32, reg: u32, delta: u32) -> u32 {
     hw(op, reg) | delta
 }
 
-/// Where the register names `A-LOCALP`, A memory 432 as in microcode 2000
-/// (`uc-parameters.lisp:1071`), and `M-AP`, M memory 21
-/// (`uc-parameters.lisp:384`).
+/// Where the register names `A-LOCALP`, A memory 432 as in microcode 2001
+/// (`uc-parameters.lisp:1192`), and `M-AP`, M memory 21
+/// (`uc-parameters.lisp:475`).
 const LOCALP_AT: u64 = 0o432;
 const AP_AT: u64 = 0o21;
 /// What they hold at the start: `A-LOCALP` near the top of the PDL
@@ -129,10 +132,11 @@ const OPERANDS: [u32; 14] = [
 /// entries, on `engine`: in pairs, PDL-INDEX at the handler's first
 /// microcycle and in the microcycle after its return. The second halfwords
 /// with LOCAL or ARG find the operand's address, masked to fourteen bits;
-/// on `rtl` so does the second word's first halfword, ARG with delta 0,
-/// whose return fuses on the prefetched word (the first word's fetch left
-/// the second, in its line, in the buffer). Every other push finds
-/// [`SENTINEL`], the microcycle after a return included.
+/// on `rtl` so do the second word's first halfword, ARG with delta 0, and
+/// the fifth's, LOCAL with delta 77, whose returns fuse on the prefetched
+/// word (each word's fetch left the next, in the first word's line of
+/// eight, in the buffer). Every other push finds [`SENTINEL`], the
+/// microcycle after a return included.
 fn operand_records(engine: &str) -> Vec<u32> {
     let s = SENTINEL;
     vec![
@@ -151,7 +155,7 @@ fn operand_records(engine: &str) -> Vec<u32> {
         s,
         s,
         s,
-        s,
+        if engine == "rtl" { (LOCALP + 0o77) & 0o37777 } else { s },
         s,
         (LOCALP + 0o77) & 0o37777,
         s,
@@ -309,7 +313,7 @@ fn machine(s: Setup) -> Machine {
     put(
         &mut prom,
         QMLP + 2,
-        DISPATCH | m_src(0o31) | 3 << 10 | rot(OP_ROTATE) | d_len(5) | d_addr(OPDTB),
+        DISPATCH | m_src(0o31) | 3 << 10 | rot(op_rotate(s.geometry)) | d_len(5) | d_addr(OPDTB),
     );
     put(&mut prom, QMLP + 3, ALU | SETA | a_src(0o50) | fd(0o15));
     // Opcode 5's entry falls through (R and P): it lands here after the
@@ -396,16 +400,27 @@ fn machine(s: Setup) -> Machine {
     m.amem[0o50] = u64::from(MAIN);
     m.amem[0o51] = u64::from(s.register);
     m.amem[0o52] = u64::from(s.code * 4);
-    m.amem[0o53] = if s.sequence_break { 1 << 26 } else { 0 };
+    // `SEQUENCE.BREAK`: `<26>` on the CADR, `<34>` on QUUX (contract G2
+    // appendix A1.6).
+    let sequence_break = if s.geometry.wide() { 1 << 34 } else { 1 << 26 };
+    m.amem[0o53] = if s.sequence_break { sequence_break } else { 0 };
     m.amem[SENTINEL_AT as usize] = u64::from(SENTINEL);
     m.amem[LOCALP_AT as usize] = u64::from(LOCALP);
     m.amem[0o56] = u64::from(LOCALP_2);
     m.mmem[AP_AT as usize] = u64::from(AP);
     m.amem[AP_AT as usize] = u64::from(AP);
     m.pdl_index = SENTINEL as u16;
-    let rw = (1 << 23) | (1 << 22);
-    m.l2_map[1] = rw | 1;
-    m.l2_map[2] = rw | 2;
+    // QUUX's virtual pages 0 and 1, of 1024 words, onto physical pages 0
+    // and 1 (contract G2 §2.6); the CADR's 1 and 2, of 256.
+    if s.geometry.wide() {
+        let rw = (1 << 27) | (1 << 26);
+        m.l2_map[0] = rw;
+        m.l2_map[1] = rw | 1;
+    } else {
+        let rw = (1 << 23) | (1 << 22);
+        m.l2_map[1] = rw | 1;
+        m.l2_map[2] = rw | 2;
+    }
     for (k, pair) in s.program.chunks(2).enumerate() {
         m.main[s.code as usize + k] = u64::from(pair[0] | pair[1] << 16);
     }
@@ -479,21 +494,21 @@ fn fusing(returns_fuse: impl Fn(u32) -> bool) -> u64 {
 
 /// **The returns into [`PROGRAM`] that fuse on the prefetched word**, by
 /// halfword: into a word's first halfword, which needs a fetch, where the
-/// word is not the first of its line of four (the line the fetch before it
-/// filled holds it, and the line's reach looks nowhere else), from a
+/// word is not the first of its line of eight (the line the fetch before it
+/// filled holds it, and the next line is not yet held), from a
 /// handler whose return fuses into an entry with R and P clear. `rtl`
-/// fuses these on revision 12 as well; `micro`, with no cache, does not.
+/// fuses these as well; `micro`, with no cache, does not.
 fn fusing_prefetched(returns_fuse: impl Fn(u32) -> bool) -> Vec<usize> {
     let op = |h: u32| h >> 9 & 0o37;
     (2..PROGRAM.len())
         .step_by(2)
-        .filter(|&k| !(CODE as usize + k / 2).is_multiple_of(4))
+        .filter(|&k| !(CODE as usize + k / 2).is_multiple_of(8))
         .filter(|&k| op(PROGRAM[k - 1]) != 7 && returns_fuse(op(PROGRAM[k - 1])))
         .filter(|&k| !matches!(op(PROGRAM[k]), 5 | 6))
         .collect()
 }
 
-/// How many returns in [`PROGRAM`] fuse on `engine` at revision 12: those
+/// How many returns in [`PROGRAM`] fuse on `engine`: those
 /// that need no fetch, and on `rtl` those its prefetch holds the word for.
 fn fused_on(engine: &str, returns_fuse: impl Fn(u32) -> bool + Copy) -> u64 {
     let prefetched = if engine == "rtl" { fusing_prefetched(returns_fuse).len() } else { 0 };
@@ -509,10 +524,9 @@ fn saved_on(engine: &str, returns_fuse: impl Fn(u32) -> bool + Copy) -> u64 {
 }
 
 /// **Destinations 5 to 7 write the register, the index and the entry**
-/// from revision 12, each as well as M, as every functional destination
-/// does: the register keeps `<31>` and `<28:0>`, the index its ten bits
-/// and the entry its eighteen. On revision 11 and on the CADR they write
-/// only M.
+/// on QUUX, each as well as M, as every functional destination does: the
+/// register keeps `<31>` and `<28:0>`, the index its ten bits and the
+/// entry its eighteen. On the CADR they write only M.
 #[test]
 fn destinations_5_to_7_write_the_register_the_index_and_the_entry() {
     let prom = [
@@ -534,7 +548,7 @@ fn destinations_5_to_7_write_the_register_the_index_and_the_entry() {
         m.amem[0o55] = 0o1234567;
         m
     };
-    for geometry in [Geometry::QUUX, Geometry::QUUX_11, Geometry::CADR] {
+    for geometry in [Geometry::QUUX, Geometry::CADR] {
         let mut e = Micro::new(program(geometry));
         e.boot();
         e.run(12);
@@ -681,25 +695,18 @@ fn another_main_loop_is_not_fused() {
     }
 }
 
-/// **Revision 11 has none of it, nor has the CADR**: the register written
-/// with the enable changes nothing there, destination 5 writing only M,
-/// and `rtl` has no prefetch.
+/// **The CADR has none of it**: the register written with the enable
+/// changes nothing there, destination 5 writing only M, and `rtl` has no
+/// prefetch.
 #[test]
-fn revision_11_and_the_cadr_have_none_of_it() {
-    let off = both(Setup::off());
-    for geometry in [Geometry::QUUX_11, Geometry::CADR] {
-        let r = Rtl::new(machine(Setup { geometry, ..Setup::on() }));
-        assert_eq!(r.prefetch(), None, "{geometry:?}");
-        let on = both(Setup { geometry, ..Setup::on() });
-        for ((name, n_off, m_off), (_, n_on, m_on)) in off.iter().zip(on.iter()) {
-            assert_eq!(counts(m_on)[..6], COUNTS, "{geometry:?}, {name}");
-            assert_eq!(m_on.macro_dispatch.register, 0, "{geometry:?}, {name}");
-            assert_eq!(m_on.macro_dispatch.fused, 0, "{geometry:?}, {name}");
-            if geometry == Geometry::QUUX_11 {
-                assert_eq!(state(m_on), state(m_off), "{name}");
-                assert_eq!(n_on, n_off, "{name}");
-            }
-        }
+fn the_cadr_has_none_of_it() {
+    let geometry = Geometry::CADR;
+    let r = Rtl::new(machine(Setup { geometry, ..Setup::on() }));
+    assert_eq!(r.prefetch(), None);
+    for (name, _, m_on) in both(Setup { geometry, ..Setup::on() }) {
+        assert_eq!(counts(&m_on)[..6], COUNTS, "{name}");
+        assert_eq!(m_on.macro_dispatch.register, 0, "{name}");
+        assert_eq!(m_on.macro_dispatch.fused, 0, "{name}");
     }
 }
 
@@ -779,58 +786,52 @@ fn a_control_store_write_clears_the_enable() {
 }
 
 /// **A checkpoint keeps the register, the index and the entries**, the
-/// base copies as they stand, an armed operand address, and whether the
-/// machine is revision 12 or 11 (contract H8a §3.6): nothing is loaded
-/// from A and M memory at restore. The count of fused returns is not the
-/// machine's.
+/// base copies as they stand, and an armed operand address (contract H8a
+/// §3.6): nothing is loaded from A and M memory at restore. The count of
+/// fused returns is not the machine's.
 #[test]
 fn a_checkpoint_keeps_the_register_and_the_memory() {
     use muir::checkpoint::{Reader, Writer};
-    for geometry in [Geometry::QUUX, Geometry::QUUX_11] {
-        let mut m = machine(Setup { geometry, ..Setup::on() });
-        m.macro_dispatch.register = enabled();
-        m.macro_dispatch.index = 0o1001;
-        m.macro_dispatch.entries[0o1777] = 0o777777;
-        m.macro_dispatch.fused = 5;
-        // An operand address armed, and base copies that A and M memory
-        // do not hold, as they stand after destination 5 and before the
-        // microcode writes `A-LOCALP` and `M-AP`: the file carries both.
-        m.macro_dispatch.operand = Some(Operand { arg: true, delta: 0o52 });
-        // And a prefetched word armed for M 31 (the prefetch's (a)).
-        m.macro_dispatch.m31 = Some(0o12345670123);
-        m.macro_dispatch.localp = 1;
-        m.macro_dispatch.ap = 2;
-        let mut w = Writer::new();
-        m.save(&mut w);
-        let body = w.finish();
-        let mut back = Machine::new();
-        back.load(&mut Reader::new(&body)).unwrap();
-        assert_eq!(back.geometry, geometry);
-        assert_eq!(back.macro_dispatch.register, enabled(), "{geometry:?}");
-        assert_eq!(back.macro_dispatch.index, 0o1001, "{geometry:?}");
-        assert_eq!(back.macro_dispatch.entries, m.macro_dispatch.entries, "{geometry:?}");
-        assert_eq!(back.macro_dispatch.fused, 0, "{geometry:?}");
-        assert_eq!(Machine::checkpointed_geometry(&body).unwrap(), geometry);
-        assert_eq!(back.macro_dispatch.operand, m.macro_dispatch.operand, "{geometry:?}");
-        assert_eq!(back.macro_dispatch.m31, Some(0o12345670123), "{geometry:?}");
-        assert_eq!(
-            (back.macro_dispatch.localp, back.macro_dispatch.ap),
-            (1, 2),
-            "{geometry:?}: the base copies kept, not loaded from A and M memory"
-        );
-    }
+    let geometry = Geometry::QUUX;
+    let mut m = machine(Setup { geometry, ..Setup::on() });
+    m.macro_dispatch.register = enabled();
+    m.macro_dispatch.index = 0o1001;
+    m.macro_dispatch.entries[0o1777] = 0o777777;
+    m.macro_dispatch.fused = 5;
+    // An operand address armed, and base copies that A and M memory do not
+    // hold, as they stand after destination 5 and before the microcode
+    // writes `A-LOCALP` and `M-AP`: the file carries both.
+    m.macro_dispatch.operand = Some(Operand { arg: true, delta: 0o52 });
+    // And a prefetched word armed for M 31 (the prefetch's (a)).
+    m.macro_dispatch.m31 = Some(0o12345670123);
+    m.macro_dispatch.localp = 1;
+    m.macro_dispatch.ap = 2;
+    let mut w = Writer::new();
+    m.save(&mut w);
+    let body = w.finish();
+    let mut back = Machine::new();
+    back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
+    assert_eq!(back.geometry, geometry);
+    assert_eq!(back.macro_dispatch.register, enabled());
+    assert_eq!(back.macro_dispatch.index, 0o1001);
+    assert_eq!(back.macro_dispatch.entries, m.macro_dispatch.entries);
+    assert_eq!(back.macro_dispatch.fused, 0);
+    assert_eq!(Machine::checkpointed_geometry_at(&body, 40).unwrap(), geometry);
+    assert_eq!(back.macro_dispatch.operand, m.macro_dispatch.operand);
+    assert_eq!(back.macro_dispatch.m31, Some(0o12345670123));
+    assert_eq!(
+        (back.macro_dispatch.localp, back.macro_dispatch.ap),
+        (1, 2),
+        "the base copies kept, not loaded from A and M memory"
+    );
 }
 
-/// **MACHINE-ID says revision 12, and feature word 17 the MACRO DISPATCH
-/// MEMORY's 1,024 entries**; revision 11 says 11 and reads 0 there, as
-/// every unused word does.
+/// **Feature word 17 says the MACRO DISPATCH MEMORY's 1,024 entries**;
+/// the CADR has no feature page.
 #[test]
-fn revision_12_says_so() {
-    let word_17 = (Geometry::FEATURE_PAGE << 8) | 0o17;
-    assert_eq!(Geometry::QUUX.machine_id.unwrap() >> 4 & 0o7777, 12);
+fn feature_word_17_says_so() {
+    let word_17 = muir::machine::REGISTER_PAGE_13 | 0o17;
     assert_eq!(Geometry::QUUX.feature_word(word_17), Some(1024));
-    assert_eq!(Geometry::QUUX_11.machine_id.unwrap() >> 4 & 0o7777, 11);
-    assert_eq!(Geometry::QUUX_11.feature_word(word_17), Some(0));
     assert_eq!(Geometry::CADR.feature_word(word_17), None);
 }
 
@@ -858,12 +859,12 @@ fn records(m: &Machine) -> Vec<u32> {
 
 /// [`RECORD`]'s returns over [`OPERANDS`] that fuse on `engine`, and of
 /// them those into [`RECORD`] again. On `micro` the four into second
-/// halfwords, each into [`RECORD`]. On `rtl` five more on the fetch path,
-/// its prefetch holding the second, third, fourth, sixth and seventh
-/// words (the fifth starts a line): of those, the second's and the
-/// fourth's first halfwords are [`RECORD`].
+/// halfwords, each into [`RECORD`]. On `rtl` six more on the fetch path,
+/// its prefetch holding the second to the seventh words, all in the first
+/// word's line of eight: of those, the second's, the fourth's and the
+/// fifth's first halfwords are [`RECORD`].
 fn record_returns(engine: &str) -> (u64, u64) {
-    if engine == "rtl" { (4 + 5, 4 + 2) } else { (4, 4) }
+    if engine == "rtl" { (4 + 6, 4 + 3) } else { (4, 4) }
 }
 
 /// **The operand address** (contract H8a §3.4, §6 item 4), on both engines:
@@ -876,15 +877,15 @@ fn record_returns(engine: &str) -> (u64, u64) {
 /// microinstruction itself is the new one. A register other than LOCAL and ARG, and a
 /// return that is not fused, load nothing; and the run takes the same
 /// microcycles as without the operand bit. On `rtl` the returns into the
-/// first halfwords of the second, third, fourth, sixth and seventh words
-/// fuse too, on the prefetched word (the fifth starts a line), and one of
-/// them, ARG, loads.
+/// first halfwords of the second to the seventh words fuse too, on the
+/// prefetched word (all seven are in one line of eight), and two of them,
+/// ARG and LOCAL, load.
 #[test]
 fn a_fused_return_loads_the_operand_address() {
     let plain = both(Setup { operand: false, ..Setup::operands() });
     for ((name, n, m), (_, n_plain, _)) in both(Setup::operands()).iter().zip(plain.iter()) {
         assert_eq!(records(m), operand_records(name), "{name}");
-        let fused = if *name == "rtl" { 6 + 5 } else { 6 };
+        let fused = if *name == "rtl" { 6 + 6 } else { 6 };
         assert_eq!(m.macro_dispatch.fused, fused, "{name}: the six second halfwords");
         assert_eq!(n, n_plain, "{name}: no microcycle more or less");
     }
@@ -936,7 +937,7 @@ fn run_checked<E: Executes>(mut e: Checked<E>) -> (u64, Counts) {
 fn the_checkers_find_the_programs_clean() {
     for (s, fused, loads) in [
         (Setup::on(), [fused_on("micro", fuses), fused_on("rtl", fuses)], [0, 0]),
-        (Setup::operands(), [6, 6 + 5], [5, 6]),
+        (Setup::operands(), [6, 6 + 6], [5, 7]),
         (Setup::off(), [0, 0], [0, 0]),
     ] {
         for (k, (name, c)) in checked(s).into_iter().enumerate() {
@@ -1075,15 +1076,18 @@ fn a_pdl_write_by_index_after_a_fused_return_lands_at_the_operand_address() {
         }
         assert_eq!(micro.pdl[prefetched as usize], 0, "operand bit {operand}");
         assert_eq!(rtl.pdl[prefetched as usize], want, "operand bit {operand}");
-        // The third push, the second word's first halfword's.
-        let pushed = if operand { AP + 1 } else { SENTINEL };
-        assert_eq!(
-            (support::low(micro.pdl[3]), support::low(rtl.pdl[3])),
-            (SENTINEL, pushed),
-            "operand bit {operand}"
-        );
+        // The third push, the second word's first halfword's, and the
+        // eighth, the fifth word's.
+        for (at, loads) in [(3, AP + 1), (8, (LOCALP + 0o77) & 0o37777)] {
+            let pushed = if operand { loads } else { SENTINEL };
+            assert_eq!(
+                (support::low(micro.pdl[at]), support::low(rtl.pdl[at])),
+                (SENTINEL, pushed),
+                "operand bit {operand}, push {at}"
+            );
+        }
         let (mut a, mut b) = (micro.pdl, rtl.pdl);
-        for at in [prefetched as usize, 3] {
+        for at in [prefetched as usize, 3, 8] {
             (a[at], b[at]) = (0, 0);
         }
         assert!(a == b, "operand bit {operand}: the engines agree elsewhere");
@@ -1241,8 +1245,8 @@ fn the_generic_fill_arms_only_a_register_and_a_delta() {
 
 use muir::memory_port::{Drop, PrefetchCounts, Reach};
 
-/// The prefetch's two reaches: the line's, revision 12's, and the page's,
-/// a measurement's.
+/// The prefetch's two reaches: the line's, a measurement's, and the
+/// page's, QUUX's.
 const FORMS: [Reach; 2] = [Reach::Line, Reach::Page];
 
 /// A change made to the machine once, after the first microcycle that
@@ -1390,8 +1394,8 @@ const TOUCH: u32 = 0o17;
 const TOUCH_AT: u64 = 0o310;
 /// A 60: the word stored over the program's second word; A 61 its
 /// address; A 62 the program's page's virtual address; A 63 the map word
-/// sending it to physical page 2; A 64 the location counter of the
-/// program's second word; A 65 the word [`TOUCH`] reads.
+/// sending it to physical page 2 ([`page_2`]); A 64 the location counter
+/// of the program's second word; A 65 the word [`TOUCH`] reads.
 const NEW_WORD: u32 = hw(2, 0) | hw(2, 0) << 16;
 
 /// Word 0 runs opcode 1 and then the opcode under test; word 1, opcode 1
@@ -1406,16 +1410,27 @@ const INVALIDATE: [[u32; 6]; 5] = [
     [hw(1, 0), hw(3, 0), hw(1, 0), hw(1, 0), hw(7, 0), hw(7, 0)],
 ];
 
+/// Where [`CODE`] lands once [`MAP`]'s write has sent its page to
+/// physical page 2: on QUUX pages of 1024 words, on the CADR of 256.
+fn page_2(m: &Machine) -> usize {
+    if m.geometry.wide() {
+        2 << 10 | CODE as usize & 0o1777
+    } else {
+        2 << 8 | CODE as usize & 0o377
+    }
+}
+
 /// The handlers the invalidation programs run, their words, and physical
 /// page 2 for [`MAP`].
 fn invalidators(m: &mut Machine) {
     handlers(m);
     // Physical page 2, where the map write sends the program's page: the
     // program again, with the new word second.
+    let at = page_2(m);
     for k in 0..3 {
-        m.main[0o1000 + k] = m.main[CODE as usize + k];
+        m.main[at + k] = m.main[CODE as usize + k];
     }
-    m.main[0o1001] = u64::from(NEW_WORD);
+    m.main[at + 1] = u64::from(NEW_WORD);
 }
 
 /// The handlers the invalidation programs run, and their words.
@@ -1433,7 +1448,8 @@ fn handlers(m: &mut Machine) {
     put(m, STORE_LATE_AT + 2, filler().raw());
     put(m, STORE_LATE_AT + 3, filler().raw() | POPJ);
     // MAP: MD the page's address, then `VMA-WRITE-MAP` (functional
-    // destination 23) with level 2's enable, `VMA<25>`.
+    // destination 23) with level 2's enable, `VMA<28>` on QUUX and
+    // `VMA<25>` on the CADR, and the entry, readable and writable.
     put(m, MAP_AT, ALU | SETA | a_src(0o62) | muir::isa::asm::MD);
     put(m, MAP_AT + 1, ALU | SETA | a_src(0o63) | fd(0o23));
     put(m, MAP_AT + 2, filler().raw() | POPJ);
@@ -1461,7 +1477,11 @@ fn handlers(m: &mut Machine) {
     m.amem[0o60] = u64::from(NEW_WORD);
     m.amem[0o61] = u64::from(CODE + 1);
     m.amem[0o62] = u64::from(CODE);
-    m.amem[0o63] = 1 << 25 | 1 << 23 | 1 << 22 | 2;
+    m.amem[0o63] = if m.geometry.wide() {
+        1 << 28 | 1 << 27 | 1 << 26 | 2
+    } else {
+        1 << 25 | 1 << 23 | 1 << 22 | 2
+    };
     m.amem[0o64] = u64::from((CODE + 1) * 4 + 2);
 }
 
@@ -1528,11 +1548,12 @@ fn the_checkers_find_a_stale_prefetched_word() {
 
 /// **The page's reach takes the next line's word when the cache holds it,
 /// the line's does not, and neither looks past the page**: a program whose
-/// fourth word ends a line reads the fifth's line first ([`TOUCH`]), and
-/// the return into the fifth fuses under [`Reach::Page`] alone. Put at the
-/// end of a page, the same program's return into the next page's first
-/// word fuses under neither, the cache holding it: the prefetch never
-/// looks past the page, which is what keeps it from ever needing the map.
+/// fourth word ends a line of eight, at 404, reads the fifth's line first
+/// ([`TOUCH`]), and the return into the fifth fuses under [`Reach::Page`]
+/// alone. Put at the end of a page of 1024 words, at 1774, the same
+/// program's return into the next page's first word fuses under neither,
+/// the cache holding it: the prefetch never looks past the page, which is
+/// what keeps it from ever needing the map.
 #[test]
 fn the_page_reach_takes_the_next_line_and_never_the_next_page() {
     const LINES: [u32; 12] = [
@@ -1551,14 +1572,14 @@ fn the_page_reach_takes_the_next_line_and_never_the_next_page() {
     ];
     fn touch_next_line(m: &mut Machine) {
         handlers(m);
-        m.amem[0o65] = u64::from(CODE + 4);
+        m.amem[0o65] = u64::from(CODE + 8);
     }
     fn touch_next_page(m: &mut Machine) {
         handlers(m);
-        m.amem[0o65] = 0o1000;
+        m.amem[0o65] = 0o2000;
     }
     for (code, patch, page_end) in
-        [(CODE, touch_next_line as fn(&mut Machine), false), (0o774, touch_next_page, true)]
+        [(CODE + 4, touch_next_line as fn(&mut Machine), false), (0o1774, touch_next_page, true)]
     {
         let s = Setup { program: &LINES, code, patch: Some(patch), ..Setup::on() };
         let off = run_prefetched(s, None, None);
@@ -1598,46 +1619,39 @@ fn reset_drops_the_prefetched_word() {
     assert_eq!(r.prefetch_counts().unwrap().dropped[Drop::Reset as usize], 1);
 }
 
-/// **Revision 12 has the prefetch, with the line's reach, and nothing else
-/// has**: `rtl` fits it on revision 12 from the start, and runs
-/// [`PROGRAM`] exactly as with [`Reach::Line`] fitted by hand, fusing the
-/// returns [`fusing_prefetched`] names on top of those `micro` fuses, in
-/// four microcycles fewer each; revision 11 and the CADR have none, their
-/// buffer never filled.
+/// **QUUX has the prefetch, with the page's reach, and the CADR has
+/// not**: `rtl` fits it from the start, and runs [`PROGRAM`] exactly as
+/// with [`Reach::Page`] fitted by hand, fusing the returns
+/// [`fusing_prefetched`] names on top of those `micro` fuses, in four
+/// microcycles fewer each; the CADR has none, its buffer never filled.
 #[test]
-fn revision_12_takes_the_prefetch() {
+fn quux_takes_the_prefetch() {
     let r = Rtl::new(machine(Setup::on()));
-    assert_eq!(r.prefetch(), Some(Reach::Line));
-    assert_eq!(Reach::REVISION_12, Reach::Line);
-    let line = run_prefetched(Setup::on(), Some(Reach::Line), None);
+    assert_eq!(r.prefetch(), Some(Reach::Page));
+    let page = run_prefetched(Setup::on(), Some(Reach::Page), None);
     let off = run_prefetched(Setup::on(), None, None);
     let (n, m) = run(Rtl::new(machine(Setup::on())));
-    assert_eq!(n, line.n, "the default is the line's reach");
-    assert_eq!(m.macro_dispatch.fused, line.m.macro_dispatch.fused);
+    assert_eq!(n, page.n, "the default is the page's reach");
+    assert_eq!(m.macro_dispatch.fused, page.m.macro_dispatch.fused);
     let k = fusing_prefetched(fuses).len() as u64;
     assert!(k >= 4);
     assert_eq!(m.macro_dispatch.fused, fusing(fuses) + k);
     assert_eq!(off.n - n, 4 * k);
     let (_, micro) = run(Micro::new(machine(Setup::on())));
     assert_eq!(micro.macro_dispatch.fused, fusing(fuses), "micro has no prefetch");
-    for geometry in [Geometry::QUUX_11, Geometry::CADR] {
-        let s = Setup { geometry, ..Setup::on() };
-        let mut r = Rtl::new(machine(s));
-        assert_eq!(r.prefetch(), None, "{geometry:?}");
-        r.boot();
-        while r.machine().opc != STOP {
-            r.step().unwrap();
-            assert_eq!(r.prefetched(), None, "{geometry:?}");
-        }
-        if geometry == Geometry::QUUX_11 {
-            assert_eq!(r.prefetch_counts(), Some(PrefetchCounts::default()), "nothing taken");
-        }
+    let s = Setup { geometry: Geometry::CADR, ..Setup::on() };
+    let mut r = Rtl::new(machine(s));
+    assert_eq!(r.prefetch(), None);
+    r.boot();
+    while r.machine().opc != STOP {
+        r.step().unwrap();
+        assert_eq!(r.prefetched(), None);
     }
 }
 
 /// **A checkpoint keeps the prefetched word, a fetch the port is yet to
 /// answer, and M 31's word armed** (contract H8a §3.6): `rtl` saved at
-/// every microcycle of [`PROGRAM`] on revision 12, and loaded into another,
+/// every microcycle of [`PROGRAM`] on QUUX, and loaded into another,
 /// saves the same file and runs on to the same end, in the same
 /// microcycles, as the run never saved; among those microcycles are ones
 /// with a word buffered and ones with M 31's word armed.
@@ -1669,7 +1683,7 @@ fn a_checkpoint_keeps_the_prefetched_word_and_the_armed_m31() {
         let body = w.finish();
         let mut resumed = Rtl::new(machine(Setup::on()));
         resumed.boot();
-        let mut r = Reader::new(&body);
+        let mut r = Reader::for_word_bits(&body, 40);
         resumed.load(&mut r).unwrap();
         r.done().unwrap();
         assert_eq!(resumed.prefetched(), straight.prefetched(), "at {at}");
@@ -1682,8 +1696,10 @@ fn a_checkpoint_keeps_the_prefetched_word_and_the_armed_m31() {
 }
 
 /// **A call in the microcycle after a fused return returns to the
-/// handler**: microcode 2000's `XTFIXP` returns by `(POPJ-AFTER-NEXT
-/// ...)` with `(CALL-NOT-EQUAL M-TEM A-4 XFALSE)` after it, a call with N
+/// handler**: `XTFIXP` returned by `(POPJ-AFTER-NEXT ...)` with
+/// `(CALL-NOT-EQUAL M-TEM A-4 XFALSE)` after it, before the microcode moved
+/// the call out (the two lines are a comment in microcode 2001's
+/// `uc-fctns.lisp:1143-1144`), a call with N
 /// whose return is the POPJ's target, the main loop or, fused, the
 /// handler. With opcode 1's POPJ followed by such a call, counting in
 /// M 27, the program leaves the state it leaves without the fused return

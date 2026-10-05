@@ -25,9 +25,10 @@ Install `rustup`, then open a new shell so `cargo` is on the path:
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 Build muir-sim and fetch QUUX's system, the current release of
-[muir-sys](https://github.com/metebalci/muir-sys). The compiler version is
-pinned in `rust-toolchain.toml`, and the release lands in `vendor/`, every
-file checked against its SHA-256 sum.
+[muir-sys](https://github.com/metebalci/muir-sys), System 2001, which runs
+on QUUX revision 13, the 40-bit word. The compiler version is pinned in
+`rust-toolchain.toml`, and the release lands in `vendor/`, every file
+checked against its SHA-256 sum.
 
     git clone https://github.com/metebalci/muir-sim
     cd muir-sim
@@ -39,13 +40,13 @@ folder beside it: copies of the release's `sys/` and `site/`, and an empty
 home to log in to. QUUX reads its files from that folder through a device
 of its own, so it needs no file server. Start the machine:
 
-    target/release/quux --micro --disk-pack vendor/run/release-2000-disk.vhd \
-        --file-root vendor/run/release-2000-root
+    target/release/quux --micro --disk-pack vendor/run/release-2001-disk.vhd \
+        --file-root vendor/run/release-2001-root
 
 It says where its terminal is and boots. Point any VNC viewer at
 `vnc://127.0.0.1:5900`, with no password: the display, keyboard and mouse
 are the machine's only way in or out. It boots to a Lisp Listener, System
-2000; `(login "LISPM" "HOST" t)` logs in. `--micro` is the faster engine;
+2001; `(login "LISPM" "HOST" t)` logs in. `--micro` is the faster engine;
 without it `quux` runs `rtl`, at the machine's own speed.
 
 ## The CADR

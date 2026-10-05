@@ -1,14 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! QUUX's memory port (contract Q6, revision 7). Main memory is off the
-//! Xbus: the processor reaches it through its own port, through the cache
-//! --- always fitted, 4K words in lines of 4, 2-way, a hit in 20 ns, the
-//! write buffer --- to main memory at one nominal timing, a line fill in
-//! 380 ns and a write in 290. Device registers are never cached; an address
-//! nothing answers, past main memory's end or in the old Unibus window,
-//! fails with the NXM bit (at once since Q7, `tests/quux_device_registers.rs`).
-//! QUUX has no bus interface; the CADR keeps its own.
+//! QUUX's memory port (contract Q6). Main memory is off the Xbus: the
+//! processor reaches it through its own port, through the cache --- always
+//! fitted, 4K words in lines of 8 (contract G2 §3), 2-way, a hit in 20 ns,
+//! the write buffer --- to main memory at one nominal timing, a write in
+//! 290 ns and a line fill in 380 ns for two 64-bit beats and a tick more
+//! for each of the three more a line of 40 bytes takes, 410 ns. Device
+//! registers are never cached; an address nothing answers, past main
+//! memory's end, fails at once with the NXM bit
+//! (`tests/quux_device_registers.rs`). QUUX has no bus interface; the CADR
+//! keeps its own.
 
 use muir::cache::{CacheConfig, MemoryTiming};
 use muir::engine::Engine;
@@ -45,10 +47,13 @@ fn machine(geometry: Geometry, prom: &[Insn], addresses: &[u32]) -> Machine {
     words[..prom.len()].copy_from_slice(prom);
     m.load_prom(&words);
     support::prom_program_in_ram(&mut m);
-    let rw = (1 << 23) | (1 << 22);
     for (k, &p) in addresses.iter().enumerate() {
-        m.l2_map[1 + k] = rw | (p >> 8);
-        m.mmem[1 + k] = u64::from(((1 + k as u32) << 8) | (p & 0xff));
+        m.mmem[1 + k] = if geometry.wide() {
+            support::quux_map(&mut m, 1 + k as u32, p).into()
+        } else {
+            m.l2_map[1 + k] = (1 << 23) | (1 << 22) | (p >> 8);
+            u64::from(((1 + k as u32) << 8) | (p & 0xff))
+        };
     }
     for (k, w) in m.main[..0o4000].iter_mut().enumerate() {
         *w = u64::from(0o1000000 + k as u32);
@@ -71,7 +76,8 @@ fn run<E: Engine>(e: &mut E) {
 fn quux_has_a_memory_port_and_no_bus_interface() {
     let quux = Rtl::new(reading(Geometry::QUUX, &[0o1000]));
     assert!(quux.busint().is_none(), "no bus interface");
-    assert_eq!(quux.cache().map(|c| c.config), Some(CacheConfig::with_words(4096)));
+    let fitted = CacheConfig { line_words: 8, ..CacheConfig::with_words(4096) };
+    assert_eq!(quux.cache().map(|c| c.config), Some(fitted));
     assert_eq!(quux.memory_timing(), Some(MemoryTiming::NOMINAL));
     assert_eq!(MemoryTiming::NOMINAL, MemoryTiming { read_ns: 380, write_ns: 290 });
     let cadr = Rtl::new(reading(Geometry::CADR, &[0o1000]));
@@ -80,8 +86,8 @@ fn quux_has_a_memory_port_and_no_bus_interface() {
 }
 
 /// **A miss is a line fill at the nominal time, a hit the cache's**: the
-/// word read first misses and waits 380 ns for its line; the next word of
-/// the line hits and waits 20. Both are main memory's words.
+/// word read first misses and waits 410 ns for its line of 5 beats; the
+/// next word of the line hits and waits 20. Both are main memory's words.
 #[test]
 fn a_miss_fills_its_line_at_the_nominal_time() {
     let mut e = Rtl::new(reading(Geometry::QUUX, &[0o1000, 0o1001]));
@@ -99,7 +105,7 @@ fn a_miss_fills_its_line_at_the_nominal_time() {
     // whole microcycles: the miss's line fill, and the hit's 20 ns.
     let waits: Vec<u64> = at.windows(2).map(|w| w[1] - w[0]).filter(|&d| d > 40).collect();
     assert_eq!(waits.len(), 2, "the miss's and the hit's: {waits:?}");
-    assert!((380..=380 + 80).contains(&waits[0]), "the line fill: {waits:?}");
+    assert!((410..=410 + 80).contains(&waits[0]), "the line fill: {waits:?}");
     assert!(waits[1] <= 80, "the hit, a microcycle at most: {waits:?}");
 }
 
@@ -108,7 +114,7 @@ fn a_miss_fills_its_line_at_the_nominal_time() {
 #[test]
 fn a_device_register_is_never_cached() {
     use muir::quux_input::KeyboardMouse;
-    let data = 0o17777521;
+    let data = muir::machine::REGISTER_PAGE_13 | 0o121;
     let mut m = reading(Geometry::QUUX, &[data, data]);
     m.quux_input.press(0o101);
     m.quux_input.press(0o102);
@@ -199,7 +205,7 @@ fn a_checkpoint_keeps_the_memory_port() {
     e.save(&mut w);
     let body = w.finish();
     let mut back = Rtl::new(reading(Geometry::QUUX, &reads));
-    back.load(&mut Reader::new(&body)).unwrap();
+    back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
     for _ in 0..300 {
         e.step().unwrap();
         back.step().unwrap();
@@ -257,13 +263,13 @@ fn cycles(e: &mut Rtl) -> Vec<Cycle> {
 /// **`rtl` shows the running cycle's acknowledgement and grant on QUUX**:
 /// `bus_granted` is `-MEMGRANT` low, `bus_ack_at` when `-MEMACK` is due,
 /// forwarded from the memory port. A read miss is acknowledged as it is
-/// answered, a line fill (380 ns) after the edge that took it; a hit the
+/// answered, a line fill (410 ns, 5 beats) after the edge that took it; a hit the
 /// hit time (20 ns) after; a device register is answered at the edge and
 /// acknowledged a microcycle (40 ns at K=4) later; an empty address is
 /// answered and acknowledged at the edge.
 #[test]
 fn rtl_shows_the_memory_port_s_acknowledgement_and_grant() {
-    const REGISTER: u32 = 0o17777400;
+    const REGISTER: u32 = muir::machine::REGISTER_PAGE_13;
     const EMPTY: u32 = 0o17377400;
     let mut e = Rtl::new(reading(Geometry::QUUX, &[0o1000, 0o1001, REGISTER, EMPTY]));
     let cs = cycles(&mut e);
@@ -278,7 +284,7 @@ fn rtl_shows_the_memory_port_s_acknowledgement_and_grant() {
         assert!(c.held, "granted until acknowledged: {c:?}");
     }
     assert!(miss.inside > 0, "the line fill's hang seen from inside: {miss:?}");
-    assert_eq!((miss.answered - miss.edge, miss.ack - miss.edge), (380, 380), "miss: {miss:?}");
+    assert_eq!((miss.answered - miss.edge, miss.ack - miss.edge), (410, 410), "miss: {miss:?}");
     assert_eq!((hit.answered - hit.edge, hit.ack - hit.edge), (20, 20), "hit: {hit:?}");
     assert_eq!(register.answered, register.edge, "register: {register:?}");
     assert_eq!(register.ack, register.answered + 40, "register: {register:?}");

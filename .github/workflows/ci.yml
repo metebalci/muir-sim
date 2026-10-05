@@ -16,13 +16,9 @@
 # releases, the ones the stable fetch scripts are pinned to: QUUX's, which
 # its tests boot, and the CADR's current one. Each is cached on its script's
 # hash, so a bump of the pin is one fresh download. Never the rolling
-# release: its bytes move, and a test run has to be repeatable.
-#
-# `handover-2001` does the same for revision 13 until System 2001 is
-# released (contract G2 §11.2): muir-sys's newest hand-over of System 2001,
-# a pre-release whose tag never moves, which the fetch script is pinned to by
-# digest, and QUUX's release beside it. It runs the tests that boot that
-# band and hold PROM 2001 to it, and fails if any of them skipped.
+# release: its bytes move, and a test run has to be repeatable. Each fails
+# if a test that wants its release said it skipped: such a test says
+# "skipped:" with the release's directory or fetch script in the line.
 #
 # The compiler version comes from rust-toolchain.toml, so it is pinned here
 # the same way it is pinned on a desk. `--locked` refuses to update
@@ -147,65 +143,22 @@ jobs:
       - name: Cache QUUX's release
         uses: actions/cache@v4
         with:
-          path: vendor/system-2000
+          path: vendor/system-2001
           key: system-for-quux-${{ hashFiles('tools/fetch-system-for-quux.sh') }}
 
       - name: Fetch QUUX's release
         run: tools/fetch-system-for-quux.sh
 
-      # Everything, with QUUX's release there: its disk booted on both
-      # engines, its sources served through the file device, its PROM held
-      # to the built-in one.
+      # Everything, with QUUX's release there: System 2001 booted on both
+      # engines, restored, ticking, on the video controller and the file
+      # device, under H8a's checkers, rebooted, at three ticks, and scanned
+      # for the clocks' codes; PROM 2001 held to the release's. A test that
+      # found no release says "skipped:", which fails the job.
       - name: Tests, with QUUX's release
-        run: cargo test --locked
-
-  handover-2001:
-    runs-on: ubuntu-latest
-    # A safety net, not a budget: the job takes far less. Without it a
-    # test that hangs runs until GitHub's six-hour limit.
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-handover-2001-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      # System 2000's disk too: the guard that revision 12's disk stops on
-      # revision 13 boots it.
-      - name: Cache QUUX's release
-        uses: actions/cache@v4
-        with:
-          path: vendor/system-2000
-          key: system-for-quux-${{ hashFiles('tools/fetch-system-for-quux.sh') }}
-
-      - name: Fetch QUUX's release
-        run: tools/fetch-system-for-quux.sh
-
-      - name: Cache the hand-over of System 2001
-        uses: actions/cache@v4
-        with:
-          path: ref/band-2001-81b3973
-          key: handover-2001-${{ hashFiles('tools/fetch-handover-2001.sh') }}
-
-      - name: Fetch the hand-over of System 2001
-        run: tools/fetch-handover-2001.sh
-
-      # System 2001 booted on revision 13 on both engines, restored, ticking,
-      # on the video controller and the file device, under H8a's checkers,
-      # and the guards between revisions; PROM 2001 held to the hand-over's.
-      # A test that found no band says "skipped:", which fails the job.
-      - name: Tests, with the hand-over of System 2001
         run: |
-          cargo test --locked --test system_2001 --test quux_prom -- --nocapture 2>&1 | tee test.out
-          if grep -n 'skipped:' test.out; then exit 1; fi
+          set -o pipefail
+          cargo test --locked -- --nocapture 2>&1 | tee test.out
+          if grep -nE 'skipped: .*(system-2001|fetch-system-for-quux)' test.out; then exit 1; fi
 
   system-for-cadr:
     runs-on: ubuntu-latest
@@ -229,13 +182,19 @@ jobs:
       - name: Cache the CADR's release
         uses: actions/cache@v4
         with:
-          path: vendor/system-1002
+          path: vendor/system-1003
           key: system-for-cadr-${{ hashFiles('tools/fetch-system-for-cadr.sh') }}
 
       - name: Fetch the CADR's release
         run: tools/fetch-system-for-cadr.sh
 
       # Everything, with the CADR's muir-sys release there: its pack booted
-      # to the listener on both engines, and opened read-only.
+      # to the listener on both engines, on its microcode renumbered, at 32
+      # and 60 boards for its herald, scanned for QUUX's codes, and opened
+      # read-only. A test that found no release says "skipped:", which
+      # fails the job.
       - name: Tests, with the CADR's release
-        run: cargo test --locked
+        run: |
+          set -o pipefail
+          cargo test --locked -- --nocapture 2>&1 | tee test.out
+          if grep -nE 'skipped: .*(system-1003|release-1003)' test.out; then exit 1; fi

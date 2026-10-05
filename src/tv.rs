@@ -121,16 +121,16 @@ pub const VIDEO_HEIGHT: usize = 1024;
 /// `BITBLT` needs of an array's first dimension (`sys/ucadr/uc-tv.lisp`,
 /// `BITBLT-DECODE-ARRAY`).
 pub const VIDEO_WORDS_PER_LINE: usize = 40;
-/// The video controller's buffer at its default size, 40,960 words from [`BUFFER`]: it
-/// ends at `17117777`, below the color TV's strap at `17200000`. The size
-/// is muir-fpga's Arty Z7-20's and DE25-Nano's; its Kria KR260's is 1920 by
-/// 1080, [`VIDEO_MAX_SIZE`].
+/// The video controller's buffer at its default size, 40,960 words. The
+/// size is muir-fpga's Arty Z7-20's and DE25-Nano's; its Kria KR260's is
+/// 1920 by 1080, [`VIDEO_MAX_SIZE`].
 pub const VIDEO_WORDS: u32 = (VIDEO_HEIGHT * VIDEO_WORDS_PER_LINE) as u32;
 
-/// The most the video controller's buffer can be: from [`BUFFER`] up to
-/// QUUX's register page at `17777400`, 261,888 words (contract Q13). The
-/// address map fixes it, and nothing states it to software.
-pub const VIDEO_MAX_WORDS: u32 = 0o17777400 - BUFFER;
+/// The most the video controller's buffer can be: QUUX's frame buffer
+/// window, `1760000000`-`1777775777` ([`crate::machine::WINDOW_13`]),
+/// 4,193,280 words. The address map fixes it, and nothing states it to
+/// software.
+pub const VIDEO_MAX_WORDS: u32 = 0o1777776000 - crate::machine::WINDOW_13;
 
 /// The largest video controller screen: QUUX supports up to 1920 by 1080
 /// (a revisable limit). Its 64,800 words also stay below the color TV's strap.
@@ -164,11 +164,11 @@ pub fn check_video_size(width: usize, height: usize, color_tv: bool) -> Result<(
     Ok(())
 }
 
-/// The words bound of [`check_video_size`]: a buffer of `words` fits below
-/// the register page, at most [`VIDEO_MAX_WORDS`] (contract Q13).
+/// The words bound of [`check_video_size`]: a buffer of `words` fits in
+/// the frame buffer window, at most [`VIDEO_MAX_WORDS`].
 pub fn check_video_words(words: u64) -> Result<(), String> {
     if words > VIDEO_MAX_WORDS as u64 {
-        return Err(format!("{words} words, past the {VIDEO_MAX_WORDS} below the register page"));
+        return Err(format!("{words} words, past the window's {VIDEO_MAX_WORDS}"));
     }
     Ok(())
 }

@@ -60,7 +60,7 @@ impl Drop for Scratch {
 /// Revision 13 with `words` of main memory.
 fn rev13(words: usize) -> Machine {
     let mut m = Machine::new();
-    m.geometry = Geometry::QUUX_13;
+    m.geometry = Geometry::QUUX;
     m.main = vec![0; words];
     m
 }
@@ -87,12 +87,12 @@ fn pattern(seed: u64) -> Vec<Word> {
         .collect()
 }
 
-/// **Revision 12's addresses are nothing on revision 13** when main memory
-/// does not reach them (G1 §3.2): its register page, `17777400`, and its
-/// frame buffer, `17000000`, fail with word 101's NXM bit; revision 13's
+/// **The CADR's device addresses are nothing on revision 13** when main
+/// memory does not reach them (G1 §3.2): its last page, `17777400`, and its
+/// TV's buffer, `17000000`, fail with word 101's NXM bit; the register
 /// page answers.
 #[test]
-fn revision_12s_addresses_are_nothing_on_revision_13() {
+fn the_cadr_s_device_addresses_are_nothing_on_revision_13() {
     let mut m = rev13(2 << 20);
     for phys in [0o17777400, 0o17777500, 0o17000000, 2 << 20] {
         m.bus_error = 0;
@@ -376,28 +376,29 @@ fn a_40_bit_checkpoint_is_packed_and_round_trips() {
     let mut back = Micro::new(rev13(0o100000));
     back.load(&mut c.reader()).unwrap();
     assert_eq!(back.machine().main, e.machine().main, "main memory back");
-    assert_eq!(back.machine().geometry, Geometry::QUUX_13);
+    assert_eq!(back.machine().geometry, Geometry::QUUX);
 }
 
-/// **A revision-12 checkpoint is refused on revision 13** (G2 §2.8), and a
-/// 32-bit machine's file keeps its version.
+/// **A 32-bit checkpoint, the CADR's, is refused on revision 13** (G2
+/// §2.8), and a 32-bit machine's file keeps its version. A checkpoint of
+/// revision 12 is refused by the machine it records
+/// (`a_revision_12_checkpoint_is_refused_by_its_machine` in
+/// `tests/quux_revision.rs`).
 #[test]
-fn a_revision_12_checkpoint_is_refused_on_revision_13() {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
-    let mut e = Micro::new(m);
+fn a_32_bit_checkpoint_is_refused_on_revision_13() {
+    let mut e = Micro::new(Machine::new());
     e.boot();
     let mut w = Writer::new();
     e.save(&mut w);
     let body = w.finish();
     let dir = Scratch::new("refuse");
-    let path = dir.path("r12.chk");
+    let path = dir.path("cadr.chk");
     muir::checkpoint::write(&path, "micro", e.machine().memory_boards(), 32, &body).unwrap();
     let c = muir::checkpoint::read(&path).unwrap();
     assert_eq!((c.version, c.word_bits), (muir::checkpoint::VERSION, 32));
     let mut back = Micro::new(rev13(0o100000));
     let err = back.load(&mut c.reader()).expect_err("refused");
-    assert!(err.to_string().contains("revision 12"), "{err}");
+    assert!(err.to_string().contains("32-bit words, the CADR's"), "{err}");
 }
 
 /// **`rtl` resumes revision 13 on revision 13's memory port** (G2 §3): a
@@ -535,7 +536,7 @@ fn read(p: &mut MemoryPort, now: u64, phys: u32, fetch: Option<u32>, main: &[Wor
 #[test]
 fn revision_13s_port_has_8_word_lines_and_page_reach() {
     let main = vec![0 as Word; 0o100000];
-    let mut p = MemoryPort::for_geometry(&Geometry::QUUX_13);
+    let mut p = MemoryPort::new();
     assert_eq!(p.cache().config.line_words, 8);
     assert_eq!(p.prefetch(), Some(Reach::Page), "revision 13's reach");
     let t = p.memory_timing();

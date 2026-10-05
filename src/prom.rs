@@ -58,42 +58,22 @@ pub fn boot_prom() -> Vec<Insn> {
     parse_mcr(PROMH_9MCR).expect("mit/sys/ubin/promh.mcr")
 }
 
-/// QUUX's boot PROM, version 2001, at control store 36000, for revision
-/// 13 (contract G2 §4.4): PROM 2000 (below) with the register page at
-/// `1777777400`, the GPT and the microcode partition read by 4-byte
-/// transfers, 4 blocks a page, the 40-bit A-memory section loaded and a
-/// partition without it refused at `ERROR-A-MEM-SECTION-32-BITS`, and its
-/// buffer and the microcode's main-memory section on 1024-word pages. In
-/// partition order. `data/README.md` has where it came from;
-/// `tests/quux_prom.rs` and `tests/system_2001.rs` hold it.
+/// QUUX's boot PROM, version 2001, at control store 36000 (contracts Q2,
+/// G2 §4.4): muir-sys's `promh.text`, block-disk only, saving nothing and
+/// finding the microcode through the disk's GPT (contract Q8), in
+/// partition order; the register page at `1777777400` and block-disk's
+/// registers at its words 200-203 (contract Q13); the GPT and the
+/// microcode partition read by 4-byte transfers, 4 blocks a page; the
+/// 40-bit A-memory section loaded and a partition without it refused at
+/// `ERROR-A-MEM-SECTION-32-BITS`; and its buffer and the microcode's
+/// main-memory section on 1024-word pages. `data/README.md` has where it
+/// came from; `tests/quux_prom.rs` and `tests/system_2001.rs` hold it.
 const QUUX_PROMH: &[u8] = include_bytes!("../data/quux-promh.mcr");
 
-/// QUUX's boot PROM, version 2000, at control store 36000 (contract Q2),
-/// for revision 12: muir-sys's `promh.text`, block-disk only, saving
-/// nothing and finding the microcode through the disk's GPT (contract Q8),
-/// in partition order, the register page mapped at physical page 37777 and
-/// block-disk's registers at its words 200-203 (contract Q13). It goes
-/// with revision 12 (contract G2 §11.1). `data/README.md` has where it came
-/// from; `tests/quux_prom.rs` holds it.
-const QUUX_PROMH_2000: &[u8] = include_bytes!("../data/quux-promh-2000.mcr");
-
 /// QUUX's boot PROM's microinstructions, [`PROM_WORDS`] of them, from
-/// 36000 up: PROM 2001, revision 13's.
+/// 36000 up: PROM 2001.
 pub fn quux_boot_prom() -> Vec<Insn> {
     parse_quux_mcr(QUUX_PROMH).expect("data/quux-promh.mcr")
-}
-
-/// PROM 2000's microinstructions, revision 12's, [`PROM_WORDS`] of them,
-/// from 36000 up.
-pub fn quux_12_boot_prom() -> Vec<Insn> {
-    parse_quux_mcr(QUUX_PROMH_2000).expect("data/quux-promh-2000.mcr")
-}
-
-/// The built-in boot PROM of a QUUX of `geometry`'s revision: PROM 2001
-/// on revision 13 ([`quux_boot_prom`]), PROM 2000 below it
-/// ([`quux_12_boot_prom`]).
-pub fn quux_boot_prom_for(geometry: crate::machine::Geometry) -> Vec<Insn> {
-    if geometry.wide() { quux_boot_prom() } else { quux_12_boot_prom() }
 }
 
 /// A QUUX boot PROM out of an MCR file in QUUX's partition order

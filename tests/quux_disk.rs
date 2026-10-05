@@ -354,15 +354,18 @@ fn a_raw_disk_of_any_size_opens() {
     assert!(!d.write_block(100, &[0; BLOCK_WORDS]));
     let mut bd = BlockDisk::new(block_disk::BLOCK_NS);
     bd.attach(d);
-    let mut main = vec![0u32; 1 << 16];
-    main[0o100] = 0o1000 | 1;
-    main[0o101] = 0o1400;
+    // Two pages by the 4-byte transfer, 4 blocks a page: 96-99, then 100,
+    // past the end, which leaves its page as it was.
+    let mut main = vec![0u64; 1 << 16];
+    main[0o100] = 0o2000 | 1;
+    main[0o101] = 0o4000;
     bd.write(block_disk::CLP, 0o100, &mut main);
-    bd.write(block_disk::DA, 99, &mut main);
-    bd.write(block_disk::COMMAND, 0, &mut main);
+    bd.write(block_disk::DA, 96, &mut main);
+    bd.write(block_disk::COMMAND, 1 << 12, &mut main);
     bd.write(block_disk::START, 0, &mut main);
     bd.advance(u64::MAX / 2);
-    assert_eq!(main[0o1000], 0x63636363, "block 99 moved");
+    assert_eq!(main[0o2000 + 3 * 256] as u32, 0x63636363, "block 99 moved");
+    assert_eq!(main[0o4000], 0, "the page past the end left as it was");
     let status = bd.read(block_disk::STATUS);
     assert_ne!(status & (1 << 17), 0, "block 100 is past the end");
     assert_eq!(bd.read(block_disk::DA), 100);

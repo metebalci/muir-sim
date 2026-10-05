@@ -40,10 +40,10 @@ and check every file against its SHA-256 sum:
 
 | Script | Fetches | Puts |
 |---|---|---|
-| `tools/fetch-system-for-quux.sh` | QUUX's current release of [muir-sys](https://github.com/metebalci/muir-sys), `release-2000`: System 2000 | `vendor/system-2000/`, the disk `vendor/run/release-2000-disk.vhd`, and the machine's host folder `vendor/run/release-2000-root/` |
+| `tools/fetch-system-for-quux.sh` | QUUX's current release of [muir-sys](https://github.com/metebalci/muir-sys), `release-2001`: System 2001 | `vendor/system-2001/`, the disk `vendor/run/release-2001-disk.vhd`, and the machine's host folder `vendor/run/release-2001-root/` |
 | `tools/fetch-dev-system-for-quux.sh` | QUUX's system in development, muir-sys's rolling release `dev-system-for-quux`, replaced with each build | `vendor/dev-system-for-quux/`, `vendor/run/dev-system-for-quux-disk.vhd`, `vendor/run/dev-system-for-quux-root/` |
 | `tools/fetch-system-100-for-cadr.sh` | MIT's System 100, the CADR's reference | `vendor/system-100-0/`, the pack `vendor/run/disk-sys-100-0.img`, and `vendor/run/file-root/` |
-| `tools/fetch-system-for-cadr.sh` | the CADR's current muir-sys release, `release-1002`: System 1002 | `vendor/system-1002/`, the pack `vendor/run/release-1002-pack.img` |
+| `tools/fetch-system-for-cadr.sh` | the CADR's current muir-sys release, `release-1003`: System 1003 | `vendor/system-1003/`, the pack `vendor/run/release-1003-pack.img` |
 
 The stable scripts are pinned: each holds its release's tag and the SHA-256
 of every file it takes, so the bytes the tests were written against stay
@@ -88,8 +88,8 @@ QUUX boots its release's disk, with its host folder as the file device's
 root:
 
 ```text
-target/release/quux --disk-pack vendor/run/release-2000-disk.vhd \
-    --file-root vendor/run/release-2000-root
+target/release/quux --disk-pack vendor/run/release-2001-disk.vhd \
+    --file-root vendor/run/release-2001-root
 ```
 
 Run `cadr` with no flags and it starts an `rtl` machine, presses the boot
@@ -752,8 +752,7 @@ Default: 32, the two million words.
 
 `quux` only: how much main memory, in whole megawords with the unit
 written, `--main-memory-size 32MW`. QUUX has no memory boards, so its
-memory is an amount. Revision 13 takes 1MW to 64MW and revision 12 1MW to 3MW, the
-whole megawords below its sixty 64K-word boards' 3.75MW.
+memory is an amount, 1MW to 64MW.
 
 Nothing else is taken: no other unit (`32KW`, `32MB`), no fraction
 (`1.5MW`), no bare number, and never a bare M (`32M`), which could be read
@@ -764,11 +763,11 @@ as megabytes. The unit is case-sensitive, as every flag's word is, so
 quux: --main-memory-size 32M: main memory is given in megawords, with the unit MW, such as 32MW
 ```
 
-and an amount outside the revision's range is refused naming the range.
+and an amount outside the range is refused naming the range.
 The start says the amount, `memory: 32MW`, and so do a resume and the
 prompt's `info`.
 
-Default: 32MW on revision 13, 2MW on revision 12.
+Default: 32MW.
 
 ### `--no-auto-boot`
 
@@ -877,7 +876,7 @@ order**, MIT's with the two 16-bit halves of every 32-bit word swapped, as
 muir-sys's builder writes QUUX's PROM and microcode, with the program
 assembled at `36000`, where QUUX's PROM sits. A file in MIT's order is
 refused saying so, and so is one assembled at 0. Default: QUUX's own,
-built in, `data/quux-promh-2000.mcr` ([QUUX](quux.md#its-boot-prom-in-its-own-addresses)).
+built in, `data/quux-promh.mcr`, PROM 2001 ([QUUX](quux.md#its-boot-prom-in-its-own-addresses)).
 
 ### `--resume <file>`
 
@@ -1010,10 +1009,12 @@ Default: `cadr`.
 
 **rtl, QUUX:** the size of QUUX's memory cache, `<words>`, a power of two:
 [QUUX's cache](quux.md), always fitted, unified and write-through, by
-physical address, main memory only, in lines of 4 words, 2-way, a hit in
-20 ns, with a one-word write buffer. It changes when the machine's reads
-and writes are answered and never what they read. The start says it and a
-checkpoint carries it. Refused on `micro`.
+physical address, main memory and the frame buffer and no device
+register, in lines of 8 words, 2-way, a hit in
+20 ns, with a one-word write buffer; at least 16 words, a set of two
+lines. It changes when the machine's reads and writes are answered and
+never what they read. The start says it and a checkpoint carries it.
+Refused on `micro`.
 
 Default: 4096.
 
@@ -1036,7 +1037,7 @@ Default: 380,290, the slower board's.
 `sync` timing. It is a board's: the number its fit proves its longest path
 settles in.
 
-Default: 4, the DE25-Nano's, and the Arty Z7-20's at revision 12.
+Default: 4, the DE25-Nano's. The Arty Z7-20 runs QUUX at 5.
 
 ### `--tv netlist|model`
 
@@ -1480,8 +1481,8 @@ A 1 GiB disk:
 ```
 qemu-img create -f raw quux.img 1G          # or: truncate -s 1G quux.img
 sgdisk \
-  -n 1:0:+256K -t 1:9e318cf5-a95b-4b3b-b2ad-9ae306b0e2da -c 1:"MCR1 UCADR 2000" -A 1:set:48 \
-  -n 2:0:+100M -t 2:a3b30470-c5d4-41c1-87a8-d26590424cb8 -c 2:"LOD1 System 2000.1" -A 2:set:48 \
+  -n 1:0:+256K -t 1:9e318cf5-a95b-4b3b-b2ad-9ae306b0e2da -c 1:"MCR1 UCADR 2001" -A 1:set:48 \
+  -n 2:0:+100M -t 2:a3b30470-c5d4-41c1-87a8-d26590424cb8 -c 2:"LOD1 System 2001" -A 2:set:48 \
   -n 3:0:+256M -t 3:4652bea5-06af-4bd9-b2bb-3541370151c8 -c 3:"PAGE" \
   -n 4:0:+600M -t 4:7afa9532-75de-409f-8dc8-fef9763511d5 -c 4:"FILE" \
   quux.img
@@ -1533,15 +1534,15 @@ The traps, each measured with qemu-img 10.2.1 and sgdisk 1.0.10:
   footer and says which it found.
 
 **Only the GPT PROM may meet a GPT disk.** QUUX's built-in PROM,
-`data/quux-promh-2000.mcr`, is the GPT PROM: it takes the first microcode
-partition carrying bit 48 and writes no block of the disk, and on a disk
-with no GPT it halts at `ERROR-NO-GPT`, 36642
-([QUUX](quux.md#its-boot-prom-in-its-own-addresses)). An older QUUX PROM
-given with `--prom` does not read the GPT, and one that saves page 0 to
-block 1 before it loads anything, as MIT's does, writes over sectors 2 and
-3, the start of the primary GPT's entry array, and breaks the primary table
-(muir-sys, measured). System 2000's band is a disk made this way, as a
-dynamic VHD ([QUUX](quux.md#the-disk-file)).
+`data/quux-promh.mcr`, PROM 2001, is a GPT PROM: it takes the first
+microcode partition carrying bit 48 and writes no block of the disk, and on
+a disk with no GPT it halts at `ERROR-NO-GPT`, 36653
+([QUUX](quux.md#its-boot-prom-in-its-own-addresses)). A PROM given with
+`--prom` that does not read the GPT, or that saves page 0 to block 1
+before it loads anything, as MIT's does, writes over sectors 2 and 3, the
+start of the primary GPT's entry array, and breaks the primary table
+(muir-sys, measured). System 2001's release disk is a disk made this way,
+as a dynamic VHD ([QUUX](quux.md#the-disk-file)).
 
 ## The Chaosnet
 

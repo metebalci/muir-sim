@@ -373,7 +373,7 @@ fn md_program(insn: Insn) -> Machine {
     // Level-2 entries 0 to 7: virtual pages onto physical pages 0 to 7,
     // readable and writable.
     for p in 0..8u32 {
-        m.l2_map[p as usize] = (1 << 23) | (1 << 22) | p;
+        m.l2_map[p as usize] = (1 << 27) | (1 << 26) | p;
     }
     m.main[0o1000] = u64::from(WORD);
     m.mmem[1] = 0o1000;
@@ -422,7 +422,8 @@ fn md_run<E: Engine>(
 /// microcycle is the first after the wait: `rtl` waits for a miss, `micro`
 /// has the word with no wait; on both a `DIV` ends 9 microcycles of 40 ns
 /// after it, ten after the wait, and a `MUL` with it. On `rtl` the read's start ends, the
-/// filler runs, the copy ends 12 microcycles later and the `DIV` 21.
+/// filler runs, the copy ends 13 microcycles later, the line's fill of 5
+/// beats taking 410 ns at the nominal timing, and the `DIV` 22.
 #[test]
 fn a_div_of_md_is_held_nine_microcycles_after_the_word_lands() {
     let div = Insn::new(ALU | DIV | SRC_MD | a_src(0o101) | m_dest(5));
@@ -442,7 +443,7 @@ fn a_div_of_md_is_held_nine_microcycles_after_the_word_lands() {
         assert_eq!((ob, q), want_mul, "{name}: MUL of the word read");
         assert_eq!(t_mul, t_copy, "{name}: MUL one microcycle after the wait");
     };
-    check("rtl", &|i| md_run(Rtl::new, Rtl::boot, Rtl::ns, Rtl::executed, i), 12);
+    check("rtl", &|i| md_run(Rtl::new, Rtl::boot, Rtl::ns, Rtl::executed, i), 13);
     // `micro`'s stand-in for the bus's waits is taken off: its time is
     // the microcycles alone.
     let micro = |m| {
@@ -589,6 +590,6 @@ fn a_checkpoint_keeps_the_divider_s_time() {
     e.save(&mut w);
     let body = w.finish();
     let mut resumed = make();
-    resumed.load(&mut Reader::new(&body)).unwrap();
+    resumed.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
     assert_eq!(ns_to_top(resumed, p.top, Rtl::ns), ns_to_top(e, p.top, Rtl::ns));
 }

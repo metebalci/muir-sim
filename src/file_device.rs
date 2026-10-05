@@ -13,7 +13,7 @@
 //! and `<8>` interrupt enable; 161 status, `<0>` enabled, `<1>` quiet,
 //! `<2>` configuration refused, `<3>` index fault, `<8>` a response waiting,
 //! `<23:16>` the handles open; 162 and 163 the command ring's base, a
-//! physical word address on a 4-word line, and the log2 of its entries,
+//! physical word address on an 8-word line, and the log2 of its entries,
 //! 0-8; 164 the command producer index (the processor's) and 165 the
 //! command consumer (the device's); 166 and 167 the response ring's base
 //! and size; 170 the response producer (the device's) and 171 the response
@@ -21,9 +21,9 @@
 //! slot is the index mod the size. An entry is 8 words, the layout's
 //! (`execute`'s comments say which word is which).
 //!
-//! **Revision 13** (contract G1 §4.4, G2 §4.3, appendix A1.10): the rings'
-//! bases and the buffers' addresses are 28-bit physical word addresses on
-//! an 8-word line; a buffer still holds 4 bytes a word, in `<31:0>`; every
+//! **Addresses and words** (contract G1 §4.4, G2 §4.3, appendix A1.10): the
+//! rings' bases and the buffers' addresses are 28-bit physical word
+//! addresses on an 8-word line; a buffer holds 4 bytes a word, in `<31:0>`; every
 //! word the device writes, a buffer's or a response's, is a fixnum, tag
 //! `005`; and it reads `<31:0>` of what it reads, whatever the tag.
 //!
@@ -538,10 +538,9 @@ fn put_bytes<W: MemoryWord>(main: &mut [W], at: usize, data: &[u8], tag: u8) {
     }
 }
 
-/// The machine's addresses and words, as the device takes them: revision
-/// 12's, 24-bit addresses on a 4-word line and untagged words; revision
-/// 13's (G1 §4.4, G2 §4.3, appendix A1.10), 28-bit addresses on an 8-word
-/// line, and every word it writes a fixnum, tag `005`.
+/// The machine's addresses and words, as the device takes them (G1 §4.4,
+/// G2 §4.3, appendix A1.10): 28-bit addresses on an 8-word line, and every
+/// word it writes a fixnum, tag `005`.
 #[derive(Clone, Copy)]
 struct Layout {
     address: u32,
@@ -549,15 +548,7 @@ struct Layout {
     tag: u8,
 }
 
-impl Layout {
-    fn of(revision_13: bool) -> Layout {
-        if revision_13 {
-            Layout { address: 0o1777777777, line: 7, tag: 0o005 }
-        } else {
-            Layout { address: 0xff_ffff, line: 3, tag: 0 }
-        }
-    }
-}
+const LAYOUT: Layout = Layout { address: 0o1777777777, line: 7, tag: 0o005 };
 
 /// The words of a response past word 0.
 #[derive(Clone, Copy, Default)]
@@ -611,10 +602,6 @@ pub struct FileDevice {
     /// Every line LOG printed, in order, when a test asks for the record by
     /// setting it to `Some`. Not kept in a checkpoint.
     pub log: Option<Vec<Vec<u8>>>,
-    /// Whether the machine is revision 13, whose addresses and tags the
-    /// device takes (the module's docs): the machine's, set
-    /// by it before each access. Not in a checkpoint.
-    pub revision_13: bool,
 }
 
 impl Default for FileDevice {
@@ -642,7 +629,6 @@ impl FileDevice {
             head_due: None,
             handles: vec![None; MAX_HANDLES],
             log: None,
-            revision_13: false,
         }
     }
 
@@ -746,7 +732,7 @@ impl FileDevice {
                 let (enable, ie) = (v & 1 != 0, v & 0x100 != 0);
                 match (on, enable) {
                     (false, true) => {
-                        let line = Layout::of(self.revision_13).line;
+                        let line = LAYOUT.line;
                         let fits = |base: u32, log2: u32| {
                             base as usize & line == 0
                                 && log2 <= 8
@@ -767,9 +753,9 @@ impl FileDevice {
                     (false, false) => {}
                 }
             }
-            CMD_BASE if !on => self.cmd_base = v & Layout::of(self.revision_13).address,
+            CMD_BASE if !on => self.cmd_base = v & LAYOUT.address,
             CMD_SIZE if !on => self.cmd_log2 = v & 0o17,
-            RESP_BASE if !on => self.resp_base = v & Layout::of(self.revision_13).address,
+            RESP_BASE if !on => self.resp_base = v & LAYOUT.address,
             RESP_SIZE if !on => self.resp_log2 = v & 0o17,
             CMD_PROD if on => {
                 let new = v as u16;
@@ -868,7 +854,7 @@ impl FileDevice {
             }
         };
         let r = self.resp_base as usize + 8 * (self.cmd_cons % self.resp_entries()) as usize;
-        let fix = Layout::of(self.revision_13).tag;
+        let fix = LAYOUT.tag;
         main[r] = W::tagged(tag | st << 16 | opcode << 24, fix);
         for (m, &v) in main[r + 1..r + 8].iter_mut().zip(&reply.0) {
             *m = W::tagged(v, fix);
@@ -893,7 +879,7 @@ impl FileDevice {
         if flags & !allowed != 0 {
             return Err(status::BAD_ARGUMENT);
         }
-        let layout = Layout::of(self.revision_13);
+        let layout = LAYOUT;
         let a = || buffer(main, c[2], c[3], layout);
         let b = || buffer(main, c[4], c[5], layout);
         match opcode {

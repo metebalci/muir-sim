@@ -15,18 +15,20 @@ use muir::clock::TimingModel;
 use muir::engine::Engine;
 use muir::isa::Insn;
 use muir::isa::asm::{
-    ADD, ALU, ALWAYS, CARRY_IN, JUMP, M_PLUS_C, MD, SETM, SRC_MD, START_READ, START_WRITE, a_dest,
-    a_src, filler, m_dest, m_src, target,
+    ADD, ALU, ALWAYS, AND, CARRY_IN, JUMP, M_PLUS_C, MD, SETM, SRC_MD, START_READ, START_WRITE,
+    a_dest, a_src, filler, m_dest, m_src, target,
 };
 use muir::machine::{Geometry, Machine};
 use muir::rtl::Rtl;
 
 mod support;
 
-/// A cache that saves nothing: one word, no write buffer. QUUX has no
-/// run without its cache (contract Q6), so this is the measure against.
+/// The least cache QUUX's port fits, which [`reader`] gets nothing from:
+/// two lines of 8 words in one set, and no write buffer. QUUX has no run
+/// without its cache (contract Q6), and its line is 8 words (contract G2
+/// §3), so this is the measure against.
 const NONE: CacheConfig =
-    CacheConfig { words: 1, line_words: 1, ways: 1, hit_ns: 20, write_buffer: false };
+    CacheConfig { words: 16, line_words: 8, ways: 2, hit_ns: 20, write_buffer: false };
 
 /// **Lines, sets and replacement**: a line of 4 fills on its first word's
 /// miss and hits on the other three; a 2-way set keeps the two most
@@ -54,15 +56,18 @@ fn a_line_fills_and_the_least_recently_used_goes() {
     assert!(CacheConfig { words: 48, ..c.config }.check().is_err(), "not a power of two");
 }
 
-/// A loop that reads main memory word by word from 1000, adding each word
-/// into A 3 and stepping the address in M 1.
+/// A loop that reads main memory a line of 8 apart from 1000, round the
+/// eight lines 1000-1077, adding each word into A 3 and stepping the
+/// address in M 1: [`NONE`]'s two lines miss every read, and a cache that
+/// holds the eight hits every one after the first round.
 fn reader() -> Machine {
     let prom = [
         Insn::new(ALU | SETM | m_src(1) | START_READ),
         filler(),
         filler(),
         Insn::new(ALU | ADD | SRC_MD | a_src(3) | a_dest(3)),
-        Insn::new(ALU | M_PLUS_C | CARRY_IN | m_src(1) | m_dest(1)),
+        Insn::new(ALU | ADD | m_src(1) | a_src(5) | m_dest(1)),
+        Insn::new(ALU | AND | m_src(1) | a_src(6) | m_dest(1)),
         Insn::new(JUMP | target(0) | ALWAYS),
     ];
     let mut m = Machine::new();
@@ -74,12 +79,14 @@ fn reader() -> Machine {
     // Level-2 entries 0 to 7: virtual pages onto physical pages 0 to 7,
     // readable and writable.
     for p in 0..8u32 {
-        m.l2_map[p as usize] = (1 << 23) | (1 << 22) | p;
+        m.l2_map[p as usize] = (1 << 27) | (1 << 26) | p;
     }
     for (k, w) in m.main[..2048].iter_mut().enumerate() {
         *w = u64::from((k as u32).wrapping_mul(2_654_435_761));
     }
     m.mmem[1] = 0o1000;
+    m.amem[5] = 8;
+    m.amem[6] = 0o1077;
     m
 }
 
@@ -98,9 +105,9 @@ fn run(cache: Option<CacheConfig>, model: TimingModel, steps: usize) -> Rtl {
 }
 
 /// **The cache changes when, not what**: after the same microcycles the
-/// machine holds the same words with it as without, under the CADR's
-/// timing and under `sync`, and it got there sooner, three words of each
-/// line of four hitting.
+/// machine holds the same words with it as with [`NONE`], under `sync` of
+/// four ticks and of three, and it got there sooner, every read after the
+/// first round of eight hitting.
 #[test]
 fn the_cache_changes_when_and_not_what() {
     let steps = 3_000;
@@ -116,7 +123,7 @@ fn the_cache_changes_when_and_not_what() {
         let c = with.cache().unwrap();
         let reads = c.hits + c.misses;
         assert!(reads > 50, "{model:?}: {reads} reads");
-        assert!(c.hits * 4 >= reads * 3 - 4, "{model:?}: {} hits in {reads}", c.hits);
+        assert_eq!(c.hits, reads - 8, "{model:?}: {} hits in {reads}", c.hits);
         eprintln!("{model:?}: {} ns with the cache, {} without", with.ns(), without.ns());
     }
 }
@@ -157,7 +164,7 @@ fn a_checkpoint_keeps_the_cache() {
     e.save(&mut w);
     let body = w.finish();
     let mut back = Rtl::new(reader());
-    back.load(&mut Reader::new(&body)).unwrap();
+    back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
     for _ in 0..500 {
         e.step().unwrap();
         back.step().unwrap();

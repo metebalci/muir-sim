@@ -3,7 +3,7 @@
 
 //! QUUX's network device (contract Q4): the CADR's Chaosnet interface,
 //! its registers in the same order and with the same bits, at words
-//! 140-145 of the register page (`17777400`), where the CADR has them at
+//! 140-145 of the register page (`1777777400`), where the CADR has them at
 //! Unibus `764140`-`764152`: word 140 + k is Unibus `764140` + 2k. Only
 //! its five real registers are decoded (contract Q13): 144, 146 and 147
 //! are reserved, where the CADR's board answers aliases. Its interrupt is
@@ -15,7 +15,7 @@ use muir::machine::{Geometry, Machine, bus_error};
 
 mod support;
 
-const PAGE: u32 = 0o17777400;
+const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
 const INTERRUPTS: u32 = PAGE + 0o100;
 const NET: u32 = PAGE + 0o140;
 

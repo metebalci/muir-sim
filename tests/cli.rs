@@ -518,17 +518,22 @@ fn quux_runs_on_sync_alone() {
 }
 
 /// **`--cache` is QUUX's and `rtl`'s**: it runs there and the start says
-/// the cache, and it is refused on `cadr`, on `micro`, and at a size that
-/// is not a power of two.
+/// the cache, its lines 8 words (contract G2 §3), and it is refused on
+/// `cadr`, on `micro`, at a size that is not a power of two, and at one
+/// smaller than a set of two 8-word lines, 16 words being the least.
 #[test]
 fn the_cache_is_quux_s_and_rtl_s() {
-    let out = quux().args(["--rtl", "--cache", "4096", "--stop-after", "1"]).run();
-    let t = text(&out);
-    assert!(out.status.success(), "{t}");
-    assert!(t.contains("cache: 4096 words, lines of 4, 2-way"), "the start says it:\n{t}");
+    for words in ["4096", "16"] {
+        let out = quux().args(["--rtl", "--cache", words, "--stop-after", "1"]).run();
+        let t = text(&out);
+        assert!(out.status.success(), "{t}");
+        let says = format!("cache: {words} words, lines of 8, 2-way");
+        assert!(t.contains(&says), "the start says it:\n{t}");
+    }
     refused_saying("cadr", &["--rtl", "--cache", "4096"], "--cache is quux's, not cadr's");
     refused_saying("quux", &["--micro", "--cache", "4096"], "--cache is rtl's");
     refused_saying("quux", &["--rtl", "--cache", "3000"], "--cache:");
+    refused_saying("quux", &["--rtl", "--cache", "8"], "fewer words than one set's lines");
 }
 
 /// **QUUX's main memory is on its own port** (contract Q6): the start
@@ -541,7 +546,7 @@ fn quux_s_memory_port_and_its_timing() {
     let t = text(&out);
     assert!(out.status.success(), "{t}");
     assert!(t.contains("memory port: a line fill in 380 ns, a write in 290"), "{t}");
-    assert!(t.contains("cache: 4096 words, lines of 4, 2-way"), "always fitted:\n{t}");
+    assert!(t.contains("cache: 4096 words, lines of 8, 2-way"), "always fitted:\n{t}");
     let out = quux().args(["--rtl", "--memory-timing", "arty", "--stop-after", "1"]).run();
     let t = text(&out);
     assert!(t.contains("memory port: a line fill in 220 ns, a write in 120"), "{t}");
@@ -696,7 +701,7 @@ fn quux_s_disk_is_block_disk_only() {
 /// word for word, and MIT's, in MIT's order, is refused saying so.
 #[test]
 fn quux_s_prom_is_assembled_at_36000() {
-    let own = concat!(env!("CARGO_MANIFEST_DIR"), "/data/quux-promh-2000.mcr");
+    let own = concat!(env!("CARGO_MANIFEST_DIR"), "/data/quux-promh.mcr");
     let out = quux().args(["--rtl", "--prom", own, "--stop-after", "1"]).run();
     let t = text(&out);
     assert!(out.status.success(), "{t}");
@@ -706,11 +711,12 @@ fn quux_s_prom_is_assembled_at_36000() {
 }
 
 /// A disk QUUX's PROM boots: `data/quux-disk.img`, the GPT disk sgdisk
-/// made, with MIT's microcode 323, `mit/sys/ubin/ucadr.mcr`, in partition
-/// order at its current `MCR1`'s first block, as `dd` writes it. The PROM
+/// made, with MIT's microcode 323, `mit/sys/ubin/ucadr.mcr`, in revision
+/// 13's shapes and partition order at its current `MCR1`'s first block, as
+/// `dd` writes it (`support::ucadr_323_at_40_partition_order`). The PROM
 /// finds the microcode through the GPT and does not care whose it is.
 fn quux_pack(dir: &Path) -> PathBuf {
-    support::quux_gpt_disk(dir, &support::ucadr_323_partition_order()).0
+    support::quux_gpt_disk(dir, &support::ucadr_323_at_40_partition_order()).0
 }
 
 /// The PC a run ended at and after how many microcycles, from its last
@@ -881,7 +887,7 @@ fn the_executable_is_the_machine_and_quux_has_no_netlist() {
         assert!(out.status.success(), "{engine}: {t}");
         assert!(t.contains("machine: quux"), "{engine} says which machine:\n{t}");
         assert!(
-            t.contains("QUUX's data/quux-promh-2000.mcr, version 2000"),
+            t.contains("QUUX's data/quux-promh.mcr, version 2001"),
             "{engine}: QUUX's PROM:\n{t}"
         );
         let out = cadr().args([engine, "--stop-after", "1"]).run();

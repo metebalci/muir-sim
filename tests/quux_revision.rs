@@ -1,20 +1,17 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! **Which revision `quux` runs** (contract G2 §8.1): revision 12, the
-//! released machine, unless `MUIR_QUUX_REVISION` says 13. The switch is
-//! not a documented flag, since it goes when revision 12 is retired. It is
-//! read once, where the machine is built, so the start's lines, main
-//! memory's default and limits, and a resume's refusal all see the
-//! revision the machine is. `cadr` does not read it. The boot PROM alone
-//! is run, so nothing here needs `vendor/`.
+//! **`quux` runs revision 13** (contract G2): a 40-bit word, its MACHINE-ID
+//! saying 13, 32MW of main memory by default (G2 §3), PROM 2001 built in,
+//! and on `rtl` the memory cache's 8-word lines; and a checkpoint of QUUX
+//! revision 12, the 32-bit machine before it, is refused by its version,
+//! which says so (G2 §11.1). The boot PROM alone is run, so nothing here
+//! needs `vendor/`.
 
 mod support;
 
 use muir::machine::{Geometry, Machine};
 use support::{Run, cadr, quux, scratch, text};
-
-const SWITCH: &str = "MUIR_QUUX_REVISION";
 
 /// The machine a checkpoint was written of, and how many 64K-word boards
 /// of main memory it had: read from the file, so it is the machine the
@@ -35,194 +32,126 @@ fn checkpointed_prom(path: &std::path::Path) -> Vec<muir::isa::Insn> {
     m.prom.clone()
 }
 
-/// **Each revision's `--prom` is held to its own built-in PROM**: PROM
-/// 2001's file on revision 13, and PROM 2000's on revision 12, are each
-/// said to be QUUX's own word for word, and each on the other revision
-/// is not.
+/// **PROM 2001's file is QUUX's own word for word** as `--prom` says it.
 #[test]
-fn prom_files_are_held_to_their_revision_s_prom() {
-    let file = |f: &str| format!("{}/data/{f}", env!("CARGO_MANIFEST_DIR"));
-    for (rev, own, other) in [
-        ("13", "quux-promh.mcr", "quux-promh-2000.mcr"),
-        ("12", "quux-promh-2000.mcr", "quux-promh.mcr"),
-    ] {
-        for (f, same) in [(own, true), (other, false)] {
-            let out = quux()
-                .env(SWITCH, rev)
-                .args(["--micro", "--prom", &file(f), "--stop-after", "1"])
-                .run();
-            let t = text(&out);
-            assert!(out.status.success(), "{rev} {f}: {t}");
-            assert_eq!(t.contains("QUUX's own word for word"), same, "{rev} {f}: {t}");
-        }
-    }
+fn prom_2001_s_file_is_quux_s_own() {
+    let file = format!("{}/data/quux-promh.mcr", env!("CARGO_MANIFEST_DIR"));
+    let out = quux().args(["--micro", "--prom", &file, "--stop-after", "1"]).run();
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(t.contains("QUUX's own word for word"), "{t}");
 }
 
-fn refused(out: &std::process::Output, says: &str) {
-    let t = text(out);
-    assert_eq!(out.status.code(), Some(2), "not refused at the start:\n{t}");
-    assert!(t.contains(says), "the refusal says {says:?}:\n{t}");
-}
-
-/// **`MUIR_QUUX_REVISION=13` runs revision 13**: a 40-bit word, its
-/// MACHINE-ID saying 13, 32MW of main memory (G2 §3), PROM 2001
-/// built in, and on `rtl` the memory cache's 8-word lines. The checkpoint is the machine the run
+/// **`quux` runs revision 13**: a 40-bit word, its MACHINE-ID saying 13,
+/// 32MW of main memory (G2 §3), PROM 2001 built in, and on `rtl` the
+/// memory cache's 8-word lines. The checkpoint is the machine the run
 /// built; the start says the same.
 #[test]
-fn the_switch_runs_revision_13() {
+fn quux_runs_revision_13() {
     let dir = scratch("revision-13");
     for engine in ["--micro", "--rtl"] {
         let chk = dir.join(format!("{}.chk", &engine[2..]));
-        let out = quux()
-            .env(SWITCH, "13")
-            .args([engine, "--stop-after", "10", "--checkpoint"])
-            .arg(&chk)
-            .run();
+        let out = quux().args([engine, "--stop-after", "10", "--checkpoint"]).arg(&chk).run();
         let t = text(&out);
         assert!(out.status.success(), "{engine}: the run failed:\n{t}");
         let (g, bits, boards) = checkpointed(&chk);
-        assert_eq!(g, Geometry::QUUX_13, "{engine}: the machine built");
+        assert_eq!(g, Geometry::QUUX, "{engine}: the machine built");
         assert_eq!(g.machine_id.map(|id| id >> 4 & 0o7777), Some(13), "{engine}: MACHINE-ID");
         assert_eq!(bits, 40, "{engine}: the word");
         assert_eq!(boards << 16, 32 << 20, "{engine}: 32MW of main memory");
         assert!(t.contains("memory: 32MW\n"), "{engine}: {t}");
         assert!(t.contains("machine: quux, revision 13: "), "{engine}: {t}");
-        assert!(!t.contains("machine: quux, revision 12"), "{engine}: {t}");
         assert!(t.contains("QUUX's data/quux-promh.mcr, version 2001"), "{engine}: {t}");
         assert_eq!(checkpointed_prom(&chk), muir::prom::quux_boot_prom(), "{engine}: PROM 2001");
         if engine == "--rtl" {
             assert!(t.contains("cache: 4096 words, lines of 8, 2-way"), "{t}");
         }
+        let out = quux().args([engine, "--stop-after", "10", "--resume"]).arg(&chk).run();
+        assert!(out.status.success(), "{engine}: its checkpoint resumes: {}", text(&out));
     }
-    // `--cache`'s sizes keep revision 13's line.
-    let out =
-        quux().env(SWITCH, "13").args(["--rtl", "--cache", "8192", "--stop-after", "1"]).run();
+    // `--cache`'s sizes keep the 8-word line.
+    let out = quux().args(["--rtl", "--cache", "8192", "--stop-after", "1"]).run();
     let t = text(&out);
     assert!(out.status.success(), "{t}");
     assert!(t.contains("cache: 8192 words, lines of 8, 2-way"), "{t}");
 }
 
-/// **Unset, or 12, is revision 12**, as it was: a 32-bit word, 2MW,
-/// PROM 2000 built in, 4-word lines.
-#[test]
-fn unset_is_revision_12() {
-    let dir = scratch("revision-12");
-    for set in [None, Some("12")] {
-        for engine in ["--micro", "--rtl"] {
-            let chk = dir.join(format!("{}-{}.chk", &engine[2..], set.unwrap_or("unset")));
-            let mut c = quux();
-            if let Some(v) = set {
-                c.env(SWITCH, v);
-            }
-            let out = c.args([engine, "--stop-after", "10", "--checkpoint"]).arg(&chk).run();
-            let t = text(&out);
-            assert!(out.status.success(), "{set:?} {engine}: the run failed:\n{t}");
-            let (g, bits, boards) = checkpointed(&chk);
-            assert_eq!(g, Geometry::QUUX, "{set:?} {engine}");
-            assert_eq!((bits, boards), (32, 32), "{set:?} {engine}");
-            assert!(t.contains("memory: 2MW\n"), "{set:?} {engine}: {t}");
-            assert!(t.contains("machine: quux, revision 12: "), "{set:?} {engine}: {t}");
-            assert!(
-                t.contains("QUUX's data/quux-promh-2000.mcr, version 2000"),
-                "{set:?} {engine}: {t}"
-            );
-            assert_eq!(
-                checkpointed_prom(&chk),
-                muir::prom::quux_12_boot_prom(),
-                "{set:?} {engine}: PROM 2000"
-            );
-            if engine == "--rtl" {
-                assert!(t.contains("cache: 4096 words, lines of 4, 2-way"), "{t}");
-            }
-        }
-    }
-}
-
-/// **Any other value is refused at the start**, naming the two.
-#[test]
-fn another_revision_is_refused() {
-    for v in ["14", "11", "", "13 ", "thirteen"] {
-        let out = quux().env(SWITCH, v).args(["--micro", "--stop-after", "1"]).run();
-        refused(&out, &format!("quux: {SWITCH}={v:?}: revision 12 or 13"));
-    }
-}
-
-/// **`cadr` does not read it**: the CADR is the CADR whatever it says.
-#[test]
-fn cadr_does_not_read_it() {
-    for v in ["13", "14"] {
-        let out = cadr().env(SWITCH, v).args(["--micro", "--stop-after", "1"]).run();
-        let t = text(&out);
-        assert!(out.status.success(), "{v}: {t}");
-        assert!(t.contains("memory: 32 boards, 2 MW"), "{v}: {t}");
-        assert!(!t.contains("revision"), "{v}: {t}");
-    }
-}
-
-/// **Each revision refuses the other's checkpoint**, on both engines,
-/// saying which revision wrote it and how to resume it; its own resumes.
-#[test]
-fn each_revision_refuses_the_other_s_checkpoint() {
-    let dir = scratch("revision-checkpoint");
-    for engine in ["--micro", "--rtl"] {
-        let c12 = dir.join(format!("12-{}.chk", &engine[2..]));
-        let c13 = dir.join(format!("13-{}.chk", &engine[2..]));
-        let out = quux().args([engine, "--stop-after", "100", "--checkpoint"]).arg(&c12).run();
-        assert!(out.status.success(), "{engine}: {}", text(&out));
-        let out = quux()
-            .env(SWITCH, "13")
-            .args([engine, "--stop-after", "100", "--checkpoint"])
-            .arg(&c13)
-            .run();
-        assert!(out.status.success(), "{engine}: {}", text(&out));
-
-        let out = quux()
-            .env(SWITCH, "13")
-            .args([engine, "--stop-after", "10", "--resume"])
-            .arg(&c12)
-            .run();
-        let p = c12.display();
-        refused(
-            &out,
-            &format!(
-                "--resume {p} is revision 12's, and this is revision 13: {SWITCH}=12 quux --resume {p}"
-            ),
-        );
-        let out = quux().args([engine, "--stop-after", "10", "--resume"]).arg(&c13).run();
-        let p = c13.display();
-        refused(
-            &out,
-            &format!(
-                "--resume {p} is revision 13's, and this is revision 12: {SWITCH}=13 quux --resume {p}"
-            ),
-        );
-
-        let out = quux().args([engine, "--stop-after", "10", "--resume"]).arg(&c12).run();
-        assert!(out.status.success(), "{engine}: 12 resumes 12: {}", text(&out));
-        let out = quux()
-            .env(SWITCH, "13")
-            .args([engine, "--stop-after", "10", "--resume"])
-            .arg(&c13)
-            .run();
-        assert!(out.status.success(), "{engine}: 13 resumes 13: {}", text(&out));
-    }
-}
-
-/// **`--cache` takes no size smaller than a set of the revision's lines**:
-/// on revision 13, whose lines are 8 words, 2-way, 8 words is refused at the
-/// start, as a shape of no sets, and 16 is taken; revision 12, whose lines
-/// are 4 words, takes 8.
+/// **`--cache` takes no size smaller than a set of revision 13's lines**:
+/// its lines are 8 words, 2-way, so 8 words is refused at the start, as a
+/// shape of no sets, and 16 is taken.
 #[test]
 fn the_cache_is_at_least_a_set_of_the_revision_s_lines() {
-    let out = quux().env(SWITCH, "13").args(["--rtl", "--cache", "8", "--stop-after", "1"]).run();
-    refused(&out, "--cache: ");
-    refused(&out, "fewer words than one set's lines");
-    let out = quux().env(SWITCH, "13").args(["--rtl", "--cache", "16", "--stop-after", "1"]).run();
+    let out = quux().args(["--rtl", "--cache", "8", "--stop-after", "1"]).run();
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{t}");
+    assert!(t.contains("--cache: ") && t.contains("fewer words than one set's lines"), "{t}");
+    let out = quux().args(["--rtl", "--cache", "16", "--stop-after", "1"]).run();
     let t = text(&out);
     assert!(out.status.success(), "{t}");
     assert!(t.contains("cache: 16 words, lines of 8, 2-way"), "{t}");
-    let out = quux().args(["--rtl", "--cache", "8", "--stop-after", "1"]).run();
+}
+
+/// **`cadr` says no revision**: the CADR is the CADR.
+#[test]
+fn cadr_says_no_revision() {
+    let out = cadr().args(["--micro", "--stop-after", "1"]).run();
     let t = text(&out);
     assert!(out.status.success(), "{t}");
-    assert!(t.contains("cache: 8 words, lines of 4, 2-way"), "{t}");
+    assert!(t.contains("memory: 32 boards, 2 MW"), "{t}");
+    assert!(!t.contains("revision"), "{t}");
+}
+
+/// QUUX revision 12, the retired 32-bit machine (G2 §11.1), and 11, 12
+/// without the fused return: what a checkpoint of either records of its
+/// machine, the fields [`Machine::save`] writes of the geometry.
+fn retired(revision: u32) -> Geometry {
+    Geometry {
+        word_bits: 32,
+        l1_bits: 6,
+        machine_id: Some((0x5155 << 16) | (revision << 4) | 4),
+        macro_dispatch: revision >= 12,
+        ..Geometry::QUUX
+    }
+}
+
+/// **A checkpoint of QUUX revision 12 is refused by the machine it
+/// records**, on both executables and both engines, naming the revision
+/// and where it resumes. It is format version 49, the CADR's, which this
+/// build keeps so that the CADR's checkpoints, a board's among them, still
+/// resume; the body says which machine wrote it: a 6-bit level-1 map
+/// entry, multiply and divide, the tick and the fused return, where the
+/// CADR has a 5-bit entry and none of the three. Revision 11, without the
+/// fused return, is refused as 11. The body is the machine's alone, as
+/// [`Machine::save`] writes it: both engines' bodies begin with it, and
+/// nothing past its geometry is read.
+#[test]
+fn a_revision_12_checkpoint_is_refused_by_its_machine() {
+    assert_eq!(muir::checkpoint::VERSION, 49);
+    let dir = scratch("revision-12-checkpoint");
+    for revision in [12, 11] {
+        let mut w = muir::checkpoint::Writer::new();
+        Machine::with_geometry(retired(revision), 32).save(&mut w);
+        let body = w.finish();
+        let said =
+            format!("a checkpoint of QUUX revision {revision}, which this build no longer runs");
+        let e = Machine::checkpointed_geometry(&body).unwrap_err().to_string();
+        assert!(e.contains(&said), "{e}");
+        assert!(e.contains("resumes only on an earlier muir-sim"), "{e}");
+        let mut quux_13 = Machine::with_geometry(Geometry::QUUX, 512);
+        let e = quux_13.load(&mut muir::checkpoint::Reader::new(&body)).unwrap_err().to_string();
+        assert!(e.contains(&said), "revision 13 says whose it is, not only its word: {e}");
+        for engine in ["micro", "rtl"] {
+            let old = dir.join(format!("revision-{revision}-{engine}.chk"));
+            muir::checkpoint::write(&old, engine, 32, 32, &body).unwrap();
+            for resumer in ["quux", "cadr"] {
+                let out = support::executable(resumer)
+                    .args([&format!("--{engine}"), "--stop-after", "10", "--resume"])
+                    .arg(&old)
+                    .run();
+                let t = text(&out);
+                assert_eq!(out.status.code(), Some(2), "{resumer} {engine}: not refused:\n{t}");
+                assert!(t.contains(&said), "{resumer} {engine}: the refusal says whose:\n{t}");
+            }
+        }
+    }
 }

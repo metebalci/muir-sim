@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use muir::file_device::{self, Mounts, op, status};
 use muir::machine::{Geometry, Machine};
 
-const PAGE: u32 = 0o17777400;
+const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
 const CONTROL: u32 = PAGE + 0o160;
 const STATUS: u32 = PAGE + 0o161;
 const CMD_BASE: u32 = PAGE + 0o162;
@@ -198,6 +198,13 @@ fn put_bytes(m: &mut Machine, at: u32, bytes: &[u8]) {
     }
 }
 
+/// `<31:0>` of a word the device wrote, every one a fixnum, tag `005`
+/// (contract G2 §4.3).
+fn fixnum(w: muir::machine::Word) -> u32 {
+    assert_eq!(w >> 32, 0o005, "{w:o}: a word the device writes is a fixnum");
+    w as u32
+}
+
 fn get_bytes(m: &Machine, at: u32, n: usize) -> Vec<u8> {
     (0..n).map(|k| (m.main[at as usize + k / 4] >> (8 * (k % 4))) as u8).collect()
 }
@@ -264,7 +271,7 @@ impl Dev {
 
     fn response(&self, index: u16) -> Resp {
         let slot = RESP_RING + 8 * (index as u32 % (1 << self.resp_log2));
-        Resp(std::array::from_fn(|k| support::low(self.m.main[slot as usize + k])))
+        Resp(std::array::from_fn(|k| fixnum(self.m.main[slot as usize + k])))
     }
 
     fn run(&mut self, c: Cmd) -> Resp {
@@ -319,10 +326,8 @@ impl Dev {
             ..Default::default()
         });
         let n = if r.status() == 0 { r.count() as usize / 4 } else { 0 };
-        let words: Vec<u32> = self.m.main[BUF_B as usize..BUF_B as usize + n]
-            .iter()
-            .map(|&w| support::low(w))
-            .collect();
+        let words: Vec<u32> =
+            self.m.main[BUF_B as usize..BUF_B as usize + n].iter().map(|&w| fixnum(w)).collect();
         (r, records(&words))
     }
     fn complete(&mut self, text: &str) -> (Resp, String) {
@@ -427,7 +432,7 @@ fn the_registers_read_and_write_as_the_layout_says() {
     assert_eq!(m.bus_read(STATUS), 0b10, "quiet, nothing else");
     for (reg, v, back) in [
         (CMD_BASE, 0o1234560, 0o1234560),
-        (CMD_BASE, 0xffff_fff0, 0xff_fff0),
+        (CMD_BASE, 0xffff_fff0, 0xfff_fff0),
         (CMD_SIZE, 0o17, 0o17),
         (CMD_SIZE, 0o37, 0o17),
         (RESP_BASE, 0o7654320, 0o7654320),
@@ -445,8 +450,9 @@ fn the_registers_read_and_write_as_the_layout_says() {
         assert_eq!(m.bus_read(PAGE + w), 0, "word {w:o}");
     }
     assert_eq!(m.bus_error, 0, "nothing timed out");
+    // The CADR's own last page, `17777400`, is in its Unibus window.
     let mut cadr = Machine::new();
-    assert_eq!(cadr.bus_read(CONTROL), 0);
+    assert_eq!(cadr.bus_read(0o17777400 + 0o160), 0);
     assert_eq!(cadr.bus_error, muir::machine::bus_error::UNIBUS_NXM, "the CADR has none");
 }
 
@@ -691,9 +697,10 @@ fn a_disable_or_a_machine_reset_drops_everything() {
     }
 }
 
-/// **On QUUX `PROG.UNIBUS.RESET` no longer reaches the device** (contract
-/// Q11): a program that raises and drops `INTERRUPT-CONTROL<28>` leaves it
-/// enabled, its handles open and its queue as it was, on both engines;
+/// **On QUUX `PROG.UNIBUS.RESET` does not reach the device** (contract
+/// Q11): a program that raises and drops `INTERRUPT-CONTROL`'s
+/// `PROG.UNIBUS.RESET`, `<36>` on QUUX (contract G2 appendix A1.6), leaves
+/// it enabled, its handles open and its queue as it was, on both engines;
 /// the queued command then completes.
 #[test]
 fn a_prog_unibus_reset_leaves_the_device_as_it_was() {
@@ -708,7 +715,7 @@ fn a_prog_unibus_reset_leaves_the_device_as_it_was() {
         let o = d.open("/data", READ);
         assert_eq!(o.status(), 0);
         let mut words = vec![filler(); 1024];
-        // <28> up and down, then a loop reading word 100, so that `rtl`'s
+        // <36> up and down, then a loop reading word 100, so that `rtl`'s
         // machine keeps time.
         words[..6].copy_from_slice(&[
             Insn::new(ALU | SETM | m_src(1) | INTERRUPT_CONTROL),
@@ -720,9 +727,8 @@ fn a_prog_unibus_reset_leaves_the_device_as_it_was() {
         ]);
         d.m.load_prom(&words);
         support::prom_program_in_ram(&mut d.m);
-        d.m.l2_map[1] = (1 << 23) | (1 << 22) | 0o37777;
-        d.m.mmem[1] = 1 << 28;
-        d.m.mmem[3] = (1 << 8) | 0o100;
+        d.m.mmem[1] = 1 << 36;
+        d.m.mmem[3] = support::quux_map(&mut d.m, 1, PAGE | 0o100).into();
         let mut e: Box<dyn Engine> = match engine {
             "micro" => Box::new(muir::micro::Micro::new(d.m)),
             _ => {
@@ -798,7 +804,7 @@ fn open_and_read() {
         assert_eq!(bytes, data[off as usize..(off + got) as usize]);
         let words = (got as usize).div_ceil(4);
         if got % 4 != 0 {
-            let last = d.m.main[BUF_B as usize + words - 1];
+            let last = fixnum(d.m.main[BUF_B as usize + words - 1]);
             assert_eq!(last >> (8 * (got % 4)), 0, "the bytes past n are 0");
         }
         assert!(
@@ -1337,7 +1343,7 @@ fn a_checkpoint_waits_for_an_idle_device_and_keeps_its_registers() {
     d.m.save(&mut w);
     let body = w.finish();
     let mut back = quux(default_root(&f));
-    back.load(&mut Reader::new(&body)).unwrap();
+    back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
     assert_eq!(regs(&mut back), before);
     let mut e = Dev { m: back, prod: d.prod, cons: d.cons, cmd_log2: 3, resp_log2: 1, tag: 0o500 };
     assert_eq!(e.slurp("/a"), b"a", "and it runs on");
@@ -1412,17 +1418,20 @@ mod engines {
         words[..p.len()].copy_from_slice(&p);
         m.load_prom(&words);
         support::prom_program_in_ram(&mut m);
-        // Virtual page 1 the register page, 2 the command ring, 3 buffer B.
-        m.l2_map[1] = (1 << 23) | (1 << 22) | 0o37777;
-        m.l2_map[2] = (1 << 23) | (1 << 22) | (CMD_RING >> 8);
-        m.l2_map[3] = (1 << 23) | (1 << 22) | (BUF_B >> 8);
-        m.mmem[1] = (1 << 8) | 0o164;
+        // Virtual pages of 1024 words: 1 the register page's frame, the
+        // page at its word 1400; 2 the command ring; 3 buffer B.
+        let rw = (1 << 27) | (1 << 26);
+        m.l2_map[1] = rw | (PAGE >> 10);
+        m.l2_map[2] = rw | (CMD_RING >> 10);
+        m.l2_map[3] = rw | (BUF_B >> 10);
+        let page = u64::from((1 << 10) | (PAGE & 0o1777));
+        m.mmem[1] = page | 0o164;
         m.mmem[2] = u64::from(d.prod as u32 + 1);
-        m.mmem[3] = u64::from((2 << 8) | (8 * d.prod as u32));
+        m.mmem[3] = u64::from((2 << 10) | (8 * d.prod as u32));
         m.mmem[4] = u64::from(TAG | op::READ << 16);
-        m.mmem[5] = (1 << 8) | 0o170;
-        m.mmem[6] = (1 << 8) | 0o100;
-        m.mmem[7] = 3 << 8;
+        m.mmem[5] = page | 0o170;
+        m.mmem[6] = page | 0o100;
+        m.mmem[7] = 3 << 10;
         let resp = RESP_RING + 8 * d.cons as u32;
         (m, [d.cons as u32 + 1, resp])
     }
@@ -1460,18 +1469,22 @@ mod engines {
         let m = e.machine();
         let r = &m.main[resp as usize..resp as usize + 8];
         assert_eq!(
-            r[0],
-            (TAG | op::READ << 24).into(),
+            fixnum(r[0]),
+            TAG | op::READ << 24,
             "{name}: status 0, and the program's word 0 was read"
         );
-        assert_eq!(r[1], 8, "{name}");
+        assert_eq!(fixnum(r[1]), 8, "{name}");
         for _ in 0..200 {
             e.step().unwrap();
         }
         let m = e.machine();
         assert_eq!(m.amem[0o200], answered.into(), "{name}: the program saw word 170 move");
         assert_eq!(m.amem[0o201], 1 << 7, "{name}: and word 100 <7>");
-        assert_eq!(m.amem[0o202], u32::from_le_bytes(*b"0123").into(), "{name}: and the data in B");
+        assert_eq!(
+            fixnum(m.amem[0o202]),
+            u32::from_le_bytes(*b"0123"),
+            "{name}: and the data in B, a fixnum"
+        );
     }
 
     /// **Both engines drive the device**: the command a program writes
@@ -1510,7 +1523,7 @@ mod engines {
             r.step().unwrap();
         }
         assert_eq!(r.cache().unwrap().misses, 2, "and missed once after it");
-        assert_eq!(r.machine().amem[0o202], u32::from_le_bytes(*b"0123").into());
+        assert_eq!(fixnum(r.machine().amem[0o202]), u32::from_le_bytes(*b"0123"));
     }
 
     /// **The producer index is taken once the write buffer is empty**: with

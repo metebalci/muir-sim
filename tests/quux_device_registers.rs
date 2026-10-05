@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! QUUX's device registers (contract Q7, revision 8; contract Q13,
-//! revision 11). There is no device bus: the processor's register decode
-//! reaches the device registers --- the register page at `17777400`, with
+//! QUUX's device registers (contracts Q7 and Q13). There is no device
+//! bus: the processor's register decode reaches the device registers ---
+//! the register page at `1777777400`, with
 //! the feature page, the video controller's and block-disk's words on it
 //! --- at their addresses, never cached, a register access taking one
 //! microcycle more than a failed one. An address nothing answers fails at once, reads 0 and
-//! sets word 101's NXM bit: no timeout. The frame buffer is on the memory
-//! bus with main memory, through the cache.
+//! sets word 101's NXM bit: no timeout. The frame buffer, in its window
+//! at `1760000000` (contract G2 §4.1), is on the memory bus with main
+//! memory, through the cache.
 
 use muir::engine::Engine;
 use muir::isa::Insn;
@@ -48,10 +49,8 @@ fn machine(prom: &[Insn], addresses: &[u32]) -> Machine {
     words[prom.len()] = Insn::new(JUMP | target(STOP as u64) | ALWAYS | N);
     m.load_prom(&words);
     support::prom_program_in_ram(&mut m);
-    let rw = (1 << 23) | (1 << 22);
     for (k, &p) in addresses.iter().enumerate() {
-        m.l2_map[1 + k] = rw | (p >> 8);
-        m.mmem[1 + k] = u64::from(((1 + k as u32) << 8) | (p & 0xff));
+        m.mmem[1 + k] = support::quux_map(&mut m, 1 + k as u32, p).into();
     }
     for k in 0..6 {
         m.amem[0o200 + k] = 0o525252;
@@ -76,18 +75,30 @@ fn rtl(m: Machine) -> (Machine, u64) {
 }
 
 /// The feature page's word 0, the MACHINE-ID: a register that answers.
-const REGISTER: u32 = 0o17777400;
+const REGISTER: u32 = muir::machine::REGISTER_PAGE_13;
 /// The register page's last word, reserved: a register that answers 0.
-const RESERVED: u32 = 0o17777777;
+const RESERVED: u32 = REGISTER | 0o377;
 
-/// Addresses nothing answers (contract Q13): past main memory's end, past
-/// the frame buffer, the old register page at `17377000` and the page
-/// after it, the display's old mode register at `17377760`, between it and
-/// the disk's old registers, those at `17377774`, and the old Unibus
-/// window's first word and its last below the register page.
-const EMPTY: [u32; 9] = [
-    0o10000000, 0o17200000, 0o17377000, 0o17377400, 0o17377760, 0o17377770, 0o17377774, 0o17400000,
+/// Addresses nothing answers (contracts Q13, G2 §4.1): past main memory's
+/// end, 2MW here; the CADR's addresses QUUX's devices once had, past it:
+/// the color TV's buffer at `17200000`, the old register page at
+/// `17377000` and the page after it, the display's old mode register at
+/// `17377760`, between it and the disk's old registers, those at
+/// `17377774`, and the CADR's Unibus window's first word and its last
+/// below its last page; past the frame buffer in its window; and the
+/// word below the register page.
+const EMPTY: [u32; 11] = [
+    0o10000000,
+    0o17200000,
+    0o17377000,
+    0o17377400,
+    0o17377760,
+    0o17377770,
+    0o17377774,
+    0o17400000,
     0o17777377,
+    muir::machine::WINDOW_13 + muir::tv::VIDEO_WORDS,
+    REGISTER - 1,
 ];
 
 /// **A register access takes a microcycle more than a failed one, and a
@@ -147,10 +158,11 @@ fn a_reserved_register_answers_0() {
 
 /// **The frame buffer is on the memory bus, through the cache**: a word
 /// written reaches the display, and read twice it misses once and hits
-/// once --- where a register is never looked up.
+/// once, each read a fixnum, tag `005` --- where a register is never looked
+/// up.
 #[test]
 fn the_frame_buffer_is_cached() {
-    let fb = muir::tv::BUFFER + 0o100;
+    let fb = muir::machine::WINDOW_13 + 0o100;
     let prom = [
         Insn::new(ALU | SETA | a_src(0o100) | MD),
         Insn::new(ALU | SETM | m_src(1) | START_WRITE),
@@ -175,7 +187,8 @@ fn the_frame_buffer_is_cached() {
     }
     let m = e.machine();
     assert_eq!(m.tv.read_buffer(0o100), 0o123456, "the display has the word");
-    assert_eq!([m.amem[0o200], m.amem[0o201]], [0o123456, 0o123456]);
+    let word = muir::machine::UNBOXED_TAG | 0o123456;
+    assert_eq!([m.amem[0o200], m.amem[0o201]], [word, word]);
     let c = e.cache().unwrap();
     assert_eq!((c.misses, c.hits), (1, 1), "the buffer's two reads; the register none");
 }
@@ -192,7 +205,7 @@ fn the_frame_buffer_is_cached() {
 /// `tests/chip.rs`).
 #[test]
 fn a_start_right_after_a_start_waits_for_it() {
-    const MODE: u32 = 0o17777610;
+    const MODE: u32 = REGISTER | 0o210;
     const WORD: u32 = 0o1000;
     let read = |m: u64, a: u64| {
         [
@@ -243,7 +256,7 @@ fn a_start_right_after_a_start_waits_for_it() {
 /// has no wait for `MD` to time.
 #[test]
 fn a_register_write_right_after_a_register_read_holds_md_no_longer() {
-    const WORD_105: u32 = 0o17777505;
+    const WORD_105: u32 = REGISTER | 0o105;
     const MEMORY: u32 = 0o1000;
     let prom = [
         Insn::new(ALU | SETM | m_src(1) | START_READ),

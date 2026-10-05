@@ -9,8 +9,8 @@
 //! The tick is reached through the page alone: word 110 its control, word
 //! 111 its period, which the boot PROM writes. Source 15 reads the
 //! microseconds since power-on, 32 bits, wrapping. Q1's destinations 3 and
-//! 4 write only M and its source 17 reads all ones, on QUUX at revision 10
-//! as on the CADR, where source 15 too reads all ones.
+//! 4 write only M and its source 17 reads all ones, on QUUX as on the
+//! CADR, where source 15 too reads all ones.
 
 use muir::engine::Engine;
 use muir::isa::Insn;
@@ -23,8 +23,8 @@ mod support;
 
 /// Functional destinations 3 and 4, M 37 written too.
 const CLOCK_CONTROL: u64 = (3 << 19) | (0o37 << 14);
-/// Q1's interval period, destination 4, which on QUUX at revision 10
-/// writes only M, as on the CADR, and as destination 3 does.
+/// Q1's interval period, destination 4, which on QUUX writes only M, as on
+/// the CADR, and as destination 3 does.
 const INTERVAL_PERIOD: u64 = (4 << 19) | (0o37 << 14);
 
 /// Q1's destination 3 words: the tick on; on and its flag cleared.
@@ -95,10 +95,17 @@ fn both(m: impl Fn() -> Machine, pc: u16, limit: u64) -> [(Option<u64>, Vec<u32>
     [(te, low(e.machine())), (tr, low(r.machine()))]
 }
 
+/// A JUMP's test of bit `n` on QUUX: M rotated by (40 - n) mod 40 in the
+/// ring of 40, `{IR<47>, IR<4:0>}` (contract G2 appendix A1.1).
+fn bit_40(n: u64) -> u64 {
+    let r = (40 - n) % 40;
+    (r >> 5) << 47 | (r & 0o37)
+}
+
 /// Timer 0's control and period words on the register page, through
-/// virtual page 1.
-const TIMER_0_CONTROL: u32 = (1 << 8) | 0o110;
-const TIMER_0_PERIOD: u32 = (1 << 8) | 0o111;
+/// virtual page 1, the page at word 1400 of its 1024-word frame.
+const TIMER_0_CONTROL: u32 = (1 << 10) | 0o1400 | 0o110;
+const TIMER_0_PERIOD: u32 = (1 << 10) | 0o1400 | 0o111;
 
 /// **The tick is timer 0 on the page, and destination 3 does not reach
 /// it**: with timer 0's period written as the boot PROM writes it, 16,667
@@ -130,7 +137,7 @@ fn the_tick_is_timer_0_on_the_page_and_not_destination_3() {
         filler(),
         filler(),
         Insn::new(ALU | SETM | SRC_MD | m_dest(3)),
-        Insn::new(JUMP | target(18) | bit(1) | m_src(3) | N),
+        Insn::new(JUMP | target(18) | bit_40(1) | m_src(3) | N),
         Insn::new(JUMP | target(12) | ALWAYS | N),
         // Cleared by word 110 with 403; read again into M 5.
         Insn::new(ALU | SETM | m_src(11) | MD),
@@ -144,7 +151,10 @@ fn the_tick_is_timer_0_on_the_page_and_not_destination_3() {
     ];
     let m = || {
         let mut m = machine(Geometry::QUUX, &prom, 16_667, [TICK_ON, TICK_CLEAR]);
-        m.l2_map[1] = (1 << 23) | (1 << 22) | 0o37777;
+        assert_eq!(
+            support::quux_map(&mut m, 1, muir::machine::REGISTER_PAGE_13 | 0o110),
+            TIMER_0_CONTROL
+        );
         m.mmem[7] = u64::from(TIMER_0_PERIOD);
         m.mmem[8] = u64::from(TIMER_0_CONTROL);
         m.mmem[10] = 0o401;

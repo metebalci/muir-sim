@@ -42,20 +42,21 @@ fn reading() -> Machine {
     words[..prom.len()].copy_from_slice(&prom);
     m.load_prom(&words);
     support::prom_program_in_ram(&mut m);
-    // Virtual page 1 onto physical page 4; M 1 its first word.
-    m.l2_map[1] = (1 << 23) | (1 << 22) | 4;
-    m.mmem[1] = 1 << 8;
+    // Virtual page 1 onto physical page 4, of 1024 words; M 1 its first
+    // word.
+    m.l2_map[1] = (1 << 27) | (1 << 26) | 4;
+    m.mmem[1] = 1 << 10;
     m
 }
 
-/// Runs `e` `n` steps, moving M 1 a line on, round a page, after each
-/// read so the next read is another line's.
+/// Runs `e` `n` steps, moving M 1 a line of 8 on, round 64 lines of the
+/// page, after each read so the next read is another line's.
 fn run<E: Engine>(e: &mut E, n: usize) {
     for _ in 0..n {
         e.step().unwrap();
         let m = e.machine_mut();
         if m.opc == 0 {
-            m.mmem[1] = (1 << 8) | ((m.mmem[1] + 4) & 0xff);
+            m.mmem[1] = (1 << 10) | ((m.mmem[1] + 8) & 0o777);
         }
     }
 }

@@ -1559,10 +1559,8 @@ const HELP: &[(Whose, &str)] = &[
     (
         Whose::Quux,
         "  --main-memory-size <n>MW     how much main memory, in whole megawords with
-                               the unit written: 1MW to 64MW on revision 13,
-                               1MW to 3MW on revision 12. No other unit and
-                               no fraction. [default: 32MW on revision 13,
-                               2MW on revision 12]",
+                               the unit written: 1MW to 64MW. No other unit
+                               and no fraction. [default: 32MW]",
     ),
     (
         Whose::Both,
@@ -1640,9 +1638,8 @@ const HELP: &[(Whose, &str)] = &[
                                MIT's order is refused saying so, and so is one
                                assembled at 0. The start says how the file
                                stands to QUUX's own. [default: QUUX's own,
-                               built in --- data/quux-promh-2000.mcr, version
-                               2000; on revision 13 data/quux-promh.mcr,
-                               version 2001]",
+                               built in --- data/quux-promh.mcr, version
+                               2001]",
     ),
     (
         Whose::Quux,
@@ -1756,10 +1753,10 @@ const HELP: &[(Whose, &str)] = &[
     ),
     (
         Whose::Quux,
-        "  --cache <words>              rtl, QUUX: its memory cache of <words> in
-                               lines of 4, 2-way, a hit in 20 ns:
+        "  --cache <words>              rtl, QUUX: its memory cache of <words>, 16
+                               or more, in lines of 8, 2-way, a hit in 20 ns:
                                write-through, by physical address, main
-                               memory only. [default: 4096]",
+                               memory and the frame buffer. [default: 4096]",
     ),
     (
         Whose::Quux,
@@ -2645,7 +2642,7 @@ fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry) -> Vec<Ins
         return if geometry == crate::machine::Geometry::CADR {
             crate::prom::boot_prom()
         } else {
-            crate::prom::quux_boot_prom_for(geometry)
+            crate::prom::quux_boot_prom()
         };
     };
     let bytes =
@@ -2657,17 +2654,6 @@ fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry) -> Vec<Ins
         crate::prom::parse_quux_mcr(&bytes)
     };
     parsed.unwrap_or_else(|e| usage(&format!("--prom {}: {e}", shown(path))))
-}
-
-/// The built-in PROM of a QUUX of `geometry`'s revision, as the setup
-/// names it: PROM 2001 on revision 13, PROM 2000 on revision 12
-/// ([`crate::prom::quux_boot_prom_for`]).
-fn quux_prom_shown(geometry: crate::machine::Geometry) -> &'static str {
-    if geometry.wide() {
-        "built in, QUUX's data/quux-promh.mcr, version 2001, at 36000"
-    } else {
-        "built in, QUUX's data/quux-promh-2000.mcr, version 2000, at 36000"
-    }
 }
 
 /// What the setup says the boot PROM is: which file, and how it stands to
@@ -2683,13 +2669,13 @@ fn prom_shown(file: Option<&Path>, prom: &[Insn], geometry: crate::machine::Geom
         return if geometry == crate::machine::Geometry::CADR {
             "built in, System 100's own sys/ubin/promh.mcr, version 9".to_string()
         } else {
-            quux_prom_shown(geometry).to_string()
+            "built in, QUUX's data/quux-promh.mcr, version 2001, at 36000".to_string()
         };
     };
     let (theirs, whose) = if geometry == crate::machine::Geometry::CADR {
         (crate::prom::boot_prom(), "MIT's own")
     } else {
-        (crate::prom::quux_boot_prom_for(geometry), "QUUX's own")
+        (crate::prom::quux_boot_prom(), "QUUX's own")
     };
     match prom.iter().zip(&theirs).filter(|(a, b)| a != b).count() {
         0 => format!("{}, {whose} word for word", shown(path)),
@@ -4339,56 +4325,6 @@ fn refuse_other_executable((path, c): &(PathBuf, Checkpoint), exe: &str) {
     }
 }
 
-/// **Which revision `quux` runs** (contract G2 §8.1): `geometry` as it
-/// is, revision 12, unless `MUIR_QUUX_REVISION` says 13. Unset or `12` is
-/// revision 12, the released machine; any other value is refused at the
-/// start, naming the two. `cadr` does not read it. The switch is not a
-/// documented flag: it goes when revision 12 is retired, and a bitstream,
-/// which muir-fpga builds for one revision, could not carry it.
-fn quux_revision(geometry: crate::machine::Geometry) -> crate::machine::Geometry {
-    use crate::machine::Geometry;
-    if geometry != Geometry::QUUX {
-        return geometry;
-    }
-    match std::env::var_os("MUIR_QUUX_REVISION") {
-        None => geometry,
-        Some(v) if v == "12" => geometry,
-        Some(v) if v == "13" => Geometry::QUUX_13,
-        Some(v) => {
-            eprintln!(
-                "{}: MUIR_QUUX_REVISION={:?}: revision 12 or 13",
-                executable(),
-                v.to_string_lossy()
-            );
-            std::process::exit(2);
-        }
-    }
-}
-
-/// **A checkpoint of the other revision is refused**, naming the revision
-/// that wrote it and how to resume it: a revision-13 checkpoint's words
-/// are 40 bits and its map, dispatch memory and devices revision 13's,
-/// and the reverse (contract G2 §2.8). Settled, like
-/// [`refuse_other_executable`], before anything is built.
-fn refuse_other_revision((path, c): &(PathBuf, Checkpoint), geometry: crate::machine::Geometry) {
-    if c.engine == "chip" {
-        return;
-    }
-    let Ok(saved) = crate::machine::Machine::checkpointed_geometry_at(&c.body, c.word_bits) else {
-        return;
-    };
-    // Another revision, 11, is the library's alone, and refused by
-    // `refuse_machine`.
-    if let (Some(theirs @ (12 | 13)), Some(ours)) = (saved.revision(), geometry.revision())
-        && theirs != ours
-    {
-        let p = path.display();
-        usage(&format!(
-            "--resume {p} is revision {theirs}'s, and this is revision {ours}: MUIR_QUUX_REVISION={theirs} quux --resume {p}"
-        ));
-    }
-}
-
 /// A checkpoint of this executable's machine with another geometry --- a
 /// QUUX whose PDL buffer is not this one's --- is refused rather than
 /// loaded: the map and the PDL in it are that machine's.
@@ -5358,15 +5294,9 @@ fn time_chip(
 /// refused by name, saying which executable takes it, and so is a
 /// checkpoint the other one wrote. `netlists` are the boards `--chip`
 /// builds, which only `cadr` takes and so only `cadr` passes.
-///
-/// `quux` is revision 12 unless `MUIR_QUUX_REVISION` says 13
-/// ([`quux_revision`]), read here once, so that everything after it ---
-/// the start's lines, main memory's default and limits, a resume's
-/// refusal, the machine --- is the revision's.
 pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     let exe = executable_of(geometry);
     let _ = EXECUTABLE.set(exe);
-    let geometry = quux_revision(geometry);
     let mut which: Option<Which> = None;
     let mut packs: Vec<Pack> = Vec::new();
     // The glass TTYs asked for, in the order the flags came. Bound after
@@ -5648,11 +5578,9 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             },
             (None, "--cache") => match args.next().as_deref().and_then(|v| v.parse::<u32>().ok()) {
                 Some(words) => {
-                    // As the revision's memory port fits it: revision 13
-                    // keeps its 8-word line.
+                    // As the memory port fits it, its line 8 words.
                     let c = crate::cache::CacheConfig::with_words(words);
-                    let layout = crate::memory_port::Layout::of(&geometry);
-                    if let Err(e) = layout.cache(c).check() {
+                    if let Err(e) = crate::memory_port::fitted(c).check() {
                         usage(&format!("--cache: {e}"));
                     }
                     cache = Some(c);
@@ -6234,7 +6162,6 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     });
     if let Some(r) = &resume {
         refuse_other_executable(r, exe);
-        refuse_other_revision(r, geometry);
     }
     if let Some((path, c)) = &resume {
         if boards_given && boards != c.memory_boards {
@@ -6562,11 +6489,10 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             writeln!(s, "memory port: a line fill in {} ns, a write in {}", t.read_ns, t.write_ns)
                 .unwrap();
         }
-        // The cache the memory port fits: revision 13 keeps its 8-word
-        // line whatever `--cache` asks for.
-        let layout = crate::memory_port::Layout::of(&geometry);
+        // The cache the memory port fits: QUUX keeps its 8-word line
+        // whatever `--cache` asks for.
         if let Some(c) = cache.or(quux_rtl.then_some(crate::cache::CacheConfig::QUUX)) {
-            let c = if quux_rtl { layout.cache(c) } else { c };
+            let c = if quux_rtl { crate::memory_port::fitted(c) } else { c };
             writeln!(
                 s,
                 "cache: {} words, lines of {}, {}-way, a hit in {} ns",
@@ -6577,14 +6503,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         if geometry.revision() == Some(13) {
             writeln!(
                 s,
-                "machine: quux, revision 13: revision 12 with a 40-bit word, the tag <39:32> over the field <31:0>; a map of two levels over 1024-word pages, 28-bit virtual and physical addresses; a dispatch memory of 4,096 entries; the memory cache's lines of 8 words; the frame buffer window at 1760000000 and the register page at 1777777400"
-            )
-            .unwrap();
-        }
-        if geometry.revision() == Some(12) {
-            writeln!(
-                s,
-                "machine: quux, revision 12: a six-bit level-1 map, 63 regions mapped at once, a 16K-word PDL buffer, MUL and DIV in one instruction each, a microsecond clock in the processor, the register page, its boot PROM at control store 36000, main memory and the frame buffer on its own port, its devices reached by their registers, a real-time clock, a file device, three interval timers and reset devices, the register page at 17777400 with block-disk and the video controller on it, and the fused return"
+                "machine: quux, revision 13: a 40-bit word, the tag <39:32> over the field <31:0>; a map of two levels over 1024-word pages, 28-bit virtual and physical addresses; a dispatch memory of 4,096 entries; a 16K-word PDL buffer, MUL and DIV in one instruction each, a microsecond clock in the processor, its boot PROM at control store 36000, main memory and the frame buffer on its own port, the memory cache's lines of 8 words, its devices reached by their registers, a real-time clock, a file device, three interval timers and reset devices, the frame buffer window at 1760000000 and the register page at 1777777400 with block-disk and the video controller on it, and the fused return"
             )
             .unwrap();
         }

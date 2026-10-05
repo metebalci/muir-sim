@@ -132,14 +132,8 @@ impl Bus {
         if m.geometry.unibus {
             Bus::Cadr(Box::new(Busint::with_timing_model(m.memory_boards(), model)))
         } else {
-            let mut p = MemoryPort::for_geometry(&m.geometry);
+            let mut p = MemoryPort::new();
             p.keep_timing_model(model);
-            // Revision 12's cache-only prefetch, which only its fused
-            // return uses (contract H8a §3.5); revision 13's port has its
-            // own.
-            if m.geometry.macro_dispatch && !m.geometry.wide() {
-                p.set_prefetch(Some(crate::memory_port::Reach::REVISION_12));
-            }
             Bus::Quux(Box::new(p))
         }
     }
@@ -1023,9 +1017,9 @@ impl Rtl {
     }
 
     /// QUUX's cache-only prefetch fitted with another reach, or taken out
-    /// (`crate::memory_port`, contract H8a §3.5), for a measurement:
-    /// revision 12 has [`crate::memory_port::Reach::REVISION_12`] from the
-    /// start, and no other machine has one. Kept across a restore.
+    /// (`crate::memory_port`, contract H8a §3.5), for a measurement: QUUX
+    /// has [`crate::memory_port::Reach::Page`] from the start, and the CADR
+    /// has none. Kept across a restore.
     pub fn set_prefetch(&mut self, prefetch: Option<crate::memory_port::Reach>) {
         match &mut self.bus {
             Bus::Quux(p) => p.set_prefetch(prefetch),
@@ -1276,11 +1270,11 @@ impl Rtl {
         let low_group = destm && !bit(ir, 23) && !bit(ir, 22);
         let destlc = low_group && d19 == 1;
         let destintctl = low_group && d19 == 2;
-        // The low group decodes no 3 or 4, on the CADR and on QUUX since
-        // revision 10 (contract Q11), and only M is written. From revision
-        // 12 QUUX decodes 5 to 7: the MACRO-DISPATCH register and the MACRO
-        // DISPATCH MEMORY's index and entry (`machine::macro_dispatch`);
-        // below it, and on the CADR, only M is written there too.
+        // The low group decodes no 3 or 4, on the CADR and on QUUX
+        // (contract Q11), and only M is written. QUUX decodes 5 to 7: the
+        // MACRO-DISPATCH register and the MACRO DISPATCH MEMORY's index and
+        // entry (`machine::macro_dispatch`); on the CADR only M is written
+        // there too.
         let macro_write =
             (low_group && (5..=7).contains(&d19) && self.m.geometry.macro_dispatch).then_some(d19);
         let mid_group = destm && !bit(ir, 23) && bit(ir, 22);
@@ -1439,7 +1433,7 @@ impl Rtl {
             // undriven TTL bus reads high. No instruction means to read
             // them; a control-store word being written back does, for the
             // nopped microcycle its `IR` holds it, and `chip` shows the ones:
-            // the word's bits, 32 on every machine the executables run.
+            // the word's bits, 32 on the CADR and 40 on QUUX.
             self.m.geometry.word_mask()
         };
 
@@ -1642,9 +1636,9 @@ impl Rtl {
         // the pass-around from `L`. A jump's return fuses only while
         // `JUMP_RETURNS_FUSE` says so.
         let jump_pop = (jret && !bit(ir, 6) && jcond) || (jretf && !jcond);
-        // With revision 12's cache-only prefetch (`crate::memory_port`), a
+        // With QUUX's cache-only prefetch (`crate::memory_port`), a
         // return that needs the next word in sequence fuses on the word in
-        // the buffer when it is that word (`LC<25:2>`, the address the
+        // the buffer when it is that word (`LC<29:2>`, the address the
         // stream's fetch will take) and condition 6 is false (the main
         // loop's test on the fetch path, taken here instead of at `QMLP`).
         // A transfer that has written main memory since the last cycle
@@ -2525,16 +2519,15 @@ impl Rtl {
                 self.bus_addr = self.physical();
                 self.bus_data = self.m.md;
                 self.bus_responder = if self.m.geometry.has_register_page() {
-                    // QUUX: its frame buffer on the memory bus with main
-                    // memory, through the cache (contract Q7); the register
-                    // page's device registers; nothing else from 17000000
-                    // up, the Unibus window included (contracts Q5, Q13).
-                    let decode = if self.m.geometry.wide() {
-                        busint::decode_quux_13
-                    } else {
-                        busint::decode_quux
-                    };
-                    decode(self.bus_addr, self.m.main.len(), self.m.tv.buffer_words())
+                    // QUUX: its frame buffer window on the memory bus with
+                    // main memory, through the cache (contract Q7); the
+                    // register page's device registers; nothing else, no
+                    // Unibus window among it (contracts Q5, Q13).
+                    busint::decode_quux_13(
+                        self.bus_addr,
+                        self.m.main.len(),
+                        self.m.tv.buffer_words(),
+                    )
                 } else {
                     busint::decode_for(
                         self.bus_addr,
@@ -3667,10 +3660,9 @@ impl Engine for Rtl {
                 Bus::Cadr(Box::new(b))
             }
             1 => {
-                // The machine's own port, its layout the geometry's, read
-                // above; the prefetch's reach is this engine's setting, and
-                // its word the checkpoint's.
-                let mut p = MemoryPort::for_geometry(&self.m.geometry);
+                // The prefetch's reach is this engine's setting; its word
+                // is the checkpoint's.
+                let mut p = MemoryPort::new();
                 p.set_prefetch(self.prefetch());
                 p.load(r)?;
                 Bus::Quux(Box::new(p))

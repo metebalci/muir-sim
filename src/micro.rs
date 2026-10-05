@@ -523,7 +523,7 @@ impl Micro {
     /// dispatch's `IR<24>`, which has stepped the counter already.
     ///
     /// Fused only where today's return goes to the main loop's dispatch,
-    /// no fetch needed (this engine has no cache, so not revision 12's
+    /// no fetch needed (this engine has no cache, so not QUUX's
     /// prefetch, which `rtl` fuses on: the two differ in timing there, not
     /// in results, where the microcode keeps the rule after a fused
     /// return), and nothing in this microinstruction changes what
@@ -836,8 +836,8 @@ impl Micro {
             // upper eight has those three outputs unconnected, so no part
             // drives the M bus and an undriven TTL bus reads high, as `chip`
             // shows. Microcode 323 reads 0o15 once, at 0o20535. On QUUX,
-            // 0o17 too since revision 10 (contract Q11). All the word's
-            // bits: 32 on every machine the executables run.
+            // 0o17 too (contract Q11). All the word's bits: 32 on the CADR,
+            // 40 on QUUX.
             _ => self.m.geometry.word_mask(),
         })
     }
@@ -955,13 +955,12 @@ impl Micro {
                 }
             }
             // Destinations 3 and 4 write only M, on the CADR and on QUUX
-            // since revision 10 (contract Q11): Q1's tick control and
-            // interval period are gone, and the register page's timers
-            // take their place (`machine::Timers`).
+            // (contract Q11): the register page's timers take the place of
+            // Q1's tick control and interval period (`machine::Timers`).
             // Destinations 5 to 7 are QUUX's MACRO-DISPATCH register and
-            // MACRO DISPATCH MEMORY's index and entry from revision 12
+            // MACRO DISPATCH MEMORY's index and entry
             // (`machine::macro_dispatch`), written at the end of the step;
-            // below it, and on the CADR, they too write only M.
+            // on the CADR they too write only M.
             0o5..=0o7 if self.m.geometry.macro_dispatch => {
                 self.macro_write = Some((code as u32, data));
             }
@@ -1026,8 +1025,8 @@ impl Micro {
     /// its own state, which `Machine` does not have.
     fn read(&mut self, vma: u32) -> Word {
         let t = self.m.translate(vma);
-        // Revision 13 has no Unibus window, and its 28-bit space puts main
-        // memory where revision 12's decode finds the diagnostic registers.
+        // QUUX has no Unibus window, and its 28-bit space puts main memory
+        // where the CADR's decode finds the diagnostic registers.
         if t.access_permitted
             && !self.m.geometry.wide()
             && let Some(eadr) = busint::unibus_address(t.physical).and_then(spy::register)

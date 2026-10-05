@@ -5,198 +5,26 @@
 //! clocks and its fused return: functional destinations 3 to 7 and
 //! functional sources 15 and 17.
 //!
-//! A scan of the control store finds which microinstructions carry them;
-//! an instruction the OA registers modify as it loads (`IMOD`) is made at
-//! run time and no scan sees it. So a band is booted on `rtl` and every
-//! executed microinstruction is read as it stood in `IR`, the OA
-//! substitution done: each that writes destinations 3 to 7 or reads source
-//! 17 has to be a control-store word that already did.
+//! The scan is `support::unused_codes`'s: a band booted on `rtl`, every
+//! executed microinstruction read as it stood in `IR`, the OA substitution
+//! done. System 2001's run is in `tests/system_2001.rs`.
 
-use std::path::PathBuf;
-
-use muir::engine::Engine;
-use muir::machine::{Geometry, Machine};
-use muir::rtl::Rtl;
-use muir::tv::Board;
+use support::unused_codes::{octal, run};
 
 mod support;
 
-fn octal(pcs: &[u16]) -> String {
-    pcs.iter().map(|p| format!("{p:o}")).collect::<Vec<_>>().join(" ")
-}
-
-/// Whether `ir` writes functional destinations 3 to 7, or reads functional
-/// source 15 or 17: an ALU or BYTE instruction with `IR<25>` clear and
-/// `IR<23:19>` 3 to 7, or any class with `IR<31>` set and `IR<30:26>` 17.
-fn uses_the_codes(ir: u64) -> bool {
-    let class = ir >> 43 & 3;
-    let dest =
-        (class == 0 || class == 3) && ir >> 25 & 1 == 0 && (3..=7).contains(&(ir >> 19 & 0o37));
-    // `IR<30>` is in no source decode, so 35 and 37 are 15 and 17 again.
-    let src = ir >> 31 & 1 == 1 && matches!(ir >> 26 & 0o17, 0o15 | 0o17);
-    dest || src
-}
-
-/// What a run found: the addresses whose executed word used the codes;
-/// those among them whose control-store word did not; and, of what ran,
-/// every value written to destination 3, the destination 4 writes, the
-/// destination 5 to 7 writes and the source 17 reads, as `(address,
-/// value)`, the value being the output bus the console reads for the
-/// instruction in `IR` before it executes; and whether timer 0 was on at
-/// the end.
-#[derive(Default)]
-struct Found {
-    used: Vec<u16>,
-    made: Vec<u16>,
-    dest_3: Vec<(u16, u32)>,
-    dest_4: Vec<(u16, u32)>,
-    dest_5_to_7: Vec<(u16, u32)>,
-    source_17: Vec<u16>,
-    timer_0_on: bool,
-}
-
-/// Which of destinations 3, 4, and 5 to 7 `ir` writes, or source 17
-/// reads.
-fn codes(ir: u64) -> (bool, bool, bool, bool) {
-    let class = ir >> 43 & 3;
-    let d = (class == 0 || class == 3) && ir >> 25 & 1 == 0;
-    let dest = ir >> 19 & 0o37;
-    let src = ir >> 31 & 1 == 1 && ir >> 26 & 0o17 == 0o17;
-    (d && dest == 3, d && dest == 4, d && (5..=7).contains(&dest), src)
-}
-
-/// Boots `m` to its listener on `rtl`, checking every executed
-/// microinstruction ([`Found`]). It asserts the listener came, so that a
-/// boot stuck early is not a pass.
-fn run(m: Machine, chaos: (u16, u16), root: PathBuf) -> Found {
-    let mut e = Rtl::new(m);
-    e.boot();
-    let m = e.machine_mut();
-    m.chaos.address = chaos.0;
-    support::ChaosServer::new(chaos.1)
-        .serving(root)
-        .at_time(support::time::TEST_UNIVERSAL)
-        .plug(m, 0);
-    let mut found = Found::default();
-    let (used, made) = (&mut found.used, &mut found.made);
-    // Up to the listener, checked every million microcycles, and two
-    // million more.
-    let mut until = 300_000_000u64;
-    for n in 0..300_000_000u64 {
-        if n == until {
-            break;
-        }
-        if n % 1_000_000 == 0 && until == 300_000_000 && support::lit_rows(&e, 84..130) > 400 {
-            until = n + 2_000_000;
-        }
-        let ir = e.ir();
-        let ob = uses_the_codes(ir).then(|| {
-            use muir::spy::{OB_HIGH, OB_LOW};
-            (e.spy_read(OB_HIGH) as u32) << 16 | e.spy_read(OB_LOW) as u32
-        });
-        e.step().unwrap();
-        if let Some(pc) = e.executed()
-            && uses_the_codes(ir)
-        {
-            let ob = ob.unwrap();
-            match codes(ir) {
-                (true, _, _, _) => found.dest_3.push((pc, ob)),
-                (_, true, _, _) => found.dest_4.push((pc, ob)),
-                (_, _, true, _) => found.dest_5_to_7.push((pc, ob)),
-                _ => {}
-            }
-            if codes(ir).3 {
-                found.source_17.push(pc);
-            }
-            if !used.contains(&pc) {
-                used.push(pc);
-            }
-            let stored = e.machine().imem[pc as usize].raw();
-            if !uses_the_codes(stored) && !made.contains(&pc) {
-                made.push(pc);
-            }
-        }
-    }
-    assert!(support::lit_rows(&e, 84..130) > 400, "the listener never came");
-    found.timer_0_on = e.machine().timers.timer[0].on;
-    found
-}
-
-/// **System 2000 uses the clocks' codes only where its microcode says so**,
-/// through its boot to the listener and a moment after on QUUX: no
-/// instruction the OA registers make writes destinations 3 to 7 or reads
-/// sources 15 or 17. Its microcode, 2000, the Q11 microcode, uses them at
-/// its own sites. And what it writes (contract Q11): nothing to
-/// destination 3 or 4, its tick being timer 0 on the register page, which
-/// is on at the end; destinations 5 to 7 only in `RESET-MACHINE`'s fill of
-/// the MACRO DISPATCH MEMORY, from `RESET-MACHINE-MACRO-DISPATCH-FILL` up
-/// to `RESET-MACHINE-MACRO-DISPATCH-DONE` in its `ucadr.sym` (contract
-/// H8a); and it reads source 17 nowhere --- so Q1's interval timer, which
-/// revision 10 drops, has no user.
+/// **System 1003 on the CADR's microcode 1001, microcode 1000 with more
+/// fixes and the changes for 60 boards, never runs them at all**, the OA
+/// registers' words included, through its boot to the listener. The
+/// CADR's release, fetched by `tools/fetch-system-for-cadr.sh`.
 #[test]
-fn system_2000_uses_the_clocks_codes_only_where_its_microcode_does() {
-    // QUUX's release (`tools/fetch-system-for-quux.sh`): a copy of its
-    // disk, a dynamic VHD booted as it is, which the machine writes, and
-    // its sources.
-    let Some((_dir, pack, root)) = support::quux_release_band("unused-codes-2000") else {
-        return;
-    };
-    let mut m = Machine::new();
-    m.load_prom(&muir::prom::quux_12_boot_prom());
-    let mut d = muir::block_disk::BlockDisk::new(muir::block_disk::BLOCK_NS);
-    d.attach(muir::disk_image::Disk::open_rw(&pack).unwrap());
-    m.block_disk = Some(d);
-    m.geometry = Geometry::QUUX;
-    m.tv.set_board(Board::Video);
-    m.tv.set_video_size(1280, 1024);
-    // The file device serving the tree's `sys` and `site` as HOST's `/sys`
-    // and `/site`, where the band's `SYS:` is (`site/sys.translations`).
-    m.file_device.mounts.add(&root.display().to_string()).unwrap();
-    for part in ["sys", "site"] {
-        m.file_device.mounts.add(&format!("{part}={}", root.join(part).display())).unwrap();
-    }
-    let found = run(m, (0o177201, 0o177200), root);
-    let (used, made) = (&found.used, &found.made);
-    eprintln!("2000: the codes ran at {}", octal(used));
-    assert!(!used.is_empty(), "the clocks' own sites ran");
-    assert!(made.is_empty(), "made by the OA registers at {}", octal(made));
-    assert!(found.dest_3.is_empty(), "destination 3 written: {:?}", found.dest_3);
-    assert!(found.dest_4.is_empty(), "destination 4 written: {:?}", found.dest_4);
-    let sym = support::quux_release(&["sys", "ubin", "ucadr.sym"]).unwrap();
-    let symbols = muir::sym::parse(&std::fs::read_to_string(sym).unwrap()).unwrap();
-    let at = |name| {
-        symbols
-            .address(muir::sym::Space::IMem, name)
-            .unwrap_or_else(|| panic!("{name} in ucadr.sym")) as u16
-    };
-    let fill = at("RESET-MACHINE-MACRO-DISPATCH-FILL")..at("RESET-MACHINE-MACRO-DISPATCH-DONE");
-    let mut sites: Vec<u16> = found.dest_5_to_7.iter().map(|&(pc, _)| pc).collect();
-    sites.sort();
-    sites.dedup();
-    eprintln!("2000: destinations 5 to 7 written at {}", octal(&sites));
-    assert!(!sites.is_empty(), "destinations 5 to 7 never written");
-    let outside: Vec<u16> = sites.iter().copied().filter(|pc| !fill.contains(pc)).collect();
-    assert!(
-        outside.is_empty(),
-        "destinations 5 to 7 written outside the fill at {}",
-        octal(&outside)
-    );
-    assert!(found.source_17.is_empty(), "source 17 read at {}", octal(&found.source_17));
-    assert!(found.timer_0_on, "timer 0 on at the end");
-}
-
-/// **System 1002 on the CADR's microcode 1000, MIT's 323 with three of
-/// MIT's fixes, never runs them at all**, the OA registers' words included,
-/// through its boot to the listener. The CADR's release, fetched by
-/// `tools/fetch-system-for-cadr.sh`.
-#[test]
-fn system_1002_on_1000_never_runs_the_codes() {
+fn system_1003_on_1001_never_runs_the_codes() {
     let (Some(pack), Some(sources)) =
-        (support::vendor(&["run", "release-1002-pack.img"]), support::vendor(&["system-1002"]))
+        (support::vendor(&["run", "release-1003-pack.img"]), support::vendor(&["system-1003"]))
     else {
         return;
     };
-    let dir = support::scratch("unused-codes-1002");
+    let dir = support::scratch("unused-codes-1003");
     let copy = dir.join("pack.img");
     std::fs::copy(&pack, &copy).unwrap();
     let root = dir.join("root");

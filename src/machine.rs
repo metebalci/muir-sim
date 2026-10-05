@@ -62,9 +62,8 @@ pub fn megawords(words: usize) -> String {
 /// space has nothing from there to the frame buffer window.
 pub const MAX_MAIN_WORDS_13: usize = 64 * 1024 * 1024;
 
-/// A word of the datapath and of main memory: 32 bits on the CADR and on
-/// QUUX to revision 12, 40 on a machine whose [`Geometry::word_bits`] says
-/// so (contract G2 §2.1), held in 64 bits either way. A, M, the PDL
+/// A word of the datapath and of main memory: 32 bits on the CADR, 40 on
+/// QUUX, whose [`Geometry::word_bits`] says so (contract G2 §2.1), held in 64 bits either way. A, M, the PDL
 /// buffer, `Q`, `VMA`, `MD` and main memory are words; the numeric
 /// registers beside them --- the SPC stack, the location counter, the
 /// map --- keep their own widths.
@@ -141,8 +140,8 @@ pub mod bus_error {
 /// machine, `VMA<12:8>` choosing one in it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Geometry {
-    /// Bits in a word ([`Word`]): 32 on the CADR and QUUX to revision 12;
-    /// 40 on QUUX revision 13, [`Geometry::QUUX_13`], whose fields,
+    /// Bits in a word ([`Word`]): 32 on the CADR; 40 on QUUX revision 13,
+    /// [`Geometry::QUUX`], whose fields,
     /// rotator, jump conditions, dispatch memory, location counter and map
     /// come with the word (contract G2 §2-§3, appendix A1): what
     /// [`Geometry::wide`] says.
@@ -198,7 +197,7 @@ pub struct Geometry {
     /// [`crate::file_device`].
     pub file_device: bool,
     /// Whether the machine has QUUX's MACRO-DISPATCH register, its MACRO
-    /// DISPATCH MEMORY and the fused return (contract H8a, revision 12):
+    /// DISPATCH MEMORY and the fused return (contract H8a):
     /// functional destinations 5 to 7, [`macro_dispatch`]. Without it those
     /// destinations write only M, as on the CADR.
     pub macro_dispatch: bool,
@@ -223,48 +222,50 @@ impl Geometry {
         macro_dispatch: false,
     };
 
-    /// QUUX's, revision 12: the MACRO-DISPATCH register, the MACRO DISPATCH
-    /// MEMORY and the fused return (contract H8a, [`macro_dispatch`]),
-    /// functional destinations 5 to 7; the register page at the last page of the
-    /// physical space, `17777400`, with block-disk and the video controller
-    /// on it and word 100 in its final order (contract Q13,
-    /// [`Geometry::FEATURE_PAGE`], [`Machine::interrupt_sources`]); three
-    /// interval timers and reset devices on the
-    /// register page (contract Q11, [`Timers`], [`Machine::reset_devices`]);
-    /// a real-time clock and a file device on the
-    /// register page (contract Q9, [`Rtc`], [`crate::file_device`]); main memory and the frame buffer on its own port
-    /// through its cache, with no bus interface (contract Q6), and its
-    /// devices reached by their registers alone, with no bus (contract Q7,
-    /// [`crate::memory_port`]); its boot
-    /// PROM at control store 36000 and the register page (contract Q2, [`Geometry::prom_base`],
-    /// [`Machine::interrupt_sources`]); the microsecond clock in the
-    /// processor, functional source 15, and timer 0 of the interval timers
-    /// the tick ([`Timers`]); `MUL` and
-    /// `DIV` in one instruction each, ALU
-    /// functions 42 and 43 ([`crate::muldiv`]); a PDL buffer of 16K words,
-    /// its pointer and index 14 bits; and a level-1 entry of six bits, 64 blocks of level 2 and so 63
-    /// regions of 8K words mapped at once against the CADR's 31, the last
-    /// block being the invalid one. The sixth bit is carried by the two the
-    /// CADR leaves spare: `MAP(MD)<29>`, which the CADR drives low (VMEMDR
-    /// 1A01, `HI12` through a 74S240), and `VMA<24>`, which no map write
-    /// takes. The rest of the machine is the CADR's.
+    /// **QUUX's, revision 13** (contract G2, with its appendix A1): a
+    /// 40-bit word (G2 §2.1) and what comes with it, all keyed on
+    /// [`Geometry::wide`]. The BYTE fields are 6 bits, the JUMP and
+    /// DISPATCH rotates take `IR<47>` as their bit 5, the DISPATCH address
+    /// is `IR<23:12>` into a dispatch memory of 4,096 entries (A1.1,
+    /// A1.4); the rotator is a ring of 40 and the masker empty for a byte
+    /// that does not fit in bits 0-39 (A1.2); the conditions compare
+    /// fields, equality sees the tag, and two conditions are new, fixnum
+    /// overflow and unsigned less than (A1.3); the location counter has 30
+    /// bits and its flags above bit 31 (A1.6); and the map is two levels
+    /// of 8,192 7-bit and 4,096 28-bit entries over 1024-word pages, a
+    /// 28-bit virtual address and an 18-bit physical page (A1.7).
     ///
-    /// It says so in functional source 16, its MACHINE-ID, which no microcode of MIT's
-    /// reads and nothing on the CADR drives: the signature `0x5155` in bits
-    /// 31:16, the hardware revision in 15:4 --- 5: the six-bit map, then the
-    /// 16K PDL buffer, then the multiply and divide, then the tick, then the
-    /// clocks of contract Q1, then Q2's register page and PROM, then Q6's
-    /// memory port, then Q7's device registers, then Q9's real-time clock and
-    /// file device, then Q11's interval timers and reset devices, then Q13's
-    /// register page at `17777400` with block-disk and the video
-    /// controller on it, then H8a's fused return --- and
-    /// the processor type, 4, in 3:0. A CADR's open bus reads all ones there,
-    /// which can never carry the signature.
+    /// With it: the MACRO-DISPATCH register, the MACRO DISPATCH MEMORY and
+    /// the fused return (contract H8a, [`macro_dispatch`]), functional
+    /// destinations 5 to 7; the register page at the last page of the
+    /// physical space, [`REGISTER_PAGE_13`], with block-disk and the video
+    /// controller on it and word 100 in its final order (contract Q13,
+    /// [`Machine::interrupt_sources`]); three interval timers and reset
+    /// devices on the register page (contract Q11, [`Timers`],
+    /// [`Machine::reset_devices`]); a real-time clock and a file device on
+    /// the register page (contract Q9, [`Rtc`], [`crate::file_device`]);
+    /// main memory and the frame buffer on its own port through its cache,
+    /// with no bus interface (contract Q6), and its devices reached by
+    /// their registers alone, with no bus (contract Q7,
+    /// [`crate::memory_port`]); its boot PROM at control store 36000
+    /// (contract Q2, [`Geometry::prom_base`]); the microsecond clock in the
+    /// processor, functional source 15, and timer 0 of the interval timers
+    /// the tick ([`Timers`]); `MUL` and `DIV` in one instruction each, ALU
+    /// functions 42 and 43 ([`crate::muldiv`]); and a PDL buffer of 16K
+    /// words, its pointer and index 14 bits. The rest of the machine is
+    /// the CADR's.
+    ///
+    /// It says so in functional source 16, its MACHINE-ID, which no
+    /// microcode of MIT's reads and nothing on the CADR drives: the
+    /// signature `0x5155` in bits 31:16, the hardware revision in 15:4,
+    /// 13, and the processor type, 4, in 3:0. Feature words 1, 2 and 6
+    /// give the sizes ([`Geometry::feature_word`]). A CADR's open bus
+    /// reads all ones there, which can never carry the signature.
     pub const QUUX: Geometry = Geometry {
-        word_bits: 32,
-        l1_bits: 6,
+        word_bits: 40,
+        l1_bits: 7,
         pdl_bits: 14,
-        machine_id: Some((0x5155 << 16) | (12 << 4) | 4),
+        machine_id: Some((0x5155 << 16) | (13 << 4) | 4),
         muldiv: true,
         tick: true,
         speed_bits: false,
@@ -277,48 +278,15 @@ impl Geometry {
         macro_dispatch: true,
     };
 
-    /// QUUX at revision 11: [`Geometry::QUUX`] without H8a's fused return,
-    /// its MACHINE-ID saying 11, destinations 5 to 7 writing only M and
-    /// feature word 17 reading 0. The machine a revision-12 run is compared
-    /// with (contract H8a §6).
-    pub const QUUX_11: Geometry = Geometry {
-        machine_id: Some((0x5155 << 16) | (11 << 4) | 4),
-        macro_dispatch: false,
-        ..Geometry::QUUX
-    };
-
-    /// **QUUX's, revision 13** (contract G2, with its appendix A1; not a
-    /// machine the executables run until revision 13 lands): revision 12
-    /// with a 40-bit word (G2 §2.1) and what comes with it, all keyed on
-    /// [`Geometry::wide`]. The BYTE fields are 6 bits, the JUMP and
-    /// DISPATCH rotates take `IR<47>` as their bit 5, the DISPATCH address
-    /// is `IR<23:12>` into a dispatch memory of 4,096 entries (A1.1,
-    /// A1.4); the rotator is a ring of 40 and the masker empty for a byte
-    /// that does not fit in bits 0-39 (A1.2); the conditions compare
-    /// fields, equality sees the tag, and two conditions are new, fixnum
-    /// overflow and unsigned less than (A1.3); the location counter has 30
-    /// bits and its flags above bit 31 (A1.6); and the map is two levels
-    /// of 8,192 7-bit and 4,096 28-bit entries over 1024-word pages, a
-    /// 28-bit virtual address and an 18-bit physical page (A1.7). The
-    /// MACHINE-ID says revision 13, and feature words 1, 2 and 6 the sizes
-    /// ([`Geometry::feature_word`]).
-    pub const QUUX_13: Geometry = Geometry {
-        word_bits: 40,
-        l1_bits: 7,
-        machine_id: Some((0x5155 << 16) | (13 << 4) | 4),
-        ..Geometry::QUUX
-    };
-
-    /// The level-1 entry a map store writes: `VMA<31:27>` on every machine
+    /// The level-1 entry a CADR's map store writes: `VMA<31:27>`
     /// (`mit/cadr/ir.bits`, "VMA<26>=1 writes the level 1 map from
-    /// VMA<31-27>"), and on QUUX `VMA<24>` as its sixth bit.
+    /// VMA<31-27>"). Revision 13 writes its own ([`Machine::write_map_13`]).
     pub fn l1_from_vma(self, vma: u32) -> u32 {
-        let low = (vma >> 27) & 0o37;
-        if self.l1_bits > 5 { low | ((vma >> 24) & 1) << 5 } else { low }
+        (vma >> 27) & self.l1_mask()
     }
 
-    /// QUUX's revision, from its MACHINE-ID's `<15:4>`: 11, 12 or 13, and
-    /// `None` on the CADR, which has no MACHINE-ID.
+    /// QUUX's revision, from its MACHINE-ID's `<15:4>`: 13, and `None` on
+    /// the CADR, which has no MACHINE-ID.
     pub fn revision(self) -> Option<u32> {
         self.machine_id.map(|id| id >> 4 & 0o7777)
     }
@@ -338,8 +306,7 @@ impl Geometry {
 
     /// QUUX's main memory in whole megawords, as `--main-memory-size` takes
     /// it: from 1MW to as many whole MW as [`Geometry::max_memory_boards`]
-    /// holds --- 64MW on revision 13, and on revision 12 3MW, its sixty
-    /// boards being 3.75MW.
+    /// holds, 64MW.
     pub fn main_memory_mw(self) -> std::ops::RangeInclusive<usize> {
         1..=self.max_memory_boards() >> 4
     }
@@ -351,7 +318,7 @@ impl Geometry {
 
     /// Whether a word is wider than 32 bits, `<39:32>` above the CADR's:
     /// revision 13, and with it its fields, rotator, conditions, dispatch
-    /// memory, location counter and map ([`Geometry::QUUX_13`]).
+    /// memory, location counter and map ([`Geometry::QUUX`]).
     pub fn wide(self) -> bool {
         self.word_bits > 32
     }
@@ -392,16 +359,9 @@ impl Geometry {
         (1 << self.pdl_bits) - 1
     }
 
-    /// The page a machine with a MACHINE-ID lists its sizes in, its
-    /// register page: physical `17777400`, the last page of the physical
-    /// space, fixed there (contract Q13). The frame buffer may grow up to
-    /// below it. On the CADR it is the Unibus window's last page, Unibus
-    /// `777000`-`777776`, where nothing answers.
-    pub const FEATURE_PAGE: u32 = 0o37777;
-
     /// Whether this machine has the register page, and with it QUUX's
-    /// decode of the space from `17000000` up ([`busint::decode_quux`]):
-    /// the frame buffer, the page, and nothing else.
+    /// decode of its physical space ([`busint::decode_quux_13`]): main
+    /// memory, the frame buffer window, the page, and nothing else.
     pub fn has_register_page(self) -> bool {
         self.machine_id.is_some()
     }
@@ -416,23 +376,15 @@ impl Geometry {
     /// word 15 the optional devices, a bit each, `<0>` the real-time clock
     /// and `<1>` the file device, a later optional device taking the next
     /// bit; word 16 the number of interval timers, 3; word 17 the MACRO
-    /// DISPATCH MEMORY's entries, 1,024; on revision 13 words 20 to 24 the
-    /// board name, the machine's ([`Machine::set_board_name`]); every other
-    /// word 0.
-    /// Below revision 9 word 15 reads 0, below revision 10 word 16 and below
-    /// revision 12 word 17, as every unused word does. Read-only, as every
-    /// word 0-77 is.
+    /// DISPATCH MEMORY's entries, 1,024; words 20 to 24 the board name, the
+    /// machine's ([`Machine::set_board_name`]); every other word 0.
+    /// Read-only, as every word 0-77 is.
     ///
-    /// Revision 13's page is at `1777777400`, the last page of its 28-bit
-    /// physical space ([`REGISTER_PAGE_13`]), with the same offsets.
+    /// The page is at `1777777400`, the last page of the 28-bit physical
+    /// space ([`REGISTER_PAGE_13`]).
     pub fn feature_word(self, phys: u32) -> Option<u32> {
         let id = self.machine_id?;
-        let on_page = if self.wide() {
-            phys & !0o377 == REGISTER_PAGE_13
-        } else {
-            (phys >> 8) & 0o37777 == Self::FEATURE_PAGE
-        };
-        if !on_page {
+        if phys & !0o377 != REGISTER_PAGE_13 {
             return None;
         }
         Some(match phys & 0o377 {
@@ -453,8 +405,7 @@ impl Geometry {
             0o15 => self.rtc as u32 | (self.file_device as u32) << 1,
             // The number of interval timers (contract Q11, revision 10).
             0o16 => self.tick as u32 * Timers::COUNT,
-            // The MACRO DISPATCH MEMORY's entries (contract H8a, revision
-            // 12).
+            // The MACRO DISPATCH MEMORY's entries (contract H8a).
             0o17 => self.macro_dispatch as u32 * macro_dispatch::ENTRIES as u32,
             _ => 0,
         })
@@ -462,15 +413,14 @@ impl Geometry {
 }
 
 /// **QUUX's MACRO-DISPATCH register and MACRO DISPATCH MEMORY, the fused
-/// return and the operand address** (contract H8a, revision 12). Functional
+/// return and the operand address** (contract H8a). Functional
 /// destinations 5 to 7, which the CADR leaves to its low group with no
-/// decoder output, so that there they write only M, as on QUUX below
-/// revision 12.
+/// decoder output, so that there they write only M.
 ///
 /// **The register**, destination 5: `<13:0>` the main loop's address,
-/// microcode 2000's `QMLP`; `<23:14>` the A-memory address of `A-LOCALP`
-/// (`uc-parameters.lisp:1071`) and `<28:24>` the M-memory address of `M-AP`
-/// (`uc-parameters.lisp:384`), the operand address's two bases; `<31>` the
+/// microcode 2001's `QMLP`; `<23:14>` the A-memory address of `A-LOCALP`
+/// (`uc-parameters.lisp:1192`) and `<28:24>` the M-memory address of `M-AP`
+/// (`uc-parameters.lisp:475`), the operand address's two bases; `<31>` the
 /// enable. `<30:29>` are reserved, written 0 and kept 0 here. -RESET clears
 /// the enable and nothing else, and so does every control-store write, so
 /// that no microcode runs on the entries another one left.
@@ -507,13 +457,13 @@ impl Geometry {
 /// mode chooses the halfword), or steps the location counter itself
 /// (`LCINC`: a `NEXT INSTR` the microcycle before, or a dispatch's
 /// `IR<24>`), and when the entry has R or P. A return that needs a fetch
-/// fuses on the word revision 12's cache-only prefetch holds
+/// fuses on the word QUUX's cache-only prefetch holds
 /// (`crate::memory_port`, contract H8a §3.5), when that is the next word
 /// in sequence and condition 6, which the main loop tests on the fetch
 /// path, is false; M 31, a register beside M memory, takes the word at the
 /// end of the microcycle after the return, [`MacroDispatch::m31`]. The
-/// prefetch looks in the cache's line, and `micro` has no cache: there a
-/// return that needs a fetch never fuses. So on revision 12 `rtl` fuses
+/// prefetch looks in the cache, and `micro` has no cache: there a
+/// return that needs a fetch never fuses. So `rtl` fuses
 /// more returns than `micro` does and takes fewer microcycles, and the two
 /// leave the same state wherever the microcode keeps the rule below.
 ///
@@ -584,7 +534,7 @@ pub mod macro_dispatch {
     pub const BASE_BITS: u32 = 0o37777;
 
     /// **Whether a return by a jump with R fuses**, as one by a POPJ or a
-    /// dispatch whose entry has R does. Microcode 2000 returns that way
+    /// dispatch whose entry has R does. Microcode 2001 returns that way
     /// with `POPJ-LESS-THAN` and its fellows. Contract H8a §3.3 names POPJs
     /// and dispatches only; this is the one switch that takes jumps out, on
     /// both engines.
@@ -1075,12 +1025,12 @@ impl Default for Timers {
 pub const PDL_WORDS: usize = 16 * 1024;
 
 /// The level-2 map's words on the largest machine, QUUX revision 13: 128
-/// blocks of 32 (contract G2 §2.6, A1.7). Revision 12 has 64 of them.
+/// blocks of 32 (contract G2 §2.6, A1.7). The CADR has 32 of them.
 pub const L2_MAP_WORDS: usize = 4096;
 
 /// The level-1 map's entries on the largest machine, QUUX revision 13,
-/// indexed by `VA<27:15>` (A1.7). The CADR and revision 12 have 2,048,
-/// indexed by `VMA<23:13>`.
+/// indexed by `VA<27:15>` (A1.7). The CADR has 2,048, indexed by
+/// `VMA<23:13>`.
 pub const L1_MAP_WORDS: usize = 8192;
 
 /// The dispatch memory's entries on the largest machine, QUUX revision
@@ -1191,14 +1141,12 @@ pub struct Machine {
     /// The widths of the map and the PDL buffer, [`Geometry::CADR`] unless
     /// the run chose another machine.
     pub geometry: Geometry,
-    /// 2048 five-bit entries, addressed by `VMA<23:13>`; six bits on QUUX;
-    /// on revision 13 8,192 seven-bit ones, addressed by `VA<27:15>`
-    /// ([`Machine::translate`]).
+    /// 2048 five-bit entries, addressed by `VMA<23:13>`; on QUUX 8,192
+    /// seven-bit ones, addressed by `VA<27:15>` ([`Machine::translate`]).
     pub l1_map: Box<[u32; L1_MAP_WORDS]>,
     /// 24-bit entries, addressed by the level-1 output and `VMA<12:8>`:
-    /// 1024 on the CADR and 2048 on QUUX; on revision 13 4,096 28-bit
-    /// ones, addressed by the level-1 output and `VA<14:10>`
-    /// ([`Machine::translate`]).
+    /// 1024 on the CADR; on QUUX 4,096 28-bit ones, addressed by the
+    /// level-1 output and `VA<14:10>` ([`Machine::translate`]).
     pub l2_map: Box<[u32; L2_MAP_WORDS]>,
     pub main: Vec<Word>,
     /// What the last bus cycles left in the error register; see
@@ -1469,7 +1417,6 @@ impl Machine {
     /// that wrote main memory invalidates QUUX's cache before that cycle, as
     /// a disk transfer does.
     pub fn advance_file_device(&mut self) {
-        self.file_device.revision_13 = self.geometry.wide();
         if self.geometry.file_device && self.file_device.advance(self.ns, &mut self.main) {
             self.dma_written = true;
         }
@@ -1734,7 +1681,7 @@ impl Machine {
     /// interface's own registers and the I/O board on the Unibus. Every
     /// other I/O address times out.
     ///
-    /// The CADR's alone: QUUX decodes by [`busint::decode_quux`].
+    /// The CADR's alone: QUUX decodes by [`busint::decode_quux_13`].
     fn device(&mut self, phys: u32) -> Option<usize> {
         match busint::decode_for(
             phys,
@@ -2155,13 +2102,10 @@ impl Machine {
     /// A read of a diagnostic register through this alone reads the open
     /// bus; the engines answer them.  See [`crate::spy`].
     ///
-    /// **On QUUX the register page and the frame buffer are looked at
-    /// first** (contract Q13): the page is the last page of the old Unibus
-    /// window, and the buffer may reach up to below it. Everything else from
-    /// `17000000` up is nothing there ([`busint::decode_quux`]): the old
-    /// page at `17377000`, the CADR's display and disk registers after it,
-    /// and the rest of the Unibus window, which QUUX does not have
-    /// (contract Q5).
+    /// **On QUUX the register page is looked at first** (contract Q13),
+    /// then the frame buffer window and main memory; everything else is
+    /// nothing there ([`busint::decode_quux_13`]), the CADR's Unibus
+    /// window included, which QUUX does not have (contract Q5).
     ///
     /// **Only main memory holds a whole word** (contract G2 §2.5): every
     /// other thing on the bus reads 0 above bit 31.
@@ -2174,10 +2118,9 @@ impl Machine {
             return Word::from(match phys & 0o377 {
                 0o11 => (width as u32) << 16 | height as u32,
                 0o12 => 1 << 16 | words_per_line as u32,
-                0o13 if self.geometry.wide() => WINDOW_13,
-                0o13 => tv::NORMAL_TV.buffer,
-                // The board name (contract HD §6.4), on revision 13.
-                k @ 0o20..=0o24 if self.geometry.wide() => self.board_name_word(k - 0o20),
+                0o13 => WINDOW_13,
+                // The board name (contract HD §6.4).
+                k @ 0o20..=0o24 => self.board_name_word(k - 0o20),
                 // The register page (contract Q2): who interrupted, the
                 // bus errors, and the mode.
                 0o100 => self.interrupt_sources(),
@@ -2214,7 +2157,7 @@ impl Machine {
                 k => self.quux_input.read(k).unwrap_or(w),
             });
         }
-        if self.geometry.wide() {
+        if self.geometry.has_register_page() {
             return match self.space_13(phys) {
                 Space13::Window(off) => UNBOXED_TAG | Word::from(self.tv.read_buffer(off)),
                 Space13::Main(a) => self.main[a],
@@ -2223,12 +2166,6 @@ impl Machine {
         }
         if let Some(off) = self.tv.buffer_offset(phys) {
             return self.tv.read_buffer(off).into();
-        }
-        if self.geometry.has_register_page() {
-            return match self.quux_memory(phys) {
-                Some(a) => self.main[a],
-                None => 0,
-            };
         }
         if let Some(r) = disk_controller::register(phys) {
             self.disk.advance(self.ns);
@@ -2280,19 +2217,6 @@ impl Machine {
         }
     }
 
-    /// On QUUX, past the register page and the frame buffer: main memory's
-    /// word, or nothing there, which sets word 101 `<0>`
-    /// ([`busint::decode_quux`]).
-    fn quux_memory(&mut self, phys: u32) -> Option<usize> {
-        match busint::decode_quux(phys, self.main.len(), self.tv.buffer_words()) {
-            busint::Responder::Memory(_) => Some(phys as usize),
-            _ => {
-                self.bus_error |= bus_error::XBUS_NXM;
-                None
-            }
-        }
-    }
-
     /// **Only main memory takes a whole word** (contract G2 §2.5): every
     /// other thing on the bus takes `<31:0>` of it.
     pub fn bus_write(&mut self, phys: u32, word: Word) {
@@ -2328,7 +2252,6 @@ impl Machine {
                 // buffer is empty.
                 k @ 0o160..=0o171 if self.geometry.file_device => {
                     self.advance_file_device();
-                    self.file_device.revision_13 = self.geometry.wide();
                     let (ns, drained) = (self.ns, self.write_buffer_empty_at);
                     self.file_device.write(k, value, ns, drained, &self.main);
                 }
@@ -2347,11 +2270,7 @@ impl Machine {
                 k @ 0o200..=0o203 => {
                     if let Some(d) = self.block_disk.as_mut() {
                         d.advance(self.ns);
-                        if self.geometry.wide() {
-                            d.write_40(k - 0o200, value, &mut self.main);
-                        } else {
-                            d.write(k - 0o200, value, &mut self.main);
-                        }
+                        d.write(k - 0o200, value, &mut self.main);
                         self.dma_written = true;
                     }
                 }
@@ -2365,7 +2284,7 @@ impl Machine {
             }
             return;
         }
-        if self.geometry.wide() {
+        if self.geometry.has_register_page() {
             match self.space_13(phys) {
                 // The window stores the field and drops the tag (G1 §4.2).
                 Space13::Window(off) => self.tv.write_buffer(off, value),
@@ -2381,15 +2300,6 @@ impl Machine {
         }
         if let Some(off) = self.tv.buffer_offset(phys) {
             self.tv.write_buffer(off, value);
-            return;
-        }
-        if self.geometry.has_register_page() {
-            if let Some(a) = self.quux_memory(phys) {
-                self.main[a] = word;
-                if let Some(log) = self.store_log.as_mut() {
-                    log.push(a as u32);
-                }
-            }
             return;
         }
         if let Some(r) = disk_controller::register(phys) {
@@ -2466,7 +2376,7 @@ pub const LVMO_AT_POWER_ON: u32 = (1 << 23) | (1 << 22) | 0x3fff;
 /// [`WINDOW_13`], the register page at the last page, and nothing
 /// anywhere else.
 ///
-/// The register page, `1777777400`-`1777777777`: revision 12's offsets.
+/// The register page, `1777777400`-`1777777777` ([`Geometry::feature_word`]).
 pub const REGISTER_PAGE_13: u32 = 0o1777777400;
 
 /// The board name's most characters, 4 to a word in feature words 20-24
@@ -2731,14 +2641,19 @@ impl Machine {
         self.rtc = Rtc::load(r)?;
         self.file_device.load(r)?;
         self.dma_written = r.bool()?;
-        // The CADR, or a QUUX with a PDL buffer of 1K to 16K words.
-        // Revision 12, or 11 without the fused return.
-        // A 40-bit word on revision 13 (contract G2 §2.1).
+        // The CADR, or QUUX, revision 13, with a PDL buffer of 1K to 16K
+        // words. A 32-bit QUUX is a retired revision's, 12 with the fused
+        // return and 11 without, which wrote the CADR's format version and
+        // is known by these fields: refused as what it is.
         self.geometry = match (word_bits, l1_bits, pdl_bits, muldiv, tick, fused) {
             (32, 5, 10, false, false, false) => Geometry::CADR,
-            (32, 6, 10..=14, true, true, true) => Geometry { pdl_bits, ..Geometry::QUUX },
-            (32, 6, 10..=14, true, true, false) => Geometry { pdl_bits, ..Geometry::QUUX_11 },
-            (40, 7, 10..=14, true, true, true) => Geometry { pdl_bits, ..Geometry::QUUX_13 },
+            (40, 7, 10..=14, true, true, true) => Geometry { pdl_bits, ..Geometry::QUUX },
+            (32, 6, 10..=14, true, true, fused) => {
+                let revision = if fused { 12 } else { 11 };
+                return Err(crate::checkpoint::bad(format!(
+                    "a checkpoint of QUUX revision {revision}, which this build no longer runs: it runs the CADR and QUUX revision 13, and a revision-{revision} checkpoint resumes only on an earlier muir-sim"
+                )));
+            }
             _ => {
                 return Err(crate::checkpoint::bad(format!(
                     "{word_bits}-bit words, a map of {l1_bits}-bit level-1 entries and a {pdl_bits}-bit PDL buffer, multiply and divide {muldiv}, tick {tick}, fused return {fused}, is no machine's"
@@ -2777,13 +2692,15 @@ impl Machine {
     /// Back from a checkpoint, into a machine built as the flags say: the
     /// same memory, the same pack under it, the same Chaosnet on it.
     ///
-    /// **A revision-12 checkpoint is refused by a revision-13 machine**
-    /// (contract G2 §2.8): its words are 32 bits and its map, dispatch
-    /// memory and devices revision 12's.
+    /// **A checkpoint of 32-bit words is refused by QUUX** (contract G2
+    /// §2.8): it is the CADR's, and its map, dispatch memory and devices
+    /// are the CADR's. One of retired QUUX revision 12 is refused as that,
+    /// by the machine its body records.
     pub fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()> {
         if self.geometry.wide() && r.word_bits() == 32 {
+            Machine::with_memory_boards(1).load_to_geometry(r)?;
             return Err(crate::checkpoint::bad(
-                "a checkpoint of 32-bit words, the CADR's or revision 12's, and this is revision 13",
+                "a checkpoint of 32-bit words, the CADR's, and this is QUUX, revision 13",
             ));
         }
         self.load_to_geometry(r)?;

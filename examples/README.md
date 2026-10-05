@@ -56,8 +56,9 @@ there the drive takes its own time --- about 3% on a run that touches no
 pack, and days on one that reads a band. See the note on `report` in
 `benchmark.rs`.
 
-`profile` is where a band's microcycles go. It boots QUUX's release, or the
-CADR's muir-sys release on the CADR, with the test harness's Chaosnet server, logs in, and types thirteen workloads at
+`profile` is where a band's microcycles go. It boots the QUUX band that
+`MUIR_BAND` names, or the CADR's muir-sys release on the CADR, with the test
+harness's Chaosnet server, logs in, and types thirteen workloads at
 the listener --- the empty form, compiling, two kinds of recursion, consing,
 fixnum multiply and remainder, flonum arithmetic, `aset` and `aref`, sorting,
 bignums, `intern`, printing, and compiling again --- each ending by writing a
@@ -83,6 +84,8 @@ prints says what it is of.
 committed. `screen`, `band`, `cc` and `coverage` need the System 100 release in `vendor/` --- `cc`
 needs the system sources too, since the Chaosnet server serves them to the
 machine as `SYS:`. `tools/fetch-system-100-for-cadr.sh` puts both in place.
-`profile` needs a muir-sys release instead: QUUX's from
-`tools/fetch-system-for-quux.sh`, the CADR's from
-`tools/fetch-system-for-cadr.sh`.
+`profile` needs a muir-sys band instead: on QUUX the directory
+`MUIR_BAND` names, a band's disk and the tree it was built from, such as
+a directory holding System 2001's release disk, decompressed, and its
+`release-2001-sys.tar.gz`, both from `tools/fetch-system-for-quux.sh`; on
+the CADR its release, from `tools/fetch-system-for-cadr.sh`.

@@ -32,8 +32,10 @@ use crate::part::Level;
 const MAGIC: &[u8; 16] = b"muir checkpoint\n";
 
 /// Bumped whenever any type changes what it writes; a file from another
-/// version is refused rather than read wrong. A 32-bit machine's: the CADR
-/// and QUUX to revision 12.
+/// version is refused rather than read wrong. A 32-bit machine's, the
+/// CADR's. QUUX revision 12, retired, wrote this version too; its
+/// checkpoint is refused by the machine its body records
+/// ([`crate::machine::Machine::load`]).
 pub const VERSION: u32 = 49;
 
 /// A 40-bit machine's, QUUX revision 13's (contract G2 appendix A1.13):
@@ -41,8 +43,7 @@ pub const VERSION: u32 = 49;
 /// is G1 §4.1's packed storage; the dispatch memory of 4,096 entries, the
 /// map's 8,192 and 4,096, the overflow flag, and revision 13's location
 /// counter and devices. The version says the width: a resume reads the
-/// body at 40 bits, and a revision-12 checkpoint, version [`VERSION`], is
-/// refused on revision 13 ([`crate::machine::Machine::load`]).
+/// body at 40 bits.
 pub const VERSION_40: u32 = 50;
 
 /// The shortest run of zero bytes worth a count of its own.

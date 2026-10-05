@@ -12,7 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use muir::machine::{Geometry, Machine, Rtc, bus_error};
 
-const PAGE: u32 = 0o17777400;
+mod support;
+
+const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
 const RTC: u32 = PAGE + 0o103;
 const SECOND: u64 = 1_000_000_000;
 
@@ -141,7 +143,8 @@ fn a_checkpoint_keeps_the_count() {
         m.save(&mut w);
         let body = w.finish();
         let mut back = Machine::new();
-        back.load(&mut Reader::new(&body)).unwrap();
+        back.geometry = Geometry::QUUX;
+        back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
         assert_eq!(back.rtc, rtc);
         assert_eq!(back.geometry, Geometry::QUUX);
         if let Rtc::Counted { .. } = rtc {
@@ -179,8 +182,7 @@ fn both_engines_count_machine_seconds() {
         let mut words = vec![filler(); 1024];
         words[..prom.len()].copy_from_slice(&prom);
         m.load_prom(&words);
-        m.l2_map[1] = (1 << 23) | (1 << 22) | 0o37777;
-        m.mmem[1] = (1 << 8) | 0o103;
+        m.mmem[1] = support::quux_map(&mut m, 1, PAGE | 0o103).into();
         m.rtc = Rtc::Counted { start: s, base_ns: 0 };
         m
     };

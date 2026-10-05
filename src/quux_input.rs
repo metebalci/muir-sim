@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! QUUX's keyboard and mouse (contract Q3), on the register page at
-//! `17777400`: word 120 the keyboard's status, 121 its data, 122 the mouse,
+//! `1777777400`: word 120 the keyboard's status, 121 its data, 122 the mouse,
 //! 123 the mouse's status.
 //!
 //! The CADR's I/O board takes its keyboard's words off a serial line at the

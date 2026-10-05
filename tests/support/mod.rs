@@ -21,11 +21,22 @@ pub mod profile;
 pub mod server;
 pub mod status;
 pub mod time;
+pub mod unused_codes;
 
 /// `<31:0>` of a word of a 32-bit machine, which has nothing above bit 31:
 /// a word with more is a fault to report, not a value to cut.
 pub fn low(w: muir::machine::Word) -> u32 {
     u32::try_from(w).expect("a 32-bit machine's word with bits above 31")
+}
+
+/// QUUX's virtual page `vpage`, below 32 and so in level-1 block 0, mapped
+/// readable and writable to the 1024-word frame that holds physical word
+/// `phys` (contract G2 §2.6, appendix A1.7): the frame in its level-2
+/// entry, `<17:0>`, and the access bits `<27:26>`. Returns the virtual
+/// address of `phys`.
+pub fn quux_map(m: &mut muir::machine::Machine, vpage: u32, phys: u32) -> u32 {
+    m.l2_map[vpage as usize] = 1 << 27 | 1 << 26 | phys >> 10;
+    vpage << 10 | phys & 0o1777
 }
 
 pub use server::ChaosServer;
@@ -94,25 +105,28 @@ pub fn file_root() -> Option<PathBuf> {
     vendor(&["run", "file-root"])
 }
 
-/// QUUX's release, the one `tools/fetch-system-for-quux.sh` is pinned to:
-/// its tag, which is also the directory its sources unpack to.
-pub const QUUX_RELEASE: &str = "release-2000";
+/// QUUX's release, the directory its sources unpack to.
+pub const QUUX_RELEASE: &str = "release-2001";
 
-/// A file of QUUX's release, under `vendor/system-2000/` where
+/// A file of QUUX's release, under `vendor/system-2001/` where
 /// `tools/fetch-system-for-quux.sh` puts the release's files and unpacks
 /// its sources, or `None` with the skip line.
 pub fn quux_release(parts: &[&str]) -> Option<PathBuf> {
-    let mut p = vec!["system-2000"];
+    let mut p = vec!["system-2001"];
     p.extend(parts);
-    vendor(&p)
+    let found = vendor(&p);
+    if found.is_none() {
+        eprintln!("skipped: tools/fetch-system-for-quux.sh fetches it");
+    }
+    found
 }
 
 /// QUUX's release in a scratch directory, or `None` with the skip line:
-/// its disk decompressed from the release's own `release-2000-disk.vhd.gz`
+/// its disk decompressed from the release's own `release-2001-disk.vhd.gz`
 /// to `pack.vhd`, which the machine writes; its sources unpacked from
-/// `release-2000-sys.tar.gz` beside it, to `release-2000/`; and a file root,
+/// `release-2001-sys.tar.gz` beside it, to `release-2001/`; and a file root,
 /// `root/`, with the sources' `sys` and `site` and an empty `lispm` and
-/// `home/lispm`. The disk is not `vendor/run/release-2000-disk.vhd`, the
+/// `home/lispm`. The disk is not `vendor/run/release-2001-disk.vhd`, the
 /// one the fetch script leaves for running `quux` by hand, which a machine
 /// has written to once it has run.
 pub fn quux_release_band(name: &str) -> Option<(Scratch, PathBuf, PathBuf)> {
@@ -810,7 +824,13 @@ pub fn chip(n: &Netlists) -> (Chip, Behavioral, FarEnd) {
 /// as a T-300 on unit 0: what every boot off the pack starts from, on
 /// whichever engine.
 pub fn machine_with_pack(pack: &Path) -> Machine {
-    let mut m = Machine::new();
+    machine_with_pack_at(pack, muir::machine::MAIN_WORDS >> 16)
+}
+
+/// [`machine_with_pack`] with `boards` 64K-word boards of main memory, as
+/// `--main-memory-boards` gives them.
+pub fn machine_with_pack_at(pack: &Path, boards: usize) -> Machine {
+    let mut m = Machine::with_memory_boards(boards);
     m.load_prom(&muir::prom::boot_prom());
     m.disk.attach(0, Unit::open(pack, Geometry::T300).expect("the System 100 pack"));
     m
@@ -885,6 +905,83 @@ pub fn gpt_partition(d: &mut muir::disk_image::Disk, lisp: &str) -> GptPartition
 pub fn ucadr_323_partition_order() -> Vec<u8> {
     let mut mcr = muir::mcr::swap_halves(muir::mcr::UCADR_323).unwrap();
     mcr.resize(mcr.len().div_ceil(1024) * 1024, 0);
+    mcr
+}
+
+/// MIT's microcode 323 in the shapes PROM 2001 loads (contract G2 appendix
+/// A1.4, A1.12), in partition order and whole blocks: its control store
+/// section as it is; its dispatch memory section of 4,096 entries, MIT's
+/// 2,048 then 2,048 of 0; its main-memory section's header with the
+/// relative block its four blocks move to and their physical address
+/// `6000`, page 3 at 1024-word pages, as microcode 2001's own section has
+/// it, where MIT's says `1400`, page 3 at 256; A memory as section 5, each
+/// word `<31:0>` then a high word of 0; and the four blocks after the
+/// sections, at that block. Only the shapes are revision 13's: the program
+/// is MIT's 32-bit one, which the PROM loads and jumps to as it would any.
+pub fn ucadr_323_at_40_partition_order() -> Vec<u8> {
+    let mit = muir::mcr::UCADR_323;
+    let word = |at: usize| {
+        let b = &mit[at..at + 4];
+        (b[1] as u32) << 24 | (b[0] as u32) << 16 | (b[3] as u32) << 8 | b[2] as u32
+    };
+    let put = |out: &mut Vec<u8>, v: u32| {
+        out.extend_from_slice(&((v >> 16) as u16).to_le_bytes());
+        out.extend_from_slice(&(v as u16).to_le_bytes());
+    };
+    let mut out = Vec::new();
+    let mut at = 0;
+    let mut main_memory = None;
+    loop {
+        let (code, start, size) = (word(at), word(at + 4), word(at + 8) as usize);
+        match code {
+            1 => {
+                let end = at + 12 + 8 * size;
+                out.extend_from_slice(&mit[at..end]);
+                at = end;
+            }
+            2 => {
+                assert_eq!(size, 0o4000, "MIT's dispatch memory");
+                for v in [2, start, 0o10000] {
+                    put(&mut out, v);
+                }
+                out.extend_from_slice(&mit[at + 12..at + 12 + 4 * size]);
+                out.resize(out.len() + 4 * 0o4000, 0);
+                at += 12 + 4 * size;
+            }
+            3 => {
+                // Blocks, relative block, physical address: written below,
+                // once the relative block the data moves to is known.
+                main_memory = Some((out.len(), start, size, word(at + 12)));
+                out.resize(out.len() + 16, 0);
+                at += 16;
+            }
+            4 => {
+                for v in [5, start, size as u32] {
+                    put(&mut out, v);
+                }
+                for k in 0..size {
+                    put(&mut out, word(at + 12 + 4 * k));
+                    put(&mut out, 0);
+                }
+                break;
+            }
+            _ => panic!("section {code} in MIT's microcode"),
+        }
+    }
+    let (header, blocks, relative, physical) = main_memory.expect("a main-memory section");
+    assert_eq!(physical, 3 << 8, "MIT's page 3");
+    let physical = 3 << 10;
+    out.resize(out.len().next_multiple_of(1024), 0);
+    let moved = out.len() / 1024;
+    let mut h = Vec::new();
+    for v in [3, blocks, moved as u32, physical] {
+        put(&mut h, v);
+    }
+    out[header..header + 16].copy_from_slice(&h);
+    let from = relative * 1024;
+    out.extend_from_slice(&mit[from..from + blocks as usize * 1024]);
+    let mut mcr = muir::mcr::swap_halves(&out).unwrap();
+    mcr.resize(mcr.len().next_multiple_of(1024), 0);
     mcr
 }
 
@@ -1008,15 +1105,13 @@ pub fn executable(name: &str) -> std::process::Command {
     }
 }
 
-/// The binary at `path`, with stdin closed, `MUIR_RC` naming an empty
-/// file, and no `MUIR_QUUX_REVISION` from the developer's environment:
-/// `quux` is revision 12 unless the test says otherwise.
+/// The binary at `path`, with stdin closed and `MUIR_RC` naming an empty
+/// file.
 fn built(path: Option<&str>, name: &str) -> std::process::Command {
     let Some(path) = path else { panic!("only a test binary is told where {name} is") };
     let mut c = std::process::Command::new(path);
     c.stdin(std::process::Stdio::null());
     c.env("MUIR_RC", "/dev/null");
-    c.env_remove("MUIR_QUUX_REVISION");
     c
 }
 

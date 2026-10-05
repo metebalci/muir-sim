@@ -111,7 +111,7 @@ fn a_checkpoint_keeps_the_ticks() {
     let mut m = Machine::new();
     m.geometry = Geometry::QUUX;
     let mut back = Rtl::new(m);
-    back.load(&mut Reader::new(&body)).unwrap();
+    back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
     assert_eq!(back.timing_model(), sync(3, 2));
     assert_eq!(time_of(&mut back, 8), 8 * 30);
 }
@@ -161,8 +161,7 @@ fn a_write_lands_no_earlier_than_its_answer() {
     m.geometry = Geometry::QUUX;
     support::prom_program_in_ram(&mut m);
     m.tv.set_board(muir::tv::Board::Video);
-    m.l2_map[1] = (1 << 23) | (1 << 22) | (0o17000000 >> 8);
-    m.mmem[1] = 0o400;
+    m.mmem[1] = support::quux_map(&mut m, 1, muir::machine::WINDOW_13).into();
     let mut e = Rtl::new(m);
     e.set_timing_model(sync(4, 0));
     e.boot();

@@ -3,9 +3,8 @@
 
 //! **QUUX's main memory is an amount, `--main-memory-size <n>MW`**: a whole
 //! number of megawords with the unit written, and nothing else --- no KW,
-//! no fractions, no bare M, which could be read as megabytes. Revision 13
-//! takes 1MW to 64MW, 32MW by default; revision 12 takes 1MW to 3MW, 2MW
-//! by default. `quux` refuses `--main-memory-boards` and `--main-memory`,
+//! no fractions, no bare M, which could be read as megabytes: 1MW to 64MW,
+//! 32MW by default. `quux` refuses `--main-memory-boards` and `--main-memory`,
 //! naming `--main-memory-size`; the boards and the board's netlist or
 //! model are the CADR's, and `cadr` keeps them.
 //! Everything that says how much memory a QUUX has says it in MW. The
@@ -16,8 +15,6 @@ mod support;
 use muir::machine::{Geometry, Machine, bus_error};
 use support::{Run, cadr, quux, scratch, text};
 
-const SWITCH: &str = "MUIR_QUUX_REVISION";
-
 /// What a refused form of the amount is told.
 const UNIT: &str = "main memory is given in megawords, with the unit MW, such as 32MW";
 
@@ -25,13 +22,6 @@ fn refused(out: &std::process::Output, says: &str) {
     let t = text(out);
     assert_eq!(out.status.code(), Some(2), "not refused at the start:\n{t}");
     assert!(t.contains(says), "the refusal says {says:?}:\n{t}");
-}
-
-/// `quux` on revision `rev`.
-fn quux_at(rev: &str) -> std::process::Command {
-    let mut c = quux();
-    c.env(SWITCH, rev);
-    c
 }
 
 /// The machine a checkpoint holds, loaded as the run left it.
@@ -55,61 +45,46 @@ fn answers(m: &mut Machine, phys: u32) -> bool {
 /// A run with `--main-memory-size <n>MW`, on both engines, with the machine the
 /// checkpoint holds: the start says the amount, the machine has `n` M
 /// words, and the bus answers the last of them and not the word after.
-fn runs_with(rev: &str, n: usize) {
-    let dir = scratch(&format!("main-memory-{rev}-{n}"));
+fn runs_with(n: usize) {
+    let dir = scratch(&format!("main-memory-{n}"));
     for engine in ["--micro", "--rtl"] {
         let chk = dir.join(format!("{}.chk", &engine[2..]));
         let amount = format!("{n}MW");
-        let out = quux_at(rev)
+        let out = quux()
             .args([engine, "--main-memory-size", &amount, "--stop-after", "10", "--checkpoint"])
             .arg(&chk)
             .run();
         let t = text(&out);
-        assert!(out.status.success(), "{rev} {engine} {amount}: {t}");
-        assert!(t.contains(&format!("memory: {n}MW\n")), "{rev} {engine}: the start:\n{t}");
+        assert!(out.status.success(), "{engine} {amount}: {t}");
+        assert!(t.contains(&format!("memory: {n}MW\n")), "{engine}: the start:\n{t}");
         let mut m = checkpointed(&chk);
-        assert_eq!(m.main.len(), n << 20, "{rev} {engine}: {n}MW");
+        assert_eq!(m.main.len(), n << 20, "{engine}: {n}MW");
         let end = (n << 20) as u32;
-        assert!(answers(&mut m, end - 1), "{rev} {engine}: the last word of {amount}");
-        assert!(!answers(&mut m, end), "{rev} {engine}: the word past {amount}");
+        assert!(answers(&mut m, end - 1), "{engine}: the last word of {amount}");
+        assert!(!answers(&mut m, end), "{engine}: the word past {amount}");
     }
 }
 
-/// **1MW, 32MW and 64MW on revision 13** each reach the machine.
+/// **1MW, 3MW, 32MW and 64MW** each reach the machine.
 #[test]
-fn revision_13_runs_with_each_amount() {
-    for n in [1, 32, 64] {
-        runs_with("13", n);
+fn quux_runs_with_each_amount() {
+    for n in [1, 3, 32, 64] {
+        runs_with(n);
     }
 }
 
-/// **1MW and 3MW on revision 12**, its least and its most.
+/// **The default is 32MW**, said at the start and built.
 #[test]
-fn revision_12_runs_with_each_amount() {
-    for n in [1, 3] {
-        runs_with("12", n);
-    }
-}
-
-/// **The default is 32MW on revision 13 and 2MW on revision 12**, said at
-/// the start and built.
-#[test]
-fn the_default_by_revision() {
+fn the_default_is_32mw() {
     let dir = scratch("main-memory-default");
-    for (rev, n) in [("13", 32), ("12", 2)] {
-        let chk = dir.join(format!("{rev}.chk"));
-        let out =
-            quux_at(rev).args(["--micro", "--stop-after", "1", "--checkpoint"]).arg(&chk).run();
-        let t = text(&out);
-        assert!(out.status.success(), "{rev}: {t}");
-        assert!(t.contains(&format!("memory: {n}MW\n")), "{rev}: the start:\n{t}");
-        let m = checkpointed(&chk);
-        assert_eq!(m.main.len(), n << 20, "{rev}: {n}MW by default");
-        assert_eq!(m.geometry.wide(), rev == "13", "{rev}: the revision built");
-    }
-    // Without the switch it is revision 12.
-    let out = quux().args(["--micro", "--stop-after", "1"]).run();
-    assert!(text(&out).contains("memory: 2MW\n"), "{}", text(&out));
+    let chk = dir.join("default.chk");
+    let out = quux().args(["--micro", "--stop-after", "1", "--checkpoint"]).arg(&chk).run();
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(t.contains("memory: 32MW\n"), "the start:\n{t}");
+    let m = checkpointed(&chk);
+    assert_eq!(m.main.len(), 32 << 20, "32MW by default");
+    assert_eq!(m.geometry, Geometry::QUUX, "the machine built");
 }
 
 /// **Any other way of writing the amount is refused**, saying how it is
@@ -120,59 +95,42 @@ fn the_default_by_revision() {
 fn another_form_is_refused() {
     let forms =
         ["32M", "32", "32mw", "32Mw", "1.5MW", "32KW", "32MB", "MW", "", "+32MW", "-1MW", "32 MW"];
-    for rev in ["13", "12"] {
-        for form in forms {
-            let out = quux_at(rev)
-                .args(["--micro", "--main-memory-size", form, "--stop-after", "1"])
-                .run();
-            refused(&out, &format!("--main-memory-size {form}: {UNIT}"));
-        }
-        let out = quux_at(rev).args(["--micro", "--main-memory-size"]).run();
-        refused(&out, &format!("--main-memory-size: {UNIT}"));
+    for form in forms {
+        let out = quux().args(["--micro", "--main-memory-size", form, "--stop-after", "1"]).run();
+        refused(&out, &format!("--main-memory-size {form}: {UNIT}"));
     }
+    let out = quux().args(["--micro", "--main-memory-size"]).run();
+    refused(&out, &format!("--main-memory-size: {UNIT}"));
 }
 
-/// **An amount outside the revision's range is refused, saying the
-/// range**: 1MW to 64MW on revision 13, 1MW to 3MW on revision 12.
+/// **An amount outside the range is refused, saying the range**: 1MW to
+/// 64MW.
 #[test]
 fn an_amount_out_of_range_is_refused() {
-    for (rev, form, range) in [
-        ("13", "0MW", "1MW to 64MW"),
-        ("13", "65MW", "1MW to 64MW"),
-        ("13", "1024MW", "1MW to 64MW"),
-        ("12", "0MW", "1MW to 3MW"),
-        ("12", "4MW", "1MW to 3MW"),
-        ("12", "32MW", "1MW to 3MW"),
-    ] {
-        let out =
-            quux_at(rev).args(["--micro", "--main-memory-size", form, "--stop-after", "1"]).run();
+    for form in ["0MW", "65MW", "1024MW"] {
+        let out = quux().args(["--micro", "--main-memory-size", form, "--stop-after", "1"]).run();
         refused(
             &out,
-            &format!("--main-memory-size {form}: revision {rev}'s main memory is {range}"),
+            &format!("--main-memory-size {form}: revision 13's main memory is 1MW to 64MW"),
         );
     }
 }
 
-/// **`quux` refuses `--main-memory-boards` and `--main-memory`**, on both
-/// revisions, naming `--main-memory-size`; there is no alias.
+/// **`quux` refuses `--main-memory-boards` and `--main-memory`**, naming
+/// `--main-memory-size`; there is no alias.
 #[test]
 fn quux_refuses_main_memory_boards() {
-    for rev in ["13", "12"] {
-        for n in ["32", "512"] {
-            let out = quux_at(rev)
-                .args(["--micro", "--main-memory-boards", n, "--stop-after", "1"])
-                .run();
-            refused(&out, "--main-memory-boards is cadr's, not quux's");
-            refused(&out, "--main-memory-size 32MW");
-        }
-        // The CADR's `--main-memory`, netlist or model, is no flag of
-        // quux's either, with or without an amount after it.
-        for word in ["32MW", "model"] {
-            let out =
-                quux_at(rev).args(["--micro", "--main-memory", word, "--stop-after", "1"]).run();
-            refused(&out, "--main-memory is cadr's, not quux's");
-            refused(&out, "--main-memory-size 32MW");
-        }
+    for n in ["32", "512"] {
+        let out = quux().args(["--micro", "--main-memory-boards", n, "--stop-after", "1"]).run();
+        refused(&out, "--main-memory-boards is cadr's, not quux's");
+        refused(&out, "--main-memory-size 32MW");
+    }
+    // The CADR's `--main-memory`, netlist or model, is no flag of quux's
+    // either, with or without an amount after it.
+    for word in ["32MW", "model"] {
+        let out = quux().args(["--micro", "--main-memory", word, "--stop-after", "1"]).run();
+        refused(&out, "--main-memory is cadr's, not quux's");
+        refused(&out, "--main-memory-size 32MW");
     }
     let out = quux().arg("--help").run();
     let t = text(&out);
@@ -208,18 +166,18 @@ fn a_resume_says_its_memory_in_mw() {
     let dir = scratch("main-memory-resume");
     for engine in ["--micro", "--rtl"] {
         let chk = dir.join(format!("{}.chk", &engine[2..]));
-        let out = quux_at("13")
+        let out = quux()
             .args([engine, "--main-memory-size", "4MW", "--stop-after", "100", "--checkpoint"])
             .arg(&chk)
             .run();
         assert!(out.status.success(), "{engine}: {}", text(&out));
-        let out = quux_at("13").args([engine, "--stop-after", "10", "--resume"]).arg(&chk).run();
+        let out = quux().args([engine, "--stop-after", "10", "--resume"]).arg(&chk).run();
         let t = text(&out);
         assert!(out.status.success(), "{engine}: {t}");
         assert!(t.contains("with 4MW of main memory"), "{engine}: the start:\n{t}");
         assert!(t.contains("100 microcycles") && t.contains(", 4MW of main memory"), "{t}");
         assert!(!t.contains("boards"), "{engine}: no boards on QUUX:\n{t}");
-        let out = quux_at("13")
+        let out = quux()
             .args([engine, "--main-memory-size", "8MW", "--stop-after", "10", "--resume"])
             .arg(&chk)
             .run();
@@ -228,7 +186,7 @@ fn a_resume_says_its_memory_in_mw() {
     // The machine's own refusal, loading one checkpoint onto another
     // amount, says it in MW too.
     let c = muir::checkpoint::read(&dir.join("micro.chk")).unwrap();
-    let mut m = Machine::with_geometry(Geometry::QUUX_13, 128);
+    let mut m = Machine::with_geometry(Geometry::QUUX, 128);
     let err = m.load(&mut c.reader()).unwrap_err().to_string();
     assert!(err.contains("4MW of main memory") && err.contains("this machine has 8MW"), "{err}");
     assert!(!err.contains("boards"), "{err}");

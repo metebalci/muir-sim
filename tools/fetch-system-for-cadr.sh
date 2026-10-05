@@ -1,11 +1,15 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 Mete Balci
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Fetch the CADR's current muir-sys release, System 1002.
+# Fetch the CADR's current muir-sys release, System 1003.
 #
-# System 1002 continues System 100 and 1001 on the CADR, on the CADR's
-# microcode 1000: MIT's 323 with three of MIT's fixes. It is the GitHub
-# release `release-1002` of https://github.com/metebalci/muir-sys, made on
+# System 1003 continues System 100, 1001 and 1002 on the CADR, on the
+# CADR's microcode 1001, microcode 1000 with more fixes and the changes for
+# up to 60 memory boards, 3840K, where muir-sim's `cadr` gives 32 by
+# default (`--main-memory-boards 60`); the release's notes,
+# `docs/release-1003.md` in its sources, list them. It is the GitHub release
+# `release-1003` of
+# https://github.com/metebalci/muir-sys, made on
 # that repository's `cadr` branch, and like System 100 it is not part of
 # this repository: `vendor/` is fetched material and is in .gitignore.
 # System 100, fetched by `fetch-system-100-for-cadr.sh`, stays the CADR's
@@ -14,11 +18,11 @@
 # The release's files, and where this puts them:
 #
 #   SHA256SUMS                the release's own sums, kept beside the rest
-#   release-1002-sys.tar.gz   the sources: the muir-sys repository at the
+#   release-1003-sys.tar.gz   the sources: the muir-sys repository at the
 #                             release's tag, with `sys/ubin/` assembled,
-#                             unpacked to vendor/system-1002/
-#   release-1002-pack.img.gz  the disk pack, decompressed to
-#                             vendor/run/release-1002-pack.img
+#                             unpacked to vendor/system-1003/
+#   release-1003-pack.img.gz  the disk pack, decompressed to
+#                             vendor/run/release-1003-pack.img
 #
 # The license is in the sources: the GNU Affero General Public License,
 # version 3 or later, muir's own, with `NOTICE` giving their provenance.
@@ -48,7 +52,7 @@
 
 set -eu
 muir=$(cd "$(dirname "$0")/.." && pwd)
-tag=release-1002
+tag=release-1003
 base=${SYSTEM_FOR_CADR_BASE:-https://github.com/metebalci/muir-sys/releases/download/$tag}
 rel=$muir/vendor/system-${tag#release-}
 vrel=vendor/system-${tag#release-}
@@ -59,10 +63,10 @@ pack=$tag-pack.img
 # The SHA-256 of each file, as the release's SHA256SUMS and notes give them.
 sum_of() {
     case $1 in
-    SHA256SUMS) echo 550bc1ca30f021f7b4d208dff824478645c74de26ee2503b518298b69c380ff5 ;;
-    release-1002-sys.tar.gz) echo 38fad7231a3876cddda654070273f5b4eabb67a7733860182a09d375898edd4d ;;
-    release-1002-pack.img.gz) echo 9b98b0cb6e5cf329d556652bbd1db4129b53a0fcf2f3c5c51b0680482b92ece4 ;;
-    release-1002-pack.img) echo e59b4de908cc744908b56e8166e8def9d6ef1d0173603342d1e8d759b55b3b08 ;;
+    SHA256SUMS) echo a28cefd16354ebd735f50edbb5f3dfd4c30e6ed46fcdcb42a3ecd7e5444c44b0 ;;
+    release-1003-sys.tar.gz) echo 83fc38c0236fdb372099641ea2d93e2dd3a9ef905420d8ff1307b3369266b85e ;;
+    release-1003-pack.img.gz) echo cf3632a7a2ab0522043994ee004e02b1766ee93b4ba287170566d149de1aed78 ;;
+    release-1003-pack.img) echo 7e8ab2aac763f1e03a4cc2b08b31b43707565f75604c8683e14628d2a00e6bc1 ;;
     esac
 }
 

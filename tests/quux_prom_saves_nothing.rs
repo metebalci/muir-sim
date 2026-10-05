@@ -3,39 +3,39 @@
 
 //! QUUX's boot PROM saves nothing and writes nothing to the disk (contract
 //! Q8): from the boot until the PC first reaches the microcode's location 6
-//! it writes no block of the disk, and main memory only in physical pages
-//! 3-6 (words 1400-3377) --- its buffer and the microcode's main-memory
-//! section, which it loads last over the buffer --- and word 777, the
-//! command list word of its disk transfers. On a GPT disk blocks 0 to 16
-//! are the protective MBR, the primary GPT header and its entry array, and
-//! the machine never writes the table (contract Q8, decided 1). MIT's PROM
-//! writes page 0 of memory to block 1 before it loads anything, "In order
-//! to not clobber core" (`SAVE-A-PAGE`, `mit/sys/ucadr/promh.text`);
-//! muir-sys's `promh.text` for QUUX drops that save.
+//! it writes no block of the disk, and main memory only in physical page 3
+//! of 1024 words (words 6000-7777) --- its buffer and the microcode's
+//! main-memory section, which it loads last over the buffer --- and word
+//! 2377, the command list word of its disk transfers. On a GPT disk blocks
+//! 0 to 16 are the protective MBR, the primary GPT header and its entry
+//! array, and the machine never writes the table (contract Q8, decided 1).
+//! MIT's PROM writes page 0 of memory to block 1 before it loads anything,
+//! "In order to not clobber core" (`SAVE-A-PAGE`,
+//! `mit/sys/ucadr/promh.text`); muir-sys's `promh.text` for QUUX drops that
+//! save.
 //!
-//! The PROM is `data/quux-promh-2000.mcr`, muir's built-in QUUX PROM, the GPT
-//! PROM: it finds the microcode through the disk's GPT, the first
-//! microcode partition with attribute bit 48 set, and not through MIT's
-//! `LABL` label, and on a disk with no GPT it stops at `ERROR-NO-GPT`
+//! The PROM is `data/quux-promh.mcr`, PROM 2001, muir's built-in QUUX PROM:
+//! it finds the microcode through the disk's GPT, the first microcode
+//! partition with attribute bit 48 set, and not through MIT's `LABL` label,
+//! and on a disk with no GPT it stops at `ERROR-NO-GPT`
 //! ([`quux_s_prom_reads_a_gpt_not_mit_s_label`]). The microcode partition
 //! holds a `.mcr` in partition order, as `dd` writes it, at the partition's
-//! first block and with no conversion.
+//! first block and with no conversion; the PROM reads it by 4-byte
+//! transfers, 4 blocks a 1024-word page (contract G2 §4.4).
 //!
-//! Two disks. One is made here from committed files and always runs:
+//! The disk is made here from committed files and always runs:
 //! `data/quux-disk.img`, the GPT disk sgdisk made, with MIT's microcode
-//! 323, `mit/sys/ubin/ucadr.mcr`, turned into partition order, in its
-//! current `MCR1`. The PROM does not care whose microcode it loads, only
-//! about its sections. The other is QUUX's release's disk,
-//! `release-2000-disk.vhd.gz` (`tools/fetch-system-for-quux.sh`), a dynamic
-//! VHD whose `MCR1` holds the release's `sys/ubin/ucadr.mcr`, microcode
-//! 2000, as it is; it skips when the release is not present.
+//! 323, `mit/sys/ubin/ucadr.mcr`, in revision 13's shapes and partition
+//! order in its current `MCR1` (`support::ucadr_323_at_40_partition_order`).
+//! The PROM does not care whose microcode it loads, only about its
+//! sections.
 
 use std::path::Path;
 
 use muir::band::{self, Label};
 use muir::block_disk::{BLOCK_NS, BlockDisk, Transfer};
 use muir::engine::Engine;
-use muir::machine::{Geometry, Machine};
+use muir::machine::{Geometry, Machine, UNBOXED_TAG};
 use muir::micro::Micro;
 use muir::rtl::Rtl;
 
@@ -44,18 +44,18 @@ mod support;
 /// A block of the disk, in bytes: 256 words of four.
 const BLOCK_BYTES: usize = 1024;
 
-/// Physical pages 3-6, the PROM's buffer and the microcode's main-memory
-/// section.
-const PAGES_3_TO_6: std::ops::RangeInclusive<u32> = 0o1400..=0o3377;
+/// Physical page 3 of 1024 words, the PROM's buffer and the microcode's
+/// main-memory section.
+const PAGE_3: std::ops::RangeInclusive<u32> = 0o6000..=0o7777;
 
 /// The word the PROM's disk transfers take their command list from.
-const CCW: u32 = 0o777;
+const CCW: u32 = 0o2377;
 
 /// Where the PC stops the count: the microcode's location 6, where the PROM
 /// jumps when it is done (`JUMP-TO-6` in the PROM's own symbols).
 const LOCATION_6: u16 = 6;
 
-/// More than the PROM takes to load either microcode, which is about 1.1
+/// More than the PROM takes to load the microcode, which is under a
 /// million microcycles (measured).
 const LIMIT: u64 = 20_000_000;
 
@@ -64,16 +64,15 @@ struct Run {
     microcycles: u64,
     stores: Vec<u32>,
     transfers: Vec<Transfer>,
-    /// Physical memory 1400-3377 at 6.
-    pages: Vec<u32>,
+    /// Physical memory 6000-7777 at 6.
+    pages: Vec<muir::machine::Word>,
 }
 
 /// QUUX with its built-in PROM and `pack` on block-disk, with the bus's
 /// stores and the disk's transfers recorded.
 fn quux(pack: &Path) -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
-    m.load_prom(&muir::prom::quux_12_boot_prom());
+    let mut m = Machine::with_geometry(Geometry::QUUX, 32);
+    m.load_prom(&muir::prom::quux_boot_prom());
     let mut d = BlockDisk::new(BLOCK_NS);
     d.attach(muir::disk_image::Disk::open_rw(pack).expect("the pack"));
     d.log = Some(Vec::new());
@@ -86,7 +85,7 @@ fn quux(pack: &Path) -> Machine {
 /// machine has gone on in the microcode, and returns what was done before
 /// the step that ran it. The PC alone does not say when the PROM is done:
 /// on `rtl` both `Engine::pc` and `Machine::opc` pass 6 while the PROM
-/// clears the control store (`CLEAR-I-MEMORY`, 36246-36252), a control
+/// clears the control store (`CLEAR-I-MEMORY`), a control
 /// store write taking its address through the PC, and the next microcycle
 /// is back in the PROM (measured). After the PROM's jump to 6 the next one
 /// is below 36000.
@@ -100,13 +99,13 @@ fn to_six<E: Engine>(mut e: E, name: &str) -> Run {
         e.step().unwrap();
         if e.machine().opc == LOCATION_6 && e.pc() < 0o36000 {
             let m = e.machine_mut();
-            let lo = *PAGES_3_TO_6.start() as usize;
-            let hi = *PAGES_3_TO_6.end() as usize;
+            let lo = *PAGE_3.start() as usize;
+            let hi = *PAGE_3.end() as usize;
             let mut run = Run {
                 microcycles: n,
                 stores: m.store_log.take().unwrap(),
                 transfers: m.block_disk.as_mut().unwrap().log.take().unwrap(),
-                pages: m.main[lo..=hi].iter().map(|&w| support::low(w)).collect(),
+                pages: m.main[lo..=hi].to_vec(),
             };
             run.stores.truncate(stores);
             run.transfers.truncate(transfers);
@@ -131,18 +130,19 @@ fn dd_into_labl_mcr1(pack: &Path, mcr: &[u8]) {
 }
 
 /// The main-memory section's data as the microcode partition holds it: its
-/// four blocks at the relative block the section header names, as words.
-fn main_memory_data(mcr: &[u8]) -> Vec<u32> {
+/// four blocks at the relative block the section header names, as the
+/// 4-byte transfer puts them in memory, each word a fixnum, tag `005`.
+fn main_memory_data(mcr: &[u8]) -> Vec<muir::machine::Word> {
     let m = muir::mcr::parse_partition_order(mcr).unwrap();
     let (block, blocks) = m.main_memory.expect("a main-memory section");
-    assert_eq!(blocks, 4, "four blocks, pages 3-6");
+    assert_eq!(blocks, 4, "four blocks, page 3");
     let at = block as usize * BLOCK_BYTES;
     mcr[at..at + 4 * BLOCK_BYTES]
         .as_chunks::<4>()
         .0
         .iter()
         .copied()
-        .map(u32::from_le_bytes)
+        .map(|b| UNBOXED_TAG | muir::machine::Word::from(u32::from_le_bytes(b)))
         .collect()
 }
 
@@ -167,16 +167,16 @@ fn holds(pack: &Path, ext: &str, mcr: &[u8], dir: &Path) {
         let writes = run.transfers.iter().filter(|t| t.write).count();
         let reads: Vec<&Transfer> = run.transfers.iter().filter(|t| !t.write).collect();
         let stray_stores: Vec<u32> =
-            run.stores.iter().copied().filter(|a| *a != CCW && !PAGES_3_TO_6.contains(a)).collect();
-        // A block read is 256 words written into memory from its page on.
+            run.stores.iter().copied().filter(|a| *a != CCW && !PAGE_3.contains(a)).collect();
+        // A block is read into a page, 1024 words written from it on.
         let stray_reads: Vec<u32> = reads
             .iter()
-            .filter(|t| !(PAGES_3_TO_6.contains(&t.page) && PAGES_3_TO_6.contains(&(t.page + 255))))
+            .filter(|t| !(PAGE_3.contains(&t.page) && PAGE_3.contains(&(t.page + 1023))))
             .map(|t| t.page)
             .collect();
         eprintln!(
             "{name}: at 6 after {} microcycles; {} blocks read, {writes} written; \
-             {} stores, {} outside pages 3-6 and word 777; {} block reads outside pages 3-6",
+             {} stores, {} outside page 3 and word 2377; {} block reads outside page 3",
             run.microcycles,
             reads.len(),
             run.stores.len(),
@@ -195,58 +195,32 @@ fn holds(pack: &Path, ext: &str, mcr: &[u8], dir: &Path) {
         assert!(std::fs::read(&copy).unwrap() == before, "{name}: the disk file unchanged");
         assert!(
             run.pages == want_pages,
-            "{name}: pages 3-6 hold the microcode's main-memory section, loaded last"
+            "{name}: page 3 holds the microcode's main-memory section, loaded last"
         );
     }
 }
 
-/// **QUUX's PROM writes no block and only pages 3-6 and word 777 of
-/// memory**, on a GPT disk made here with MIT's microcode 323 in partition
-/// order in its current `MCR1`.
+/// **QUUX's PROM writes no block and only page 3 and word 2377 of
+/// memory**, on a GPT disk made here with MIT's microcode 323 in revision
+/// 13's shapes and partition order in its current `MCR1`.
 #[test]
 fn quux_s_prom_saves_nothing_on_a_disk_made_here() {
     let dir = support::scratch("quux-prom-saves-nothing");
-    let mcr = support::ucadr_323_partition_order();
+    let mcr = support::ucadr_323_at_40_partition_order();
     let (pack, _) = support::quux_gpt_disk(&dir, &mcr);
     holds(&pack, "img", &mcr, &dir);
 }
 
-/// **The same on System 2000's disk**, the dynamic VHD as QUUX's release
-/// publishes it, whose current `MCR1`, at block 17, holds the release's
-/// partition-order microcode 2000 as `dd` put it there.
-#[test]
-fn quux_s_prom_saves_nothing_on_system_2000_s_disk() {
-    let Some((dir, pack, _root)) = support::quux_release_band("quux-prom-saves-nothing-2000")
-    else {
-        return;
-    };
-    let ucode = support::quux_release(&["sys", "ubin", "ucadr.mcr"]).unwrap();
-    let mcr = std::fs::read(&ucode).unwrap();
-    let mut d = muir::disk_image::Disk::open(&pack).unwrap();
-    let mcr1 = support::gpt_partition(&mut d, "MCR1");
-    assert_eq!((mcr1.first, mcr1.current), (17, true), "MCR1, current, at block 17");
-    for (k, block) in mcr.chunks(BLOCK_BYTES).enumerate() {
-        let on_disk: Vec<u8> = d
-            .read_block(mcr1.first + k as u32)
-            .unwrap()
-            .iter()
-            .flat_map(|w| w.to_le_bytes())
-            .collect();
-        assert!(on_disk == block, "MCR1's block {k} is the release's ucadr.mcr");
-    }
-    holds(&pack, "vhd", &mcr, &dir);
-}
-
-/// `ERROR-NO-GPT`, where the GPT PROM halts when block 0's second sector
-/// is not a GPT header (the release's `promh.tbl`, held by
-/// `tests/quux_prom.rs`).
-const ERROR_NO_GPT: u16 = 0o36642;
+/// `ERROR-NO-GPT`, where PROM 2001 halts when block 0's second sector is
+/// not a GPT header (its `promh.tbl`, held by `tests/quux_prom.rs`).
+const ERROR_NO_GPT: u16 = 0o36653;
 
 /// **QUUX's PROM finds the microcode through a GPT, not MIT's label**: on a
 /// pack with MIT's `LABL` label in block 0 and no GPT --- a T-300 label of
 /// MIT's own layout with MIT's microcode 323 in partition order in `MCR1`,
-/// what the PROM before the GPT booted --- it reads block 0 into its
-/// buffer at page 3 and halts at `ERROR-NO-GPT`, having written nothing.
+/// what the PROM before the GPT booted --- it reads blocks 0 to 3, a page,
+/// into its buffer at page 3 and halts at `ERROR-NO-GPT`, having written
+/// nothing.
 #[test]
 fn quux_s_prom_reads_a_gpt_not_mit_s_label() {
     let dir = support::scratch("quux-prom-labl");
@@ -282,7 +256,9 @@ fn quux_s_prom_reads_a_gpt_not_mit_s_label() {
         };
         eprintln!("{name}: at ERROR-NO-GPT after {n} microcycles");
         let log = m.block_disk.as_mut().unwrap().log.take().unwrap();
-        assert_eq!(log, [Transfer { write: false, block: 0, page: 0o1400 }], "{name}");
+        let page: Vec<Transfer> =
+            (0..4).map(|block| Transfer { write: false, block, page: 0o6000 }).collect();
+        assert_eq!(log, page, "{name}");
         assert!(m.store_log.unwrap().iter().all(|&a| a == CCW), "{name}: only the command word");
         assert!(std::fs::read(&copy).unwrap() == before, "{name}: the pack unchanged");
     }

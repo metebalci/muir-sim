@@ -25,7 +25,7 @@ use muir::tv::Board;
 
 mod support;
 
-const PAGE: u32 = 0o17777400;
+const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
 const INTERRUPTS: u32 = PAGE + 0o100;
 const RESET_DEVICES: u32 = PAGE + 0o104;
 const CHAOS_CSR: u32 = PAGE + 0o140;
@@ -232,26 +232,31 @@ fn m5_what_the_file_device_had_due_runs_first() {
     }
 }
 
-/// The register page's word `w` through virtual page 1.
-const fn va(w: u32) -> u32 {
-    (1 << 8) | w
+/// The register page's word `w` through virtual page 1, the page being at
+/// word 1400 of its 1024-word frame.
+const fn va(w: u32) -> u64 {
+    (1 << 10 | PAGE & 0o1777 | w) as u64
 }
+
+/// `INTERRUPT-CONTROL`'s `INT.ENABLE`, `<35>` on QUUX (contract G2
+/// appendix A1.6), where the CADR has `<27>`.
+const INT_ENABLE: u64 = 1 << 35;
 
 const INTERRUPT_CONTROL: u64 = (2 << 19) | (0o37 << 14);
 const DEST_3: u64 = (3 << 19) | (0o37 << 14);
 const PGF_OR_INT: u64 = (1 << 5) | 5;
 
-fn engine_machine(prom: &[Insn], m_words: &[(usize, u32)]) -> Machine {
+fn engine_machine(prom: &[Insn], m_words: &[(usize, u64)]) -> Machine {
     let mut m = Machine::new();
     m.geometry = Geometry::QUUX;
     let mut words = vec![filler(); 1024];
     words[..prom.len()].copy_from_slice(prom);
     m.load_prom(&words);
     support::prom_program_in_ram(&mut m);
-    m.l2_map[0] = (1 << 23) | (1 << 22);
-    m.l2_map[1] = (1 << 23) | (1 << 22) | 0o37777;
+    support::quux_map(&mut m, 0, 0);
+    support::quux_map(&mut m, 1, PAGE);
     for &(k, v) in m_words {
-        m.mmem[k] = u64::from(v);
+        m.mmem[k] = v;
     }
     m
 }
@@ -314,7 +319,7 @@ fn m5_sintr_at_the_reset_s_edge_still_has_what_it_resets() {
         prom.push(filler());
         prom.push(Insn::new(ALU | SETO | m_dest(5)));
         prom.push(Insn::new(JUMP | target(at + 4) | ALWAYS | N));
-        let mut r = Rtl::new(engine_machine(&prom, &[(1, va(0o104)), (2, reset), (6, 1 << 27)]));
+        let mut r = Rtl::new(engine_machine(&prom, &[(1, va(0o104)), (2, reset), (6, INT_ENABLE)]));
         r.boot();
         r.machine_mut().timers.timer[1] = IntervalTimer {
             on: true,
@@ -327,20 +332,22 @@ fn m5_sintr_at_the_reset_s_edge_still_has_what_it_resets() {
             r.step().unwrap();
         }
         assert_eq!(
-            r.machine().mmem[5] == 0xffff_ffff,
+            r.machine().mmem[5] == Geometry::QUUX.word_mask(),
             taken,
             "reset {reset}, the jump {jump_after} microcycles after the write's edge"
         );
     }
 }
 
-/// **M5, on QUUX a `<28>` rise resets nothing**, on both engines: a
-/// program that raises and drops `INTERRUPT-CONTROL<28>` leaves the timers,
-/// the file device, block-disk and the network as they were.
+/// **M5, on QUUX a `PROG.UNIBUS.RESET` rise resets nothing**, on both
+/// engines: a program that raises and drops `INTERRUPT-CONTROL`'s
+/// `PROG.UNIBUS.RESET`, `<36>` on QUUX where the CADR has `<28>` (contract G2
+/// appendix A1.6), leaves the timers, the file device, block-disk and the
+/// network as they were.
 #[test]
 fn m5_prog_unibus_reset_drives_nothing_on_quux() {
-    // <28> up, `LOCATION-COUNTER` (source 13, which carries the flags)
-    // into M 4, <28> down, and into M 5.
+    // <36> up, `LOCATION-COUNTER` (source 13, which carries the flags)
+    // into M 4, <36> down, and into M 5.
     let prom = [
         Insn::new(ALU | SETM | m_src(1) | INTERRUPT_CONTROL),
         Insn::new(ALU | SETM | src(0o13) | m_dest(4)),
@@ -361,7 +368,7 @@ fn m5_prog_unibus_reset_drives_nothing_on_quux() {
         ]
     };
     for engine in ["micro", "rtl"] {
-        let m = engine_machine(&prom, &[(1, 1 << 28), (2, 0)]);
+        let m = engine_machine(&prom, &[(1, 1 << 36), (2, 0)]);
         let mut e: Box<dyn Engine> = match engine {
             "micro" => Box::new(Micro::new(m)),
             _ => Box::new(Rtl::new(m)),
@@ -374,9 +381,9 @@ fn m5_prog_unibus_reset_drives_nothing_on_quux() {
             e.step().unwrap();
         }
         let m = e.machine();
-        assert_eq!((m.mmem[4] >> 28 & 1, m.mmem[5] >> 28 & 1), (1, 0), "{engine}: <28> up, down");
+        assert_eq!((m.mmem[4] >> 36 & 1, m.mmem[5] >> 36 & 1), (1, 0), "{engine}: <36> up, down");
         assert_eq!(e.machine().timers, timers, "{engine}: the timers");
         let after = look(e.machine_mut());
-        assert_eq!(after, before, "{engine}: <28> reset something");
+        assert_eq!(after, before, "{engine}: <36> reset something");
     }
 }

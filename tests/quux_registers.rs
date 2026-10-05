@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! QUUX's register page (contracts Q2 and Q13, revision 11): 256 words at
-//! physical `17777400`-`17777777`, the last page of the physical space.
+//! QUUX's register page (contracts Q2 and Q13): 256 words at physical
+//! `1777777400`-`1777777777`, the last page of the 28-bit physical space
+//! (contract G2 §4.1).
 //! Words 0-77 are the feature page, 100 the interrupt status, 101 the error
 //! status, 102 the mode, 103 the real-time clock and 104 reset devices;
 //! then the interval timers (110-115), the keyboard and the mouse
@@ -29,7 +30,7 @@ use muir::rtl::Rtl;
 
 mod support;
 
-const PAGE: u32 = 0o17777400;
+const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
 const INTERRUPTS: u32 = PAGE + 0o100;
 const ERRORS: u32 = PAGE + 0o101;
 const MODE: u32 = PAGE + 0o102;
@@ -68,13 +69,13 @@ fn raise(source: usize) -> (Machine, &'static str) {
             m.ns = 50_000;
             ["timer 0", "timer 1", "timer 2"][k]
         }
-        // Block-disk's done, under command <11>.
+        // Block-disk's done, under command <11>: a page of 5 blocks.
         3 => {
-            m.main[0o100] = 0o1000;
+            m.main[0o100] = 0o2000;
             m.bus_write(PAGE + 0o201, 0o100);
             m.bus_write(PAGE + 0o200, 1 << 11);
             m.bus_write(PAGE + 0o203, 0);
-            m.ns += BLOCK_NS;
+            m.ns += 5 * BLOCK_NS;
             "block-disk"
         }
         // A key word waiting, under 120 <8>.
@@ -142,7 +143,7 @@ fn word_100_says_who_interrupted() {
 }
 
 /// **A stray's handler turns its source off with one write** (contract Q13,
-/// section 2): what microcode 2000 writes for a bit it does not serve drops
+/// section 2): what microcode 2001 writes for a bit it does not serve drops
 /// that bit, and only it. Timers 1 and 2: 112 and 114 written 0. Block-disk
 /// with the disk idle: 200 written 0. The mouse: 123 written 0. The file
 /// device: 160 read and written back with `<8>` clear and `<0>` kept, the
@@ -216,18 +217,23 @@ use Class::*;
 fn table() -> [(Class, u32); 256] {
     let id = Geometry::QUUX.machine_id.unwrap();
     let mut t = [(Reserved, 0); 256];
-    // The feature page, 0-77: 0-17 the machine's, the rest 0.
-    for (w, v) in [id, 6, 2048, 16384, 16384, 1024, 2048, 3, 1].into_iter().enumerate() {
+    // The feature page, 0-77: 0-17 the machine's, 20-24 the board name,
+    // the rest 0.
+    for (w, v) in [id, 7, 4096, 16384, 16384, 1024, 4096, 3, 1].into_iter().enumerate() {
         t[w] = (ReadOnly, v);
     }
     t[0o11] = (ReadOnly, 1280 << 16 | 1024);
     t[0o12] = (ReadOnly, 1 << 16 | 40);
-    t[0o13] = (ReadOnly, 0o17000000);
+    t[0o13] = (ReadOnly, muir::machine::WINDOW_13);
     t[0o14] = (ReadOnly, 1);
     t[0o15] = (ReadOnly, 3);
     t[0o16] = (ReadOnly, 3);
     t[0o17] = (ReadOnly, 1024);
     t[0o20..=0o77].fill((ReadOnly, 0));
+    // muir-sim's board name, 4 characters a word, the first in `<7:0>`, and
+    // zero bytes after it.
+    t[0o20] = (ReadOnly, u32::from_le_bytes(*b"muir"));
+    t[0o21] = (ReadOnly, u32::from_le_bytes(*b"-sim"));
     // The page's own words.
     t[0o100] = (ReadOnly, 0);
     t[0o101] = (ReadWrite, 0);
@@ -444,13 +450,10 @@ fn program(m: &mut Machine, words: &[u32]) {
     code[prom.len()] = Insn::new(JUMP | target(STOP as u64) | ALWAYS | N);
     m.load_prom(&code);
     support::prom_program_in_ram(m);
-    let rw = (1 << 23) | (1 << 22);
     for (k, &p) in words.iter().enumerate() {
-        m.l2_map[1 + k] = rw | (p >> 8);
-        m.mmem[1 + k] = u64::from(((1 + k as u32) << 8) | (p & 0xff));
+        m.mmem[1 + k] = support::quux_map(m, 1 + k as u32, p).into();
     }
-    m.l2_map[30] = rw | (ERRORS >> 8);
-    m.mmem[30] = u64::from((30 << 8) | (ERRORS & 0xff));
+    m.mmem[30] = support::quux_map(m, 30, ERRORS).into();
     for k in 0..words.len() {
         m.amem[0o200 + k] = 0o525252;
         m.amem[0o240 + k] = 0o525252;
@@ -500,14 +503,17 @@ fn both_engines_read_every_word_through_the_map() {
 
 // --- nothing there ------------------------------------------------------------
 
-/// The old page, `17377000`-`17377377`, and the old device registers after
-/// it, the display's at `17377760` and the disk's at `17377774`; and the
-/// first and the last words of the old Unibus window below the page.
+/// The CADR's addresses QUUX's devices once had: the page `17377000`-
+/// `17377377`, and the device registers after it, the display's at
+/// `17377760` and the disk's at `17377774`; and the first and the last
+/// words of the CADR's Unibus window below its last page. On a machine of
+/// 2MW, as [`quux`]'s, they are past main memory.
 fn old_addresses() -> Vec<u32> {
     (0o17377000..=0o17377777).chain([0o17400000, 0o17777377]).collect()
 }
 
-/// **Every old address is nothing there** (contract Q13, section 1): a read
+/// **Every old address is nothing there** (contract Q13, section 1; G2
+/// §4.1): a read
 /// gives 0 and sets word 101 `<0>`, the Xbus NXM bit and no other; a write
 /// of all ones sets it too and changes nothing else in the machine.
 #[test]
@@ -550,15 +556,15 @@ fn both_engines_find_nothing_at_the_old_addresses() {
     }
 }
 
-/// **The CADR has no such page**: its addresses are in the CADR's Unibus
-/// window, where nothing answers there, and a read of word 100 sets the
-/// Unibus NXM bit, not the Xbus one.
+/// **The CADR has no such page**: the same words of its last page,
+/// `17777400`, are in its Unibus window, where nothing answers there, and
+/// a read of word 100 sets the Unibus NXM bit, not the Xbus one.
 #[test]
 fn the_cadr_has_no_register_page() {
     let mut m = Machine::new();
     for w in [0, 0o100, 0o200, 0o210, 0o377] {
         m.bus_error = 0;
-        assert_eq!(m.bus_read(PAGE + w), 0, "word {w:o}");
+        assert_eq!(m.bus_read(0o17777400 + w), 0, "word {w:o}");
         assert_eq!(m.bus_error, bus_error::UNIBUS_NXM, "word {w:o}: the Unibus NXM");
     }
 }
@@ -579,8 +585,7 @@ fn both_engines_write_and_read_the_page() {
         let mut words = vec![filler(); 1024];
         words[..prom.len()].copy_from_slice(&prom);
         m.load_prom(&words);
-        m.l2_map[1] = (1 << 23) | (1 << 22) | 0o37777;
-        m.mmem[1] = (1 << 8) | 0o102;
+        m.mmem[1] = support::quux_map(&mut m, 1, MODE).into();
         m.mmem[2] = 1;
         m
     };

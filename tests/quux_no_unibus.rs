@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! QUUX without the Unibus (contract Q5). Every address of the Unibus
-//! window, from physical page 37000 up, answers nothing on QUUX except its
-//! last page, `17777400`-`17777777`, which is QUUX's register page
-//! (contract Q13): a read or a write fails as any empty Xbus address does,
-//! the Xbus NXM bit set, and changes nothing. The I/O board's registers, the bus interface's, the
+//! QUUX without the Unibus (contract Q5). The CADR's Unibus window, its
+//! physical pages 37000 up, is no window on QUUX: in QUUX's 28-bit space
+//! (contract G2 §4.1) those are main memory's addresses when there is that
+//! much of it, and on a machine of 2MW, as here, past its end, where a read
+//! or a write fails as any empty address does, the Xbus NXM bit set, and
+//! changes nothing. The I/O board's registers, the bus interface's, the
 //! Unibus map's and the diagnostic registers are all there; the Unibus
 //! interrupt does not reach QUUX's processor; and the debug cable, a Unibus
-//! master, is refused. QUUX's own devices are on the register page
-//! (contracts Q2-Q4). The CADR keeps all of it.
+//! master, is refused. QUUX's own devices are on the register page at
+//! `1777777400` (contracts Q2-Q4, Q13). The CADR keeps all of it.
 
 use muir::busint::{interrupt_status, unibus_physical};
 use muir::machine::{Geometry, Machine, bus_error};
@@ -39,7 +40,7 @@ const WINDOW: [u32; 12] = [
 #[test]
 fn every_unibus_address_is_nothing_on_quux() {
     let mut m = quux();
-    let csr_before = m.bus_read(0o17777540);
+    let csr_before = m.bus_read(muir::machine::REGISTER_PAGE_13 | 0o140);
     for u in WINDOW {
         let p = unibus_physical(u);
         m.bus_error = 0;
@@ -52,19 +53,28 @@ fn every_unibus_address_is_nothing_on_quux() {
     assert!(!m.mode.errstop && !m.mode.prom_disable, "766012 wrote nothing");
     assert_eq!(m.interrupt_status & interrupt_status::ENABLE_UB_INTS, 0, "766040 wrote nothing");
     m.bus_error = 0;
-    assert_eq!(m.bus_read(0o17777540), csr_before, "764140 wrote nothing to the Chaosnet CSR");
+    assert_eq!(
+        m.bus_read(muir::machine::REGISTER_PAGE_13 | 0o140),
+        csr_before,
+        "764140 wrote nothing to the Chaosnet CSR"
+    );
 }
 
-/// **The window's last page is the register page, and nothing else of the
-/// window answers**: word 0 there is the MACHINE-ID with no NXM, and the
-/// word below it, the window's last below the page, fails.
+/// **The space's last page is the register page, and the CADR's last
+/// page is not**: word 0 at `1777777400` is the MACHINE-ID with no NXM; the
+/// word below it, past the frame buffer window's end, fails, and so does
+/// `17777400`, the CADR's last page, past the end of 2MW.
 #[test]
-fn the_window_s_last_page_is_the_register_page() {
+fn the_space_s_last_page_is_the_register_page() {
     let mut m = quux();
-    assert_eq!(m.bus_read(0o17777400), Geometry::QUUX.machine_id.unwrap().into());
+    let page = muir::machine::REGISTER_PAGE_13;
+    assert_eq!(m.bus_read(page), Geometry::QUUX.machine_id.unwrap().into());
     assert_eq!(m.bus_error, 0, "the page answers");
-    assert_eq!(m.bus_read(0o17777377), 0);
-    assert_eq!(m.bus_error, bus_error::XBUS_NXM, "the word below it is nothing there");
+    for nothing in [page - 1, 0o17777400] {
+        m.bus_error = 0;
+        assert_eq!(m.bus_read(nothing), 0, "{nothing:o}");
+        assert_eq!(m.bus_error, bus_error::XBUS_NXM, "{nothing:o} is nothing there");
+    }
 }
 
 /// **The CADR keeps its Unibus**: the same reads answer, with no timeout.
@@ -117,11 +127,13 @@ fn both_engines_time_out_on_the_unibus_window() {
         words[..prom.len()].copy_from_slice(&prom);
         m.load_prom(&words);
         support::prom_program_in_ram(&mut m);
-        let rw = (1 << 23) | (1 << 22);
+        // Virtual pages 1 and 2 of 1024 words on the frames that hold
+        // the two addresses (contract G2 §2.6).
+        let rw = (1 << 27) | (1 << 26);
         for (k, u) in [0o764120u32, 0o764140].into_iter().enumerate() {
             let p = unibus_physical(u);
-            m.l2_map[1 + k] = rw | (p >> 8);
-            m.mmem[1 + k] = u64::from(((1 + k as u32) << 8) | (p & 0xff));
+            m.l2_map[1 + k] = rw | (p >> 10);
+            m.mmem[1 + k] = u64::from(((1 + k as u32) << 10) | (p & 0o1777));
         }
         m.amem[0o200] = 0o525252;
         m.amem[0o201] = 0o525252;

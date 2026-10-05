@@ -4,7 +4,7 @@
 //! **QUUX revision 13's datapath** (contract G2 §2, with its appendix A1),
 //! on hand-written microcode, on `micro` and `rtl`: the fields, the ALU,
 //! the rotator and the masker, LC byte mode, the jump conditions, the
-//! dispatch memory and the map, as [`Geometry::QUUX_13`] has them. Every
+//! dispatch memory and the map, as [`Geometry::QUUX`] has them. Every
 //! program runs on both engines, and each engine's M memory must be what
 //! the program's comments say.
 //!
@@ -29,7 +29,7 @@ use muir::tv::Board;
 mod support;
 
 /// Revision 13.
-const REV13: Geometry = Geometry::QUUX_13;
+const REV13: Geometry = Geometry::QUUX;
 
 /// A memory's constants: 0, 1, 2, and words the programs take as A.
 const ZERO: u64 = 0o40;
@@ -555,7 +555,8 @@ fn a_byte_words_misc_bits_are_its_length() {
     p.op(byte(LDB, 4, 33) | m_src(1) | a_src(0o50) | m_dest(3));
     p.op(byte(LDB, 4, 49) | m_src(1) | a_src(0o50) | m_dest(4));
     // Output select 0 (IR<13:12> = 0): rotate 36, length 4 (IR<9:6> = 3),
-    // with IR<11:10> = 3, which on revision 12 would be LC byte mode.
+    // with IR<11:10> = 3, which on a 32-bit machine, the CADR, would be LC
+    // byte mode.
     p.op(36 | 3 << 6 | 3 << 10 | m_src(1) | a_src(0o50) | m_dest(5));
     p.stop();
     let ms = run_with(&p, &|_| {}, &|m| m.mode.errstop = true);
@@ -744,7 +745,6 @@ fn the_dispatch_memory_is_4096_entries() {
     }
     let word_6 = muir::machine::REGISTER_PAGE_13 | 6;
     assert_eq!(REV13.feature_word(word_6), Some(4096), "feature word 6");
-    assert_eq!(Geometry::QUUX.feature_word(Geometry::FEATURE_PAGE << 8 | 6), Some(2048));
 }
 
 // --- sources and constants ---------------------------------------------------
@@ -957,10 +957,10 @@ fn the_fused_return_takes_the_halfword_in_the_ring_of_40() {
 // --- the physical space at 28 bits (G1 §3.2, G2 §3-§4) --------------------------
 
 /// Physical addresses the space tests reach, each through a virtual page of
-/// its own: revision 13's register page, `1777777400`; revision 12's,
+/// its own: the register page, `1777777400`; the CADR's last page,
 /// `17777400`; the frame buffer window, `1760000000`; main memory above 22
 /// bits, `20000000`; the first word past main memory; and `17773000`, which
-/// revision 12's decode of the old Unibus window takes for the diagnostic
+/// the CADR's decode of its Unibus window takes for the diagnostic
 /// registers.
 const REGISTER_PAGE: u32 = 0o1777777400;
 const OLD_REGISTER_PAGE: u32 = 0o17777400;
@@ -997,7 +997,7 @@ impl Prog {
 /// **The physical space is 28 bits** (G1 §3.2, G2 §4.1, A1.10): the
 /// register page at `1777777400`, whose feature words say revision 13 and
 /// its sizes, the video controller's buffer at `1760000000`; main memory,
-/// not a register, at revision 12's page, `17777400`, when there is that
+/// not a register, at the CADR's last page, `17777400`, when there is that
 /// much of it (`tests/revision_13_memory.rs` has it nothing when there is
 /// not); main memory whole above 22 bits, up to its end, and nothing past
 /// it, which fails with word 101's NXM bit; and main memory, not the
@@ -1020,7 +1020,7 @@ fn the_physical_space_is_28_bits() {
         p.a(0o60 + k as u64, reg + off);
         p.read_to(0o60 + k as u64, 0o10 + k as u64);
     }
-    // Revision 12's page: main memory, and word 101 has no NXM.
+    // The CADR's last page: main memory, and word 101 has no NXM.
     p.a(0o65, old).a(0o66, reg + 0o101);
     p.read_to(0o65, 0o15).read_to(0o66, 0o16);
     // Main memory above 22 bits, a whole word; past its end nothing.
