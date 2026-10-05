@@ -906,6 +906,15 @@ pub struct Keyboard {
     /// Positions the viewer has down, so that a key up is sent for each
     /// and a shift the viewer holds is not sent twice.
     down: Vec<u8>,
+    /// Which keysym holds which of those positions, and on which plane:
+    /// a key's release, and its repeats, go to the position its press
+    /// went to, whatever shift is held by then. `(` and `)` are each on
+    /// two keys, and the shift held at release would otherwise choose the
+    /// other one and leave the pressed key down. **Part of `down`, not a
+    /// piece of [`Keyboard::resolve`]'s state**: every entry's position is
+    /// down, and [`Keyboard::release`] drops the entries of the position
+    /// it lets go.
+    held: Vec<(u32, u8, bool)>,
     /// What a viewer's keysyms mean here.
     map: Mapping,
     /// A prefix keysym pressed and not yet answered: the next keysym is
@@ -1153,6 +1162,7 @@ impl Keyboard {
     fn release(&mut self, position: u8) {
         if let Some(k) = self.down.iter().position(|&p| p == position) {
             self.down.remove(k);
+            self.held.retain(|&(_, p, _)| p != position);
             self.queue_up(position);
         }
     }
@@ -1358,6 +1368,14 @@ impl Keyboard {
             }
             return Went::Sent { p, shifted: false, tapped: false };
         }
+        // A key held: its repeats and its release go to the position its
+        // press went to, not to the one the shift now held would choose.
+        if let Some(&(_, p, shifted)) = self.held.iter().find(|&&(s, ..)| s == keysym) {
+            if !down {
+                self.release(p);
+            }
+            return Went::Sent { p, shifted, tapped: false };
+        }
         let found = self.map.positions(keysym);
         if found.is_empty() {
             return Went::Unbound;
@@ -1384,10 +1402,12 @@ impl Keyboard {
         }
         // The position whose plane the viewer's own shift already gives.
         if let Some(&(p, _)) = found.iter().find(|&&(_, wants)| wants == shifted) {
-            if down && !self.press(p) {
-                return Went::Refused { p, shifted };
-            }
-            if !down {
+            if down {
+                if !self.press(p) {
+                    return Went::Refused { p, shifted };
+                }
+                self.held.push((keysym, p, shifted));
+            } else {
                 self.release(p);
             }
             return Went::Sent { p, shifted, tapped: false };

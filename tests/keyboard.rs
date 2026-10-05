@@ -407,3 +407,142 @@ fn the_keys_the_boot_sequence_needs_are_a_setting() {
     k.key(keysym::ALT_R, true);
     assert_eq!(words(&mut k).last(), Some(&boot(false)));
 }
+
+/// One key's words, down then up.
+fn stroke(p: u8) -> [u32; 2] {
+    [up_down(p, false), up_down(p, true)]
+}
+
+/// **A key's release goes to the position its press went to**, not to
+/// the one the shift held at release would choose. `(` and `)` are the
+/// two keysyms on two positions: `(` shifted on the `9` key and plain on
+/// its own, `)` shifted on the `0` key and plain on its own. Typed with
+/// the viewer's shift, in either order of letting go, the key that went
+/// down comes up; and the next press of that key --- the same character
+/// again, or the digit that shares it --- reaches the machine whole.
+/// Every step is checked and every mismatch said, so that a character
+/// lost after the first is seen too.
+fn release_goes_where_press_went(sym: char, digit: char, on_digit: u8, shift_first: bool) {
+    let shift = shifting(Shift::Shift)[0];
+    let (sym, digit) = (sym as u32, digit as u32);
+    let mut wrong = Vec::new();
+    let mut check = |step: &str, got: Vec<u32>, want: &[u32]| {
+        if got != want {
+            let o = |w: &[u32]| w.iter().map(|w| format!("{w:o}")).collect::<Vec<_>>();
+            wrong.push(format!("{step}: got {:?}, want {:?}", o(&got), o(want)));
+        }
+    };
+    let mut want = vec![up_down(shift, false), up_down(on_digit, false)];
+    if shift_first {
+        want.extend([up_down(shift, true), up_down(on_digit, true)]);
+    } else {
+        want.extend([up_down(on_digit, true), up_down(shift, true)]);
+    }
+    // The character typed with the viewer's shift, let go in this order.
+    let typed = || {
+        let mut k = Keyboard::new();
+        k.key(keysym::SHIFT_L, true);
+        k.key(sym, true);
+        if shift_first {
+            k.key(keysym::SHIFT_L, false);
+            k.key(sym, false);
+        } else {
+            k.key(sym, false);
+            k.key(keysym::SHIFT_L, false);
+        }
+        k
+    };
+    let mut k = typed();
+    check("typed with shift", words(&mut k), &want);
+    // Then the same character again, with the viewer's shift.
+    k.key(keysym::SHIFT_L, true);
+    k.key(sym, true);
+    k.key(sym, false);
+    k.key(keysym::SHIFT_L, false);
+    let again = [
+        up_down(shift, false),
+        up_down(on_digit, false),
+        up_down(on_digit, true),
+        up_down(shift, true),
+    ];
+    check("the same again", words(&mut k), &again);
+    // Or the digit that shares its key.
+    let mut k = typed();
+    words(&mut k);
+    k.key(digit, true);
+    k.key(digit, false);
+    check("the digit after it", words(&mut k), &stroke(on_digit));
+    // Nothing is left down: a stray release finds nothing to let go.
+    k.key(sym, false);
+    k.key(digit, false);
+    check("nothing left down", words(&mut k), &[]);
+    let order = if shift_first { "shift let go first" } else { "key let go first" };
+    assert!(wrong.is_empty(), "{sym:#x}, {order}:\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn open_paren_released_before_its_shift() {
+    release_goes_where_press_went('(', '9', 0o71, false);
+}
+
+#[test]
+fn open_paren_released_after_its_shift() {
+    release_goes_where_press_went('(', '9', 0o71, true);
+}
+
+#[test]
+fn close_paren_released_before_its_shift() {
+    release_goes_where_press_went(')', '0', 0o171, false);
+}
+
+#[test]
+fn close_paren_released_after_its_shift() {
+    release_goes_where_press_went(')', '0', 0o171, true);
+}
+
+/// **A key held and repeated stays on the position it went down on**,
+/// whatever the shift does meanwhile: `(` pressed with shift, the shift
+/// let go, and the viewer's repeat of `(` is the key over `9` still down,
+/// not a second key; and a viewer that names the key by its unshifted
+/// keysym on release, `9` for the `(` it pressed, lets the same key go,
+/// and leaves nothing behind to catch the next `(`.
+#[test]
+fn a_held_key_repeats_and_is_let_go_where_it_went_down() {
+    let shift = shifting(Shift::Shift)[0];
+    let mut k = Keyboard::new();
+    k.key(keysym::SHIFT_L, true);
+    k.key('(' as u32, true);
+    k.key(keysym::SHIFT_L, false);
+    k.key('(' as u32, true);
+    k.key('(' as u32, false);
+    assert_eq!(
+        words(&mut k),
+        [up_down(shift, false), up_down(0o71, false), up_down(shift, true), up_down(0o71, true)]
+    );
+    k.key(keysym::SHIFT_L, true);
+    k.key('(' as u32, true);
+    k.key(keysym::SHIFT_L, false);
+    k.key('9' as u32, false);
+    assert_eq!(
+        words(&mut k),
+        [up_down(shift, false), up_down(0o71, false), up_down(shift, true), up_down(0o71, true)]
+    );
+    k.key('(' as u32, false);
+    assert_eq!(k.pending(), 0, "nothing is left to let go");
+    // And `(` typed next without a shift is its own key, a stroke.
+    k.key('(' as u32, true);
+    k.key('(' as u32, false);
+    assert_eq!(words(&mut k), stroke(0o132));
+}
+
+/// **Without a shift, nothing changes**: `(` and `)` go to their own
+/// keys and the digits to theirs, a stroke each.
+#[test]
+fn unshifted_parentheses_and_digits_are_one_stroke_each() {
+    let mut k = Keyboard::new();
+    for (sym, p) in [('(', 0o132u8), ('9', 0o71), (')', 0o137), ('0', 0o171), ('(', 0o132)] {
+        k.key(sym as u32, true);
+        k.key(sym as u32, false);
+        assert_eq!(words(&mut k), stroke(p), "{sym}");
+    }
+}
