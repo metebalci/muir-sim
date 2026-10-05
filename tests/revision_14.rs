@@ -18,7 +18,7 @@ use muir::engine::Engine;
 use muir::isa::Insn;
 use muir::isa::asm::{
     ADD, ALU, ALWAYS, CARRY_IN, DISPATCH, JUMP, LDB, M_PLUS_C, MD, N, OB_LEFT, POPJ, SETA, SETM,
-    SRC_MD, START_READ, START_WRITE, SUB, a_src, filler, m_dest, m_src, src, target,
+    SRC_MD, START_READ, START_WRITE, SUB, a_dest, a_src, filler, m_dest, m_src, src, target,
 };
 use muir::machine::{Geometry, Machine, Word};
 use muir::micro::Micro;
@@ -1145,7 +1145,10 @@ fn a_checkpoint_keeps_the_34_bit_counter_and_the_words() {
     p.read(VA as Word, 0o10, 0o11);
     p.stop();
     let setup = |m: &mut Machine| map_page(m, VA, rw(0o200));
-    let words = |m: &mut Machine| m.memory_words.pointer_types = 0o123 << 32 | 0o456;
+    let words = |m: &mut Machine| {
+        m.memory_words.pointer_types = 0o123 << 32 | 0o456;
+        m.pdl_copies = tlb::PdlCopies { base: 0o27654321000, head: 0o12345 };
+    };
     for engine in ["micro", "rtl"] {
         let (body, saved_lc) = match engine {
             "micro" => {
@@ -1185,6 +1188,11 @@ fn a_checkpoint_keeps_the_34_bit_counter_and_the_words() {
         assert_eq!(lc, saved_lc, "{engine}: LC<33:0> resumed");
         assert_eq!(m.memory_words.directory, DIR, "{engine}: word 220 resumed");
         assert_eq!(m.memory_words.pointer_types, 0o123 << 32 | 0o456, "{engine}: 222-223");
+        assert_eq!(
+            m.pdl_copies,
+            tlb::PdlCopies { base: 0o27654321000, head: 0o12345 },
+            "{engine}: the redirect's copies"
+        );
         assert!(m.tlb.lookup(VA).is_none(), "{engine}: the TLB not kept");
     }
 }
@@ -1449,4 +1457,208 @@ fn a_write_back_holds_the_reference_on_rtl() {
     assert_eq!((wb0, wb1), (1, 0), "the second read writes accessed back, or not");
     assert!(r0 > r1, "rtl: the write-back holds the read: {r0} ns against {r1}");
     assert_eq!(u0, u1, "micro times no write-back");
+}
+
+// --- the PDL buffer redirect (A14.7) -----------------------------------------
+
+/// A status-5 page entry: access `01`, every reference faulting, at
+/// `frame`.
+const fn pdl_entry(frame: u32) -> Word {
+    entry(5, 1, frame)
+}
+
+/// The PDL buffer's word `k` as the tests plant it.
+const fn pdl_word(k: u64) -> Word {
+    w(0o031, 0o7000 + k)
+}
+
+impl Prog {
+    /// The redirect's copies: A 430 <- `base`, A 431 <- `head`.
+    fn copies(&mut self, base: u32, head: u64) -> &mut Self {
+        let (b, h) = (self.k(base as Word), self.k(head));
+        self.op(ALU | SETA | a_src(b) | a_dest(tlb::A_PDL_BUFFER_VIRTUAL_ADDRESS as u64));
+        self.op(ALU | SETA | a_src(h) | a_dest(tlb::A_PDL_BUFFER_HEAD as u64))
+    }
+}
+
+/// The PDL buffer planted, its pointer at `pp` after the boot.
+fn pdl_at(pp: u16) -> impl Fn(&mut Machine) {
+    move |m: &mut Machine| m.pdl_pointer = pp
+}
+fn plant_pdl(m: &mut Machine) {
+    for k in 0..m.pdl.len() {
+        m.pdl[k] = pdl_word(k as u64);
+    }
+}
+
+/// **The redirect at off = 0, n − 1, n and n + 1** (A14.7; S1's check, the
+/// word one past PP): with the head at 100 and PP at 107, n = 10 (octal);
+/// reads at the base plus 0, 7 and 10 take the PDL buffer's words 100, 107
+/// and 110 with no fault, and plus 11 goes to memory as if its access code
+/// were `11`. A write inside puts its word in the buffer and nothing in
+/// memory; one outside goes to memory. Outside references set accessed and
+/// modified, inside ones nothing; `MAP(MD)` reads the entry as stored.
+/// **Fails** a redirect that is not built (status 5 faults), a test of off
+/// < n, which sends the word one past PP to memory, and a redirect that
+/// writes back or reaches memory from inside.
+#[test]
+fn the_redirect_takes_the_buffer_up_to_the_word_past_pp() {
+    const PAGE: u32 = 0o2001 << 10;
+    const BASE: u32 = PAGE | 0o20;
+    let mut p = Prog::default();
+    p.copies(BASE, 0o100);
+    for (k, off) in [0u32, 7, 8].into_iter().enumerate() {
+        p.read((BASE + off) as Word, 0o10 + k as u64, 0o20);
+    }
+    p.write(w(0o025, 0o111), (BASE + 1) as Word, 0o20);
+    // The inside references have set nothing, in the TLB entry either.
+    p.map(BASE as Word, 0o22);
+    p.read((BASE + 9) as Word, 0o13, 0o20);
+    p.write(w(0o025, 0o222), (BASE + 9) as Word, 0o20);
+    p.map(BASE as Word, 0o21);
+    p.stop();
+    let setup = |m: &mut Machine| {
+        plant_pdl(m);
+        map_page(m, PAGE, pdl_entry(0o200));
+        m.main[0o200 << 10 | 0o31] = w(0o025, 0x600d);
+    };
+    let ms = run_with(&p, &setup, &pdl_at(0o107));
+    expect(
+        &ms,
+        &[
+            (0o10, pdl_word(0o100), "off 0: the head"),
+            (0o11, pdl_word(0o107), "off n - 1: PP"),
+            (0o12, pdl_word(0o110), "off n: the word one past PP"),
+            (0o13, w(0o025, 0x600d), "off n + 1: memory"),
+            (0o20, 0, "no fault"),
+        ],
+    );
+    for (engine, m) in &ms {
+        assert_eq!(m.pdl[0o101], w(0o025, 0o111), "{engine}: the inside write in the buffer");
+        assert_eq!(m.main[0o200 << 10 | 0o21], 0, "{engine}: and not in memory");
+        assert_eq!(m.main[0o200 << 10 | 0o31], w(0o025, 0o222), "{engine}: the outside write");
+        assert_eq!(
+            m.mmem[0o21] & tlb::ENTRY_BITS as Word,
+            (pdl_entry(0o200) | A | M) & tlb::ENTRY_BITS as Word,
+            "{engine}: MAP(MD) as stored, status 5, with the outside references' bits"
+        );
+        assert_eq!(m.tlb.redirects, [4, 2], "{engine}: four inside, two outside");
+        assert_eq!(m.mmem[0o22] & (A | M), 0, "{engine}: inside: no accessed, no modified");
+    }
+    assert_eq!(table(&ms, PAGE), [pdl_entry(0o200) | A | M; 2], "outside: accessed, modified");
+    assert_eq!(write_backs(&ms), [2, 2], "the outside read's and write's, none inside");
+}
+
+/// **A start right after a write of A 431 uses the new head** (A14.7; S1's
+/// check): A 431 written in microcycle n, the start in n + 1 reads the
+/// buffer at the new head. **Fails** copies taken later than A memory's
+/// write pulse, or read from A memory at the redirect's own time.
+#[test]
+fn a_start_right_after_a_write_of_a_431_uses_the_new_head() {
+    const PAGE: u32 = 0o2002 << 10;
+    let mut p = Prog::default();
+    p.copies(PAGE, 0o100);
+    p.fill(2);
+    let (head, va) = (p.k(0o200), p.k(PAGE as Word));
+    p.op(ALU | SETA | a_src(head) | a_dest(tlb::A_PDL_BUFFER_HEAD as u64));
+    p.op(ALU | SETA | a_src(va) | START_READ);
+    p.fill(2);
+    p.op(ALU | SETM | SRC_MD | m_dest(0o10));
+    p.stop();
+    let setup = |m: &mut Machine| {
+        plant_pdl(m);
+        map_page(m, PAGE, pdl_entry(0o200));
+    };
+    let ms = run_with(&p, &setup, &pdl_at(0o107));
+    expect(&ms, &[(0o10, pdl_word(0o200), "the word at the new head")]);
+}
+
+/// **An access-`11` entry of status 5 goes to memory** (A14.7): the
+/// microcode's fiddle, a direct write of the entry with access `11`, does
+/// not fault, so the redirect does not fire. **Fails** a redirect keyed on
+/// the status alone.
+#[test]
+fn an_access_11_status_5_entry_goes_to_memory() {
+    const PAGE: u32 = 0o2003 << 10;
+    let mut p = Prog::default();
+    p.copies(PAGE, 0o100);
+    p.tlb_op(1, PAGE as Word, entry(5, 3, 0o200) & tlb::ENTRY_BITS as Word);
+    p.read(PAGE as Word, 0o10, 0o11);
+    p.stop();
+    let setup = |m: &mut Machine| {
+        plant_pdl(m);
+        map_page(m, PAGE, pdl_entry(0o200));
+        m.main[0o200 << 10] = w(0o025, 0x600d);
+    };
+    let ms = run_with(&p, &setup, &pdl_at(0o107));
+    expect(&ms, &[(0o10, w(0o025, 0x600d), "memory's word"), (0o11, 0, "no fault")]);
+    for (engine, m) in &ms {
+        assert_eq!(m.tlb.redirects, [0, 0], "{engine}: no redirect");
+    }
+}
+
+/// **The redirect across 2^31 words** (A14 revision 3): the base 8 words
+/// below 2^31 and PP 12 (octal) past the head, n = 13, so the buffer runs
+/// to `20000000003`: off 0, n − 1 and n inside, n + 1, `20000000004`,
+/// through memory. **Fails** a signed compare of the address with the base.
+#[test]
+fn the_redirect_across_2_31_words() {
+    const LOW: u32 = 0o17777776000;
+    const HIGH: u32 = 0o20000000000;
+    const BASE: u32 = 0o17777777770;
+    let mut p = Prog::default();
+    p.copies(BASE, 0o100);
+    for (k, off) in [0u32, 10, 11, 12].into_iter().enumerate() {
+        p.read(BASE.wrapping_add(off) as Word, 0o10 + k as u64, 0o20);
+    }
+    p.stop();
+    let setup = |m: &mut Machine| {
+        plant_pdl(m);
+        map_page(m, LOW, pdl_entry(0o200));
+        map_page(m, HIGH, pdl_entry(0o201));
+        m.main[0o201 << 10 | 4] = w(0o025, 0x600d);
+    };
+    let ms = run_with(&p, &setup, &pdl_at(0o112));
+    expect(
+        &ms,
+        &[
+            (0o10, pdl_word(0o100), "off 0, below 2^31"),
+            (0o11, pdl_word(0o112), "off n - 1, above"),
+            (0o12, pdl_word(0o113), "off n"),
+            (0o13, w(0o025, 0x600d), "off n + 1: memory"),
+            (0o20, 0, "no fault"),
+        ],
+    );
+}
+
+/// **On `rtl` a redirect inside holds one microcycle** (A14.7's timing):
+/// a second read inside the buffer, its page's entry in the TLB, adds one
+/// microcycle of hold and no memory cycle; `micro` holds nothing. **Fails**
+/// a redirect that is not timed, or that runs a memory cycle.
+#[test]
+fn a_redirect_inside_holds_one_microcycle_on_rtl() {
+    const PAGE: u32 = 0o2004 << 10;
+    let run = |reads: usize| {
+        let mut p = Prog::default();
+        p.copies(PAGE, 0o100);
+        for _ in 0..reads {
+            p.read(PAGE as Word, 0o10, 0o11);
+        }
+        p.stop();
+        let setup = |m: &mut Machine| {
+            plant_pdl(m);
+            map_page(m, PAGE, pdl_entry(0o200));
+        };
+        let mut r = Rtl::new(machine(&p, &setup));
+        r.boot();
+        with_directory(r.machine_mut());
+        r.machine_mut().pdl_pointer = 0o107;
+        finish(&mut r, "rtl");
+        assert_eq!(r.machine().mmem[0o10], pdl_word(0o100), "rtl: the buffer's word");
+        (r.machine().tlb.held_ns, r.bus_cycles())
+    };
+    let (held1, cycles1) = run(1);
+    let (held2, cycles2) = run(2);
+    assert_eq!(held2 - held1, 40, "one microcycle of 40 ns held for the second");
+    assert_eq!(cycles2, cycles1, "no memory cycle inside the buffer");
 }

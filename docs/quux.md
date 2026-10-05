@@ -1636,8 +1636,27 @@ reading 0 (`no_entry_faults_and_loads_nothing`,
 `a_walk_with_no_directory_reads_nothing`,
 `a_not_in_core_entry_faults_and_map_md_reads_it_without_a_walk`). Faults
 are the entry's access code, `<27>` read and `<26>` write, as revision 13's.
-Status 5 faults as its access code says: the PDL buffer redirect is not
-built.
+**The PDL buffer redirect** (A14.7) takes a read or write start through
+a TLB entry of status 5 whose access code faults it; one written directly
+with access `11`, the microcode's fiddle, does not fault and goes to memory
+(`an_access_11_status_5_entry_goes_to_memory`). With PP the PDL buffer
+pointer, n = (PP − head + 1) AND 37777 and off = (`VA<31:0>` − base) mod
+2^32, unsigned; when off ≤ n, the word one past PP admitted as PGF-R-PDL
+admits it, the reference is inside the buffer: a read's word is the
+buffer's at (head + off) AND 37777, and a write's word, `MD` of the
+microcycle after the start, goes there, with no memory cycle, no
+write-back and no setter. Otherwise it goes to memory as if its access
+code were `11`, with its write-backs (`the_redirect_takes_the_buffer_up_to_the_word_past_pp`,
+`the_redirect_across_2_31_words`). The base and the head are copies of A
+memory's 430 and 431, A-PDL-BUFFER-VIRTUAL-ADDRESS and A-PDL-BUFFER-HEAD,
+taken in A memory's write pulse, so a start in the microcycle after a write
+of A 431 uses the new head
+(`a_start_right_after_a_write_of_a_431_uses_the_new_head`). On `rtl` a
+reference inside holds the microcycle after its start one microcycle, the
+port using the PDL buffer's, and a read's word is in `MD` from the
+microcycle after that (`a_redirect_inside_holds_one_microcycle_on_rtl`);
+`micro` holds nothing. `MAP(MD)` of a status-5 page reads the entry as it
+is held.
 
 **The write-backs.** A reference to a paged address that does not fault
 sets bits in its page's entry: accessed `<28>` by the first read, write
@@ -1719,7 +1738,8 @@ in word 13.
 
 **The checkpoint** of revision 14 is version 50, as revision 13's, and says
 its revision by its geometry: no level-1 map. After revision 13's fields it
-keeps the location counter's `<33:32>` and the memory system's words; the
+keeps the location counter's `<33:32>`, the memory system's words and the
+redirect's two copies; the
 TLB is not kept, and a resume starts with it swept, timed on `rtl` as a
 reset's sweep (`a_checkpoint_keeps_the_34_bit_counter_and_the_words`).
 `quux` refuses a checkpoint of revision 13 on revision 14 and the reverse,

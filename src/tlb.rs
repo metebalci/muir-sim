@@ -229,6 +229,56 @@ pub fn write_back(
     WriteBack { reads: w.reads, write }
 }
 
+/// A memory's locations the redirect's copies snoop (A14.7): microcode
+/// 2001's A-PDL-BUFFER-VIRTUAL-ADDRESS and A-PDL-BUFFER-HEAD.
+pub const A_PDL_BUFFER_VIRTUAL_ADDRESS: usize = 0o430;
+pub const A_PDL_BUFFER_HEAD: usize = 0o431;
+
+/// The PDL buffer's index, 14 bits.
+pub const PDL_INDEX: u16 = 0o37777;
+
+/// **A redirected reference** (A14.7): inside the PDL buffer, at this
+/// index of it, or outside it, through memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Redirect {
+    Inside(u16),
+    Outside,
+}
+
+/// The redirect's copies of the PDL buffer's base and head (A14.7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PdlCopies {
+    /// The virtual address of the buffer's head word, `<31:0>` of A 430.
+    pub base: u32,
+    /// The buffer index of its head, `<13:0>` of A 431.
+    pub head: u16,
+}
+
+impl PdlCopies {
+    /// A write of A location `adr` with `word`, in its write pulse.
+    pub fn a_written(&mut self, adr: usize, word: crate::machine::Word) {
+        match adr {
+            A_PDL_BUFFER_VIRTUAL_ADDRESS => self.base = word as u32,
+            A_PDL_BUFFER_HEAD => self.head = word as u16 & PDL_INDEX,
+            _ => {}
+        }
+    }
+
+    /// **The test**, PGF-R-PDL's, unsigned (A14.7): with the PDL buffer
+    /// pointer `pp`, n = (PP − head + 1) AND 37777 and off = (`va` − base)
+    /// mod 2^32; inside when off ≤ n, the word one past PP admitted, at
+    /// index (head + off) AND 37777.
+    pub fn test(&self, va: u32, pp: u16) -> Redirect {
+        let n = (pp.wrapping_sub(self.head).wrapping_add(1) & PDL_INDEX) as u32;
+        let off = va.wrapping_sub(self.base);
+        if off <= n {
+            Redirect::Inside((self.head.wrapping_add(off as u16)) & PDL_INDEX)
+        } else {
+            Redirect::Outside
+        }
+    }
+}
+
 /// The TLB's contents and its counts.
 #[derive(Clone, Debug)]
 pub struct Tlb {
@@ -248,6 +298,9 @@ pub struct Tlb {
     pub write_backs: u64,
     pub written_bits: [u64; 3],
     pub refusals: u64,
+    /// References the PDL buffer redirect took, inside the buffer and
+    /// outside it (A14.7). Not in a checkpoint: the profile's.
+    pub redirects: [u64; 2],
     /// On `rtl`, the time the processor was held for walks and sweeps. Not
     /// in a checkpoint.
     pub held_ns: u64,
@@ -280,6 +333,7 @@ impl Tlb {
             write_backs: 0,
             written_bits: [0; 3],
             refusals: 0,
+            redirects: [0; 2],
             held_ns: 0,
             sweep_until: 0,
         }

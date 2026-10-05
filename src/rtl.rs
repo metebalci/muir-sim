@@ -581,6 +581,9 @@ pub struct Rtl {
     /// reason as well does not walk again ([`Rtl::tlb_hold`]). Cleared at
     /// the edge; not in a checkpoint, a resume starting between two.
     walked: [bool; 2],
+    /// Revision 14: the redirect's held microcycle has been taken for the
+    /// start translated in this one (A14.7). Cleared at the edge.
+    redirect_held: bool,
 }
 
 /// The combinational network during the read phase.
@@ -675,6 +678,9 @@ struct Read {
     /// Revision 14: `LC<33:32>` as a write of the location counter takes
     /// them, the word's or LC's adder's (A14.11).
     lc_high: u64,
+    /// Revision 14: the PDL buffer redirect the start being translated
+    /// takes (A14.7).
+    redirect: Option<crate::tlb::Redirect>,
 
     /// `ILONG` is `IR<45>`, suppressed when the cycle is nopped by a jump or
     /// the console but not by the trap: `-ILONG` is `NAND(IR45, -NOPA)` at
@@ -818,6 +824,7 @@ impl Rtl {
             fetch_started: None,
             memstart_fetch: false,
             walked: [false; 2],
+            redirect_held: false,
         };
         // QUUX drops the delay lines: `sync`, four ticks, unless `muir`
         // sets `--sync-cycle-ticks`'.
@@ -1351,6 +1358,7 @@ impl Rtl {
         // reads not oldspace, not extra PDL otherwise. A miss has walked
         // already ([`Rtl::tlb_hold`]).
         let paged = self.m.geometry.paged();
+        let mut redirect = None;
         let map_dispatch = irdisp && (bit(ir, 8) || bit(ir, 9));
         let port_b = paged
             && ((srcmap && !nop) || (map_dispatch && self.m.memory_words.pointer_type(self.m.md)));
@@ -1362,7 +1370,16 @@ impl Rtl {
             3 << 22
         };
         let (mut vmap, mut vmo) = if paged {
-            (0, if self.memstart { self.m.entry_14(self.m.vma as u32) } else { self.lvmo })
+            if self.memstart {
+                // The redirect (A14.7): the cycle proceeds as if the access
+                // code were `11`.
+                let va = self.m.vma as u32;
+                let (e, red) = self.m.redirect_14(va, self.m.entry_14(va), self.wrcyc);
+                redirect = red;
+                (0, e)
+            } else {
+                (0, self.lvmo)
+            }
         } else if wide {
             let mapi = self.mapi();
             let vmap = self.m.map_level_1_13(mapi);
@@ -1905,6 +1922,7 @@ impl Rtl {
             vmo,
             port_b,
             lc_high,
+            redirect,
             ilong: bit(ir, 45) && !nopa,
             statbit: bit(ir, 46) && !nopa,
             imod: destimod0 || destimod1 || self.iwrited || idebug,
@@ -1936,6 +1954,7 @@ impl Rtl {
         if self.destd {
             self.m.amem[self.wadr as usize] = self.l;
             self.m.macro_dispatch.a_written(self.wadr as usize, self.l);
+            self.m.a_written_14(self.wadr as usize, self.l);
         }
         if self.destmd {
             self.m.mmem[(self.wadr & 0o37) as usize] = self.l;
@@ -2379,10 +2398,20 @@ impl Rtl {
                 }
             }
         }
+        let cycle = self.timing.cycle_ns(self.speed, r.ilong) as u64;
+        // The redirect inside the buffer holds the microcycle after the
+        // start one microcycle, the port using the PDL buffer's (A14.7).
+        if until <= self.ns
+            && self.memstart
+            && !self.redirect_held
+            && matches!(r.redirect, Some(crate::tlb::Redirect::Inside(_)))
+        {
+            self.redirect_held = true;
+            until = self.ns + cycle;
+        }
         if until <= self.ns {
             return false;
         }
-        let cycle = self.timing.cycle_ns(self.speed, r.ilong) as u64;
         let held = (until - self.ns).div_ceil(cycle) * cycle;
         for _ in 0..held / cycle {
             self.ns += cycle;
@@ -2635,7 +2664,21 @@ impl Rtl {
                         self.rd_finish_at = u64::MAX;
                     }
                 }
+            } else if let (true, Some(crate::tlb::Redirect::Inside(i))) = (r.vmaok, r.redirect) {
+                // Revision 14's redirect inside the PDL buffer (A14.7): no
+                // memory cycle and no write-back. A read's word is in `MD`
+                // from the next microcycle; a write puts the word `MD` holds
+                // now, the microcycle after the start's, in the buffer.
+                self.m.tlb.redirects[0] += 1;
+                if wrcyc {
+                    self.m.pdl[i as usize] = self.m.md;
+                } else {
+                    self.m.md = self.m.pdl[i as usize];
+                }
             } else if r.vmaok {
+                if r.redirect == Some(crate::tlb::Redirect::Outside) {
+                    self.m.tlb.redirects[1] += 1;
+                }
                 self.mbusy = true;
                 // The bus interface holds the address and, on a write, the
                 // word, until the cycle ends: `xspec.text.3` requires the
@@ -2976,6 +3019,7 @@ impl Rtl {
         // another takes the new one's direction.
         self.start_bus_cycle(r, if r.memop { r.memwr } else { self.wrcyc });
         self.walked = [false; 2];
+        self.redirect_held = false;
         // `WRCYC` and `RDCYC` are one flip-flop: 1C23's 74S175 on `CLK2A`,
         // whose D comes off the 74S51 at 1D16 as
         // `NOT((MEMPREPARE AND -MEMWR) OR (-MEMPREPARE AND RDCYC))`.  With
@@ -3649,6 +3693,7 @@ impl Engine for Rtl {
             fetch_started: _,
             memstart_fetch,
             walked: _,
+            redirect_held: _,
         } = self;
         m.save(w);
         w.u64s(trace);

@@ -298,9 +298,10 @@ struct Phase {
     checked: Option<support::macro_dispatch::Counts>,
     /// Revision 14's TLB over the workload: walks, sweeps, on `rtl` the time
     /// held for them, write-backs, those carrying accessed, modified and
-    /// ephemeral-reference, and the guard's refusals (contract G3 revision
-    /// 14, §11.1).
-    tlb: Option<[u64; 8]>,
+    /// ephemeral-reference, the guard's refusals, and the PDL buffer
+    /// redirect's references inside and outside the buffer (contract G3
+    /// revision 14, §11.1).
+    tlb: Option<[u64; 10]>,
     /// Fused returns: macroinstructions dispatched without `QMLP+2`.
     fused: u64,
     hist: Vec<u64>,
@@ -447,7 +448,8 @@ fn run<E: Profiled>(
     let tlb_counts = |m: &muir::machine::Machine| {
         let t = &m.tlb;
         let [a, b, c] = t.written_bits;
-        [t.walks, t.sweeps, t.held_ns, t.write_backs, a, b, c, t.refusals]
+        let [r_in, r_out] = t.redirects;
+        [t.walks, t.sweeps, t.held_ns, t.write_backs, a, b, c, t.refusals, r_in, r_out]
     };
     let tlb0 = tlb_counts(e.machine());
     let checked0 = e.checker().map(|c| c.counts.clone());
@@ -701,9 +703,9 @@ fn report(
         println!("   checkers: {}, problems {}", c.report(label), c.problems());
         println!("   {}", handler_returns_line(c, generic, label));
     }
-    if let Some([walks, sweeps, held, wbs, a, m, e, refused]) = p.tlb {
+    if let Some([walks, sweeps, held, wbs, a, m, e, refused, r_in, r_out]) = p.tlb {
         println!(
-            "   tlb: {walks} walks, {sweeps} sweeps, {held} ns held for them; {wbs} write-backs, accessed {a}, modified {m}, ephemeral-reference {e}, {refused} refused"
+            "   tlb: {walks} walks, {sweeps} sweeps, {held} ns held for them and the redirect; {wbs} write-backs, accessed {a}, modified {m}, ephemeral-reference {e}, {refused} refused; redirected {r_in} inside the PDL buffer, {r_out} outside"
         );
     }
     if let Some(c) = &p.prefetch {

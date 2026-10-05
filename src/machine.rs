@@ -1181,6 +1181,11 @@ pub struct Machine {
     /// Revision 14's memory-system words of the register page, 220-224
     /// (A14.9).
     pub memory_words: crate::tlb::Words,
+    /// Revision 14's PDL buffer redirect's copies (A14.7): the base, 32
+    /// bits, and the head, 14 bits, taken in A memory's write pulse at
+    /// [`crate::tlb::A_PDL_BUFFER_VIRTUAL_ADDRESS`] and
+    /// [`crate::tlb::A_PDL_BUFFER_HEAD`] ([`Machine::a_written_14`]).
+    pub pdl_copies: crate::tlb::PdlCopies,
 
     /// The widths of the map and the PDL buffer, [`Geometry::CADR`] unless
     /// the run chose another machine.
@@ -1353,6 +1358,7 @@ impl Machine {
             overflow: false,
             tlb: crate::tlb::Tlb::default(),
             memory_words: crate::tlb::Words::default(),
+            pdl_copies: crate::tlb::PdlCopies::default(),
             geometry,
             timers: Timers::new(),
             macro_dispatch: MacroDispatch::default(),
@@ -1708,6 +1714,39 @@ impl Machine {
             self.memory_words.refused = self.memory_words.refused.wrapping_add(1);
         }
         Some(wb)
+    }
+
+    /// **Revision 14's snoop of A memory's write pulse** (A14.7): a write of
+    /// A location `adr` with `word` takes the redirect's base at 430 and its
+    /// head at 431. Nothing on another revision.
+    pub fn a_written_14(&mut self, adr: usize, word: Word) {
+        if self.geometry.paged() {
+            self.pdl_copies.a_written(adr, word);
+        }
+    }
+
+    /// **The PDL buffer redirect's decision** (A14.7) for a start to `va`
+    /// through the TLB entry `entry`, a write when `write`: the entry the
+    /// reference proceeds with, and the redirect if it fires. It fires on a
+    /// paged address whose entry has status 5 and an access code that
+    /// faults the reference; it then proceeds as if the access code were
+    /// `11`, inside the buffer at the index it gives or outside it through
+    /// memory. The test is against the PDL buffer pointer as it stands.
+    pub fn redirect_14(
+        &self,
+        va: u32,
+        entry: u32,
+        write: bool,
+    ) -> (u32, Option<crate::tlb::Redirect>) {
+        let permitted = entry & 1 << 27 != 0 && (!write || entry & 1 << 26 != 0);
+        if crate::tlb::region(va) != crate::tlb::Region::Paged
+            || crate::tlb::status(u64::from(entry)) != 5
+            || permitted
+        {
+            return (entry, None);
+        }
+        let r = self.pdl_copies.test(va, self.pdl_pointer);
+        (entry | 3 << 26, Some(r))
     }
 
     /// **A `WRITE-MAP` operation** landing (A14.4), at `now`: a direct
@@ -2685,6 +2724,7 @@ impl Machine {
             // Not in a checkpoint: a resume starts with it swept (A14.14).
             tlb: _,
             memory_words,
+            pdl_copies,
             geometry,
             timers,
             macro_dispatch,
@@ -2795,6 +2835,8 @@ impl Machine {
         if geometry.paged() {
             w.u16((*lc >> 32) as u16);
             memory_words.save(w);
+            w.u32(pdl_copies.base);
+            w.u16(pdl_copies.head);
         }
     }
 
@@ -2991,6 +3033,8 @@ impl Machine {
         if self.geometry.paged() {
             self.lc |= u64::from(r.u16()?) << 32;
             self.memory_words = crate::tlb::Words::load(r)?;
+            self.pdl_copies =
+                crate::tlb::PdlCopies { base: r.u32()?, head: r.u16()? & crate::tlb::PDL_INDEX };
             // The TLB is not kept: the resume starts with it swept.
             self.tlb = crate::tlb::Tlb::new(self.tlb.len());
         }

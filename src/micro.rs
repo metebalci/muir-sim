@@ -164,6 +164,12 @@ pub struct Micro {
     /// as it goes out, which carries the setter's bit from the word written
     /// (A14.6, A14.8). Kept in a checkpoint of revision 14 alone.
     write_va: Option<u32>,
+    /// Revision 14: that write redirected into the PDL buffer, at this
+    /// index (A14.7). Kept in a checkpoint of revision 14 alone.
+    write_pdl: Option<u16>,
+    /// Revision 14: the redirect the start in progress takes (A14.7). Set
+    /// and used within one start.
+    redirect: Option<crate::tlb::Redirect>,
     /// The PDL buffer write an instruction hands to the next microcycle's
     /// write phase, `PDLWRITED`: the address and the word, the address
     /// [`PDL_AT_INDEX`] for a write by PDL-INDEX.
@@ -258,6 +264,8 @@ impl Micro {
             memop: false,
             write_out: None,
             write_va: None,
+            write_pdl: None,
+            redirect: None,
             pdl_write: None,
             spc_write: None,
             opc: [0; 8],
@@ -317,6 +325,7 @@ impl Micro {
             // `-RESET` clears `MEMSTART` (`Rtl::reset`).
             self.write_out = None;
             self.write_va = None;
+            self.write_pdl = None;
             // Revision 14's TLB is swept, at once here, and its memory
             // system's words cleared (A14.4, A14.9).
             self.m.reset_memory_system(self.m.ns);
@@ -1197,6 +1206,7 @@ impl Micro {
         if lost {
             self.write_out = None;
             self.write_va = None;
+            self.write_pdl = None;
             self.new_md_delay = 0;
         } else if self.memstart {
             self.write_goes_out();
@@ -1208,6 +1218,18 @@ impl Micro {
             self.m.tlb_fill(self.m.vma as u32);
         }
         self.lvmo = self.m.translate(self.m.vma as u32).l2_data;
+        // Revision 14's PDL buffer redirect (A14.7): the reference then
+        // proceeds as if its access code were `11`.
+        if self.m.geometry.paged() {
+            let (entry, redirect) = self.m.redirect_14(self.m.vma as u32, self.lvmo, write);
+            self.lvmo = entry;
+            self.redirect = redirect;
+            match redirect {
+                Some(crate::tlb::Redirect::Inside(_)) => self.m.tlb.redirects[0] += 1,
+                Some(crate::tlb::Redirect::Outside) => self.m.tlb.redirects[1] += 1,
+                None => {}
+            }
+        }
         self.wrcyc = write;
         if !lost {
             self.m.ns += self.memory_cycle_ns;
@@ -1245,7 +1267,14 @@ impl Micro {
     fn start_write(&mut self) {
         let after_a_start = self.memstart;
         self.start_cycle(true);
-        let t = self.m.translate(self.m.vma as u32);
+        let mut t = self.m.translate(self.m.vma as u32);
+        // Revision 14: through the entry the redirect leaves (A14.7).
+        if self.m.geometry.paged() {
+            let e = self.lvmo;
+            t.physical = crate::tlb::bus_address(self.m.vma as u32, e);
+            t.access_permitted = e & 1 << 27 != 0;
+            t.write_permitted = e & 1 << 26 != 0;
+        }
         self.m.vmaok = t.access_permitted && t.write_permitted;
         if self.m.vmaok {
             let when = if after_a_start && self.m.geometry.unibus {
@@ -1254,7 +1283,11 @@ impl Micro {
                 WriteOut::Started
             };
             self.write_out = Some((t.physical, when));
-            self.write_va = self.m.geometry.paged().then_some(self.m.vma as u32);
+            match self.redirect.take() {
+                // Inside the buffer: no memory cycle and no write-back.
+                Some(crate::tlb::Redirect::Inside(i)) => self.write_pdl = Some(i),
+                _ => self.write_va = self.m.geometry.paged().then_some(self.m.vma as u32),
+            }
         }
     }
 
@@ -1265,6 +1298,11 @@ impl Micro {
     fn write_goes_out(&mut self) {
         if let Some((physical, _)) = self.write_out.take() {
             let md = self.m.md;
+            // Revision 14: a write redirected into the PDL buffer (A14.7).
+            if let Some(i) = self.write_pdl.take() {
+                self.m.pdl[i as usize] = md;
+                return;
+            }
             if let Some(va) = self.write_va.take() {
                 self.m.write_back(va, self.lvmo, true, md);
             }
@@ -1323,6 +1361,9 @@ impl Micro {
     /// tests for the fault.
     fn start_read(&mut self) {
         self.start_cycle(false);
+        if self.m.geometry.paged() {
+            return self.start_read_14();
+        }
         if self.m.translate(self.m.vma as u32).access_permitted {
             // Revision 14's write-back, before the read (A14.6).
             if self.m.geometry.paged() {
@@ -1333,6 +1374,29 @@ impl Micro {
         } else {
             self.m.vmaok = false;
         }
+    }
+
+    /// **Revision 14's read** (A14.6, A14.7), through the entry the start
+    /// latched: inside the PDL buffer, its word, with no memory cycle and
+    /// no write-back; otherwise, if the entry permits, the write-back and
+    /// then the word at the bus address.
+    fn start_read_14(&mut self) {
+        let va = self.m.vma as u32;
+        if let Some(crate::tlb::Redirect::Inside(i)) = self.redirect.take() {
+            self.m.vmaok = true;
+            self.new_md = self.m.pdl[i as usize];
+            self.new_md_delay = 2;
+            return;
+        }
+        let e = self.lvmo;
+        if e & 1 << 27 == 0 {
+            self.m.vmaok = false;
+            return;
+        }
+        self.m.write_back(va, e, false, 0);
+        self.m.vmaok = true;
+        self.new_md = self.m.bus_read(crate::tlb::bus_address(va, e));
+        self.new_md_delay = 2;
     }
 
     /// How many memory cycles this engine has started.
@@ -1355,6 +1419,7 @@ impl Micro {
             let adr = (dest & 0o1777) as usize;
             self.m.amem[adr] = self.out;
             self.m.macro_dispatch.a_written(adr, self.out);
+            self.m.a_written_14(adr, self.out);
         } else {
             self.write_functional(dest, self.out)?;
             let adr = (dest & 0o37) as usize;
@@ -1945,6 +2010,7 @@ impl Engine for Micro {
         // out never does.
         self.write_out = None;
         self.write_va = None;
+        self.write_pdl = None;
         // Revision 14's TLB swept and its memory system's words cleared.
         self.m.reset_memory_system(self.m.ns);
     }
@@ -1996,6 +2062,9 @@ impl Engine for Micro {
             memop,
             write_out,
             write_va,
+            write_pdl,
+            // Set and used within one start.
+            redirect: _,
             pdl_write,
             spc_write,
             opc,
@@ -2071,6 +2140,7 @@ impl Engine for Micro {
         // Revision 14's pending write's address (A14.14).
         if m.geometry.paged() {
             w.opt(*write_va, crate::checkpoint::Writer::u32);
+            w.opt(*write_pdl, crate::checkpoint::Writer::u16);
         }
     }
 
@@ -2137,6 +2207,7 @@ impl Engine for Micro {
         self.trap = r.bool()?;
         if self.m.geometry.paged() {
             self.write_va = r.opt(crate::checkpoint::Reader::u32)?;
+            self.write_pdl = r.opt(crate::checkpoint::Reader::u16)?;
         }
         Ok(())
     }
