@@ -56,31 +56,57 @@ pub fn alu(m: u32, a: u32, aluf: u8, alumode: bool, cin: bool) -> Alu {
     } else {
         // Arithmetic, M = L.  Every function is `p + q + Cn` for some p, q
         // drawn from A and B; see the datasheet table.
-        let (p, q) = match aluf & 0xf {
-            0x0 => (x, 0),
-            0x1 => (x | y, 0),
-            0x2 => (x | !y, 0),
-            0x3 => (M33, 0),
-            0x4 => (x, x & !y),
-            0x5 => (x | y, x & !y),
-            0x6 => (x, !y),
-            0x7 => (x & !y, M33),
-            0x8 => (x, x & y),
-            0x9 => (x, y),
-            0xa => (x | !y, x & y),
-            0xb => (x & y, M33),
-            0xc => (x, x),
-            0xd => (x | y, x),
-            0xe => (x | !y, x),
-            _ => (x, M33),
-        };
-        (p & M33).wrapping_add(q & M33).wrapping_add(cin as u64)
+        let (p, q) = addends(aluf, x, y);
+        p.wrapping_add(q).wrapping_add(cin as u64)
     } & M33;
 
     // Each slice pulls AEB low unless its four result bits are all ones; the
     // eight slices are wired together open-collector.  In subtract mode that
     // is exactly A = B.
     Alu { f, aeqm: (f & 0xffff_ffff) == 0xffff_ffff }
+}
+
+/// The two addends of an arithmetic function, `F = p + q + Cn`, on the
+/// sign-extended 33-bit operands: the 74S181's active-high table.
+fn addends(aluf: u8, x: u64, y: u64) -> (u64, u64) {
+    let (p, q) = match aluf & 0xf {
+        0x0 => (x, 0),
+        0x1 => (x | y, 0),
+        0x2 => (x | !y, 0),
+        0x3 => (M33, 0),
+        0x4 => (x, x & !y),
+        0x5 => (x | y, x & !y),
+        0x6 => (x, !y),
+        0x7 => (x & !y, M33),
+        0x8 => (x, x & y),
+        0x9 => (x, y),
+        0xa => (x | !y, x & y),
+        0xb => (x & y, M33),
+        0xc => (x, x),
+        0xd => (x | y, x),
+        0xe => (x | !y, x),
+        _ => (x, M33),
+    };
+    (p & M33, q & M33)
+}
+
+/// **Revision 14's LC adder** (contract G3 revision 14, appendix A14.11):
+/// `LC<33:32>` as a write of the location counter by an arithmetic ALU
+/// function takes them. `m` is the whole M word, `a` the A operand's
+/// `<31:0>`; the array computes `F = p + q + Cn` on 33 bits, `q32` is bit
+/// 32 of its second addend (q's sign) and `c32 = F32 ^ p32 ^ q32` the carry
+/// into bit 32, and `E = (M<33:32> + 3 q32 + c32) mod 4`: M's 34 bits plus
+/// or minus A's 32, sign-extended. Output select 1, the ALU, gives `E`;
+/// select 3, the left shift, `{E<0>, F<31>}`, the 34-bit sum shifted as the
+/// bus's `<31:0>` are `{F<30:0>, Q<31>}`.
+pub fn lc_high(m: u64, a: u32, aluf: u8, cin: bool, left_shift: bool) -> u64 {
+    let ext = |v: u32| ((v as u64) | (((v >> 31) as u64) << 32)) & M33;
+    let (p, q) = addends(aluf, ext(m as u32), ext(a));
+    let f = p.wrapping_add(q).wrapping_add(cin as u64) & M33;
+    let bit32 = |v: u64| (v >> 32) & 1;
+    let c32 = bit32(f) ^ bit32(p) ^ bit32(q);
+    let e = ((m >> 32) & 3).wrapping_add(3 * bit32(q)).wrapping_add(c32) & 3;
+    if left_shift { (e & 1) << 1 | ((f >> 31) & 1) } else { e }
 }
 
 /// `<39:32>` of a 40-bit word's ALU output, in place above bit 31

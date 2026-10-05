@@ -963,6 +963,7 @@ const QUUX_ONLY: &[&str] = &[
     "--memory-timing",
     "--rtc",
     "--sync-cycle-ticks",
+    "--tlb",
     "--video-size",
 ];
 

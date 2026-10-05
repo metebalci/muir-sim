@@ -179,16 +179,22 @@ them.
 
 ### `quux`
 
-`quux` is QUUX, the CADR evolved. QUUX's level-1 map entry is six bits
-where the CADR's is five, so it maps 63 regions of 8K words at once to the
-CADR's 31; its PDL buffer is 16K words to the CADR's 1K; and ALU functions
-42 and 43 multiply and divide in one instruction each, where the CADR takes
-a step per bit; and it has clocks of its own, a microsecond clock in the
-processor and three interval timers on its register page, timer 0 the
-60 Hz tick, where the CADR's clock is the display's vertical interrupt and
-the others are on the I/O board. The rest of it is
-the CADR's. It boots from its own PROM and needs microcode that knows it.
-[QUUX](quux.md) has the whole of the difference.
+`quux` is QUUX, the CADR evolved, revision 13 by default. Its word is 40
+bits, the tag `<39:32>` over the field `<31:0>`; its map is two levels over
+1024-word pages, with 28-bit virtual and physical addresses; its PDL buffer
+is 16K words to the CADR's 1K; ALU functions 42 and 43 multiply and divide
+in one instruction each, where the CADR takes a step per bit; and it has
+clocks of its own, a microsecond clock in the processor and three interval
+timers on its register page, timer 0 the 60 Hz tick, where the CADR's clock
+is the display's vertical interrupt and the others are on the I/O board.
+The rest of it is the CADR's. It boots from its own PROM and needs
+microcode that knows it. [QUUX](quux.md) has the whole of the difference.
+
+With `MUIR_QUUX_REVISION=14` in its environment `quux` runs revision 14
+instead, a page table walked by hardware behind a TLB ([revision
+14](quux.md#revision-14-a-page-table-behind-a-tlb)). Unset or `13`, it
+runs revision 13; any other value is refused at the start. `cadr` does not
+read it.
 
 It runs on `micro` and `rtl`: `chip` is the CADR's boards as MIT drew them.
 A checkpoint carries its machine, and the other executable refuses it,
@@ -1015,6 +1021,17 @@ register, in lines of 8 words, 2-way, a hit in
 lines. It changes when the machine's reads and writes are answered and
 never what they read. The start says it and a checkpoint carries it.
 Refused on `micro`.
+
+Default: 4096.
+
+### `--tlb <entries>`
+
+`quux` only, revision 14.
+
+**micro, rtl, QUUX revision 14:** the size of its TLB, `<entries>`, a power
+of two from 1024 to 32768: [revision 14](quux.md), direct-mapped, its
+contents modelled on both engines; on `rtl` a sweep takes a tick of 10 ns
+an entry. The start says it. Refused below revision 14.
 
 Default: 4096.
 

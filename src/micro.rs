@@ -193,6 +193,11 @@ pub struct Micro {
     /// (`crate::machine::macro_dispatch`), handed to the machine at its
     /// edge. Set and used within one step.
     operand: Option<crate::machine::Operand>,
+    /// Revision 14's LC adder's `<33:32>` for this microcycle's ALU word,
+    /// when it is an arithmetic function through the ALU or the left shift
+    /// (A14.11), for a write of the location counter. Set and used within
+    /// one step.
+    lc_adder: Option<u64>,
 }
 
 impl Micro {
@@ -258,6 +263,7 @@ impl Micro {
             spc_popped: false,
             macro_write: None,
             operand: None,
+            lc_adder: None,
         }
     }
 
@@ -305,6 +311,9 @@ impl Micro {
             self.m.macro_dispatch.reset();
             // `-RESET` clears `MEMSTART` (`Rtl::reset`).
             self.write_out = None;
+            // Revision 14's TLB is swept, at once here, and its memory
+            // system's words cleared (A14.4, A14.9).
+            self.m.reset_memory_system(self.m.ns);
         }
         if boot {
             self.m.vmaok = false;
@@ -378,8 +387,46 @@ impl Micro {
     /// bit: `MAPI` is the 74S258s at VMAS 1C16 and 1C20, whose select is
     /// `-MEMSTART`, so it is `VMA` through the microcycle after a memory
     /// operation and `MD` otherwise.
+    ///
+    /// Revision 14's `MAP(MD)` and dispatches read port B, addressed by `MD`
+    /// alone (A14.4, A14.5).
     fn map_address(&self) -> u32 {
-        (if self.memstart { self.m.vma } else { self.m.md }) as u32
+        (if self.memstart && !self.m.geometry.paged() { self.m.vma } else { self.m.md }) as u32
+    }
+
+    /// Whether the instruction about to execute, `p0` with the OA
+    /// registers ORed in and not nopped, looks up port B (A14.5): it reads
+    /// `MAP(MD)`, or it is a DISPATCH on map bits and `MD`'s data type is
+    /// in the pointer-type register.
+    fn reads_port_b(&self) -> bool {
+        if self.inhibit || self.m.clock_control.nop11 {
+            return false;
+        }
+        let mut ir = self.p0.raw();
+        if self.oal {
+            ir |= self.oa_low;
+        }
+        if self.oah {
+            ir |= self.oa_high << 26;
+        }
+        let i = Insn::new(ir);
+        let map_source = i.m_src_functional() && (ir >> 26) & 0o17 == 0o11;
+        let map_dispatch = i.op() == Op::Dispatch
+            && (ir >> 8) & 3 != 0
+            && self.m.memory_words.pointer_type(self.m.md);
+        map_source || map_dispatch
+    }
+
+    /// The word a dispatch's map bits come from on revision 14 (A14.5): the
+    /// entry for `MD` when `MD`'s data type is in the pointer-type register,
+    /// and otherwise `<23:22>` both 1, not oldspace and not extra PDL, with
+    /// no lookup.
+    fn map_bits_14(&self) -> u32 {
+        if self.m.memory_words.pointer_type(self.m.md) {
+            self.map_seen.unwrap_or_else(|| self.m.translate(self.map_address())).l2_data
+        } else {
+            3 << 22
+        }
     }
 
     /// The write phase of this microcycle, which writes what the one
@@ -495,7 +542,8 @@ impl Micro {
     /// halfwords 0 and 1, keyed on `LC<1>` = 1 and 0; and in byte mode 0,
     /// 32, 24 and 16 for `LC<1:0>` = 1, 2, 3 and 0, bytes 0 to 3 in stream
     /// order; mod 40.
-    fn lc_rotation(&self, lc: u32, rotate: u32) -> u32 {
+    fn lc_rotation(&self, lc: u64, rotate: u32) -> u32 {
+        let lc = lc as u32;
         if self.m.geometry.wide() {
             let add = if self.m.byte_mode() {
                 [16, 0, 32, 24][(lc & 3) as usize]
@@ -686,7 +734,7 @@ impl Micro {
     /// step landed on the last byte of a word and cleared by the fetch it
     /// asks for.  `rtl` and `chip` compute the gates.
     fn needfetch(&self) -> bool {
-        self.m.lc & (1 << 31) != 0
+        self.m.lc & self.m.geometry.need_fetch() != 0
     }
 
     fn step_lc(&mut self) {
@@ -695,14 +743,16 @@ impl Micro {
         // `LC<25:0>` (page LC); the flags this engine keeps above it stay.
         // Revision 13's counter is `LC<29:0>` (A1.6), and a fetch takes
         // `LC<29:2>`.
+        // Revision 14's is `LC<33:0>`, a fetch taking `LC<33:2>`, any 32-bit
+        // address, and the step carrying into `<33:32>` (A14.11).
         let counter = self.m.geometry.lc_counter();
-        let fetch_from = (self.m.lc & counter) >> 2;
+        let fetch_from = ((self.m.lc & counter) >> 2) as u32;
         let inc = if self.m.byte_mode() { 1 } else { 2 };
         let lc = (self.m.lc & counter).wrapping_add(inc) & counter;
         self.m.lc = (self.m.lc & !counter) | lc;
 
         if self.needfetch() {
-            self.m.lc &= !(1 << 31);
+            self.m.lc &= !self.m.geometry.need_fetch();
             // `IFETCH` is a term of `MEMOP` on page VCTL1 and `VMAS` is
             // `LC<25:2>` under it, so the fetch is a memory cycle like any
             // read: the map word latched, the clock charged, `MD` loaded
@@ -715,7 +765,7 @@ impl Micro {
         let lc0b = self.m.byte_mode() && (self.m.lc & 1 != 0);
         let last_byte_in_word = !lc0b && (self.m.lc & 2 == 0);
         if last_byte_in_word {
-            self.m.lc |= 1 << 31;
+            self.m.lc |= self.m.geometry.need_fetch();
         }
     }
 
@@ -788,6 +838,15 @@ impl Micro {
             // Revision 13's layout is A1.7's: the level-1 entry in
             // `<38:32>`, the two fault bits in `<31:30>` from the latched
             // entry's `<27:26>`, and the 28-bit level-2 entry in `<27:0>`.
+            // Revision 14's (A14.5): `<39:32>` 0, the fault bits the same,
+            // and `<29:0>` the entry for `MD`'s address, port B's, walked
+            // for at the head of the microcycle ([`Micro::step`]).
+            0o11 if self.m.geometry.paged() => {
+                let t = self.map_seen.unwrap_or_else(|| self.m.translate(self.map_address()));
+                let pfr = (self.lvmo >> 27) & 1 != 0;
+                let pfw = !((self.lvmo >> 26) & 1 == 0 && self.wrcyc);
+                Word::from((!pfw as u32) << 31 | (!pfr as u32) << 30 | t.l2_data)
+            }
             0o11 if self.m.geometry.wide() => {
                 let t = self.map_seen.unwrap_or_else(|| self.m.translate(self.map_address()));
                 let pfr = (self.lvmo >> 27) & 1 != 0;
@@ -811,14 +870,22 @@ impl Micro {
             // Location Counter.  Bit 0 only means anything in byte mode.
             // Revision 13's layout is A1.6's: NEED-FETCH in `<39>`, the
             // four flags in `<37:34>`, the counter in `<29:0>`.
+            // Revision 14's counter is `<33:0>` under the same flags
+            // (A14.11).
             0o13 if self.m.geometry.wide() => {
-                let counter = self.m.lc & crate::machine::LC_COUNTER_13;
+                let counter = self.m.lc & self.m.geometry.lc_counter();
                 let counter = if self.m.byte_mode() { counter } else { counter & !1 };
                 Word::from(self.needfetch()) << 39
                     | Word::from(self.m.interrupt_control & (0o17 << 26)) << 8
-                    | Word::from(counter)
+                    | counter
             }
-            0o13 => (if self.m.byte_mode() { self.m.lc } else { self.m.lc & !1 }).into(),
+            0o13 => {
+                if self.m.byte_mode() {
+                    self.m.lc
+                } else {
+                    self.m.lc & !1
+                }
+            }
             // SPC ptr & data, pop
             0o14 => {
                 let v = spc_word(&self.m);
@@ -903,6 +970,51 @@ impl Micro {
         }
     }
 
+    /// The head of a microcycle, before its instruction: a map store's
+    /// write lands, and a read's word reaches `MD`.
+    ///
+    /// The map write lands before the instruction runs, so
+    /// that its memory access translates through the new map as `rtl`'s
+    /// does. What the instruction reads of the map itself --- `MAP(MD)`
+    /// and a dispatch on its bits --- is on the CADR the word written, the
+    /// netlist's answer to a race on the board, and on QUUX the word from
+    /// before the write, as QUUX defines it
+    /// ([`Geometry::old_word_while_written`],
+    /// `tests/dispatch_write_order.rs`).
+    ///
+    /// [`Geometry::old_word_while_written`]: crate::machine::Geometry
+    fn head_of_microcycle(&mut self) {
+        self.map_seen = (self.m.geometry.old_word_while_written && self.map_write_d.is_some())
+            .then(|| self.m.translate(self.map_address()));
+        self.land_map_write();
+        self.land_md();
+    }
+
+    /// **Revision 14's head of a microcycle** (A14.4, A14.5): a read's word
+    /// reaches `MD`; port B, addressed by that `MD`, walks on a miss for an
+    /// instruction that looks it up, as `rtl` holds that microcycle for the
+    /// walk before its read phase; the instruction then reads the TLB as it
+    /// stood before a `WRITE-MAP` operation landing in this microcycle,
+    /// which lands last.
+    fn head_of_microcycle_14(&mut self) {
+        self.land_md();
+        if self.reads_port_b() {
+            self.m.tlb_fill(self.m.md as u32);
+        }
+        self.map_seen = self.map_write_d.is_some().then(|| self.m.translate(self.m.md as u32));
+        self.land_map_write();
+    }
+
+    /// A read's word lands in `MD` two microcycles after its start.
+    fn land_md(&mut self) {
+        if self.new_md_delay > 0 {
+            self.new_md_delay -= 1;
+            if self.new_md_delay == 0 {
+                self.m.md = self.new_md;
+            }
+        }
+    }
+
     /// The edge at the end of a microcycle, taking `WMAP` into `WMAPD`.
     /// Two stores running back to back each get their own write, one
     /// microcycle behind them, as the register gives them.
@@ -926,13 +1038,22 @@ impl Micro {
             // Nowhere
             0o0 => {}
             // LOCATION-COUNTER.  Writing it always sets NEED-FETCH.
+            // Revision 14 writes `<33:0>`: `<31:0>` the bus's, `<33:32>` the
+            // word's or, for an arithmetic ALU word through the ALU or the
+            // left shift, LC's adder's (A14.11).
             0o1 => {
                 let counter = self.m.geometry.lc_counter();
-                self.m.lc = (self.m.lc & !counter) | (data & counter);
+                let value = if self.m.geometry.paged() {
+                    let high = self.lc_adder.unwrap_or(word >> 32 & 3);
+                    high << 32 | Word::from(data)
+                } else {
+                    u64::from(data)
+                };
+                self.m.lc = (self.m.lc & !counter) | (value & counter);
                 if !self.m.byte_mode() {
                     self.m.lc &= !1;
                 }
-                self.m.lc |= 1 << 31;
+                self.m.lc |= self.m.geometry.need_fetch();
             }
             // INTERRUPT-CONTROL.  Bit 28 is `PROG.UNIBUS.RESET`, the 25LS2519
             // at FLAG 3E08: as it rises the model I/O boards are reset,
@@ -949,7 +1070,7 @@ impl Micro {
             0o2 => {
                 let was = self.m.interrupt_control & (1 << 28) != 0;
                 self.m.interrupt_control = data;
-                self.m.lc = (self.m.lc & !(0o17 << 26)) | (data & (0o17 << 26));
+                self.m.lc = (self.m.lc & !(0o17 << 26)) | u64::from(data & (0o17 << 26));
                 if !was && data & (1 << 28) != 0 && self.m.geometry.unibus {
                     self.m.bus_reset();
                 }
@@ -1074,6 +1195,11 @@ impl Micro {
             self.write_goes_out();
         }
         self.memop = true;
+        // Revision 14's port A: a miss walks and fills before the start
+        // translates (A14.6).
+        if self.m.geometry.paged() {
+            self.m.tlb_fill(self.m.vma as u32);
+        }
         self.lvmo = self.m.translate(self.m.vma as u32).l2_data;
         self.wrcyc = write;
         if !lost {
@@ -1300,6 +1426,15 @@ impl Micro {
             self.m.overflow = arithmetic && (alu.f >> 32 & 1) != (alu.f >> 31 & 1);
         }
 
+        // Revision 14's LC adder (A14.11): an arithmetic function through
+        // the ALU or the left shift, not QUUX's multiply or divide.
+        let osel = self.ir(12, 2);
+        self.lc_adder = (self.m.geometry.paged()
+            && !ctl.alumode
+            && self.muldiv().is_none()
+            && (osel == 1 || osel == 3))
+            .then(|| ttl::lc_high(self.mdata, self.adata as u32, ctl.aluf, ctl.cin, osel == 3));
+
         // QUUX's multiply and divide drive the output bus and load Q
         // whatever IR<13:12> and IR<1:0> say: on `<31:0>`, the output's
         // `<39:32>` M's and Q's its own.
@@ -1454,6 +1589,9 @@ impl Micro {
         let pending = int_enabled && self.m.interrupt();
         let code = match self.ir(0, 5) {
             c @ (0o10 | 0o11) => c,
+            // Revision 14's condition 12, M <= A on the fields, unsigned
+            // (A14.10).
+            0o12 if self.m.geometry.paged() => 0o12,
             c => c & 7,
         };
         match code {
@@ -1466,6 +1604,7 @@ impl Micro {
             6 => !self.m.vmaok || pending || (self.m.interrupt_control & (1 << 26) != 0),
             0o10 => self.m.overflow,
             0o11 => (self.mdata as u32) < (self.adata as u32),
+            0o12 => (self.mdata as u32) <= (self.adata as u32),
             _ => true,
         }
     }
@@ -1609,8 +1748,11 @@ impl Micro {
         // Revision 13's are the entry's `<22>` and `<23>`, the meta bits
         // moved up by 4 with the rest (A1.7).
         if map != 0 {
-            let bits =
-                self.map_seen.unwrap_or_else(|| self.m.translate(self.map_address())).l2_data;
+            let bits = if self.m.geometry.paged() {
+                self.map_bits_14()
+            } else {
+                self.map_seen.unwrap_or_else(|| self.m.translate(self.map_address())).l2_data
+            };
             let at = if wide { 22 } else { 18 };
             let b18 = (bits >> at) & 1;
             let b19 = (bits >> (at + 1)) & 1;
@@ -1784,6 +1926,8 @@ impl Engine for Micro {
         // `-RESET` clears `MEMSTART` (`Rtl::reset`): a write not yet gone
         // out never does.
         self.write_out = None;
+        // Revision 14's TLB swept and its memory system's words cleared.
+        self.m.reset_memory_system(self.m.ns);
     }
     fn save(&self, w: &mut crate::checkpoint::Writer) {
         let Micro {
@@ -1843,6 +1987,7 @@ impl Engine for Micro {
             spc_popped: _,
             macro_write: _,
             operand: _,
+            lc_adder: _,
         } = self;
         m.save(w);
         w.u64(p0.raw());
@@ -2035,25 +2180,12 @@ impl Engine for Micro {
         self.mclk_edge();
         self.advance_pipeline();
         self.memstart = std::mem::take(&mut self.memop);
-        // A map store's write lands here, before the instruction runs, so
-        // that its memory access translates through the new map as `rtl`'s
-        // does. What the instruction reads of the map itself --- `MAP(MD)`
-        // and a dispatch on its bits --- is on the CADR the word written, the
-        // netlist's answer to a race on the board, and on QUUX the word from
-        // before the write, as QUUX defines it
-        // ([`Geometry::old_word_while_written`],
-        // `tests/dispatch_write_order.rs`).
-        self.map_seen = (self.m.geometry.old_word_while_written && self.map_write_d.is_some())
-            .then(|| self.m.translate(self.map_address()));
-        self.land_map_write();
-
-        if self.new_md_delay > 0 {
-            self.new_md_delay -= 1;
-            if self.new_md_delay == 0 {
-                self.m.md = self.new_md;
-            }
+        self.lc_adder = None;
+        if self.m.geometry.paged() {
+            self.head_of_microcycle_14();
+        } else {
+            self.head_of_microcycle();
         }
-
         // A jump with N set kills the instruction already in the pipeline,
         // and the console's `NOP11` kills every one.
         if self.inhibit || self.m.clock_control.nop11 {

@@ -278,6 +278,22 @@ impl Geometry {
         macro_dispatch: true,
     };
 
+    /// **QUUX's, revision 14** (contract G3 revision 14, appendix A14):
+    /// revision 13 with a 32-bit virtual address space, its two windows,
+    /// and a page table walked by hardware behind a TLB ([`crate::tlb`])
+    /// in place of the two map levels, so no level-1 entry (feature word 1
+    /// reads 0); the location counter at 34 bits with its adder (A14.11);
+    /// jump condition 12; the memory system's register-page words 220-224
+    /// (A14.9). All of it keyed on [`Geometry::paged`].
+    pub const QUUX_14: Geometry =
+        Geometry { l1_bits: 0, machine_id: Some((0x5155 << 16) | (14 << 4) | 4), ..Geometry::QUUX };
+
+    /// Whether the machine translates through the TLB, revision 14's
+    /// ([`Geometry::QUUX_14`]), rather than through two map levels.
+    pub fn paged(self) -> bool {
+        self.revision().is_some_and(|r| r >= 14)
+    }
+
     /// The level-1 entry a CADR's map store writes: `VMA<31:27>`
     /// (`mit/cadr/ir.bits`, "VMA<26>=1 writes the level 1 map from
     /// VMA<31-27>"). Revision 13 writes its own ([`Machine::write_map_13`]).
@@ -285,8 +301,8 @@ impl Geometry {
         (vma >> 27) & self.l1_mask()
     }
 
-    /// QUUX's revision, from its MACHINE-ID's `<15:4>`: 13, and `None` on
-    /// the CADR, which has no MACHINE-ID.
+    /// QUUX's revision, from its MACHINE-ID's `<15:4>`: 13 or 14, and
+    /// `None` on the CADR, which has no MACHINE-ID.
     pub fn revision(self) -> Option<u32> {
         self.machine_id.map(|id| id >> 4 & 0o7777)
     }
@@ -331,9 +347,22 @@ impl Geometry {
 
     /// The location counter's own bits, the counter without the flags an
     /// engine keeps beside it: `LC<25:0>` ([`LC_COUNTER`]), and on revision
-    /// 13 `LC<29:0>`, a byte address of a 28-bit word address (A1.6).
-    pub fn lc_counter(self) -> u32 {
-        if self.wide() { LC_COUNTER_13 } else { LC_COUNTER }
+    /// 13 `LC<29:0>`, a byte address of a 28-bit word address (A1.6), and
+    /// on revision 14 `LC<33:0>`, of a 32-bit one (A14.11).
+    pub fn lc_counter(self) -> u64 {
+        if self.paged() {
+            LC_COUNTER_14
+        } else if self.wide() {
+            u64::from(LC_COUNTER_13)
+        } else {
+            u64::from(LC_COUNTER)
+        }
+    }
+
+    /// Where `micro` carries `NEEDFETCH` in [`Machine::lc`]: bit 31, above
+    /// the counter, and on revision 14, whose counter has bit 31, bit 40.
+    pub fn need_fetch(self) -> u64 {
+        if self.paged() { 1 << 40 } else { 1 << 31 }
     }
 
     /// The map word the latch at VMEMDR 1D14 holds before any memory cycle
@@ -381,10 +410,12 @@ impl Geometry {
     /// Read-only, as every word 0-77 is.
     ///
     /// The page is at `1777777400`, the last page of the 28-bit physical
-    /// space ([`REGISTER_PAGE_13`]).
+    /// space ([`REGISTER_PAGE_13`]), and on revision 14 at bus address
+    /// [`crate::tlb::REGISTER_PAGE_BUS`], with the same offsets.
     pub fn feature_word(self, phys: u32) -> Option<u32> {
         let id = self.machine_id?;
-        if phys & !0o377 != REGISTER_PAGE_13 {
+        let page = if self.paged() { crate::tlb::REGISTER_PAGE_BUS } else { REGISTER_PAGE_13 };
+        if phys & !0o377 != page {
             return None;
         }
         Some(match phys & 0o377 {
@@ -1060,6 +1091,10 @@ pub const LC_COUNTER: u32 = 0o377777777;
 /// appendix A1.6). [`Geometry::lc_counter`].
 pub const LC_COUNTER_13: u32 = (1 << 30) - 1;
 
+/// Revision 14's location counter, `LC<33:0>`: a byte address, the word
+/// `<33:2>`, any 32-bit word address (appendix A14.11).
+pub const LC_COUNTER_14: u64 = (1 << 34) - 1;
+
 #[derive(Clone)]
 pub struct Machine {
     pub prom: Vec<Insn>,
@@ -1118,8 +1153,10 @@ pub struct Machine {
     /// NEED-FETCH in bit 31 and the interrupt-control flags mirrored in bits
     /// 29:26. On revision 13 the 30 bits of [`LC_COUNTER_13`] and
     /// NEED-FETCH in bit 31, the flags not mirrored: the location counter
-    /// source reads them from [`Machine::interrupt_control`] (A1.6).
-    pub lc: u32,
+    /// source reads them from [`Machine::interrupt_control`] (A1.6). On
+    /// revision 14 the 34 bits of [`LC_COUNTER_14`] and NEED-FETCH in bit
+    /// 40 ([`Geometry::need_fetch`]; A14.11).
+    pub lc: u64,
     pub vma: Word,
     pub md: Word,
     /// The four flags of INTERRUPT-CONTROL at `<29:26>`, as the CADR's
@@ -1137,6 +1174,13 @@ pub struct Machine {
     /// 0 otherwise; JUMP, DISPATCH and BYTE words and an inhibited word
     /// leave it. Jump condition 10 tests it. Never set on a 32-bit machine.
     pub overflow: bool,
+    /// Revision 14's TLB ([`crate::tlb`]): its contents, which both engines
+    /// look up and fill, and its counts. Not in a checkpoint: a resume
+    /// starts with it swept (A14.14).
+    pub tlb: crate::tlb::Tlb,
+    /// Revision 14's memory-system words of the register page, 220-224
+    /// (A14.9).
+    pub memory_words: crate::tlb::Words,
 
     /// The widths of the map and the PDL buffer, [`Geometry::CADR`] unless
     /// the run chose another machine.
@@ -1307,6 +1351,8 @@ impl Machine {
             interrupt_control: 0,
             dispatch_constant: 0,
             overflow: false,
+            tlb: crate::tlb::Tlb::default(),
+            memory_words: crate::tlb::Words::default(),
             geometry,
             timers: Timers::new(),
             macro_dispatch: MacroDispatch::default(),
@@ -1513,6 +1559,9 @@ impl Machine {
     /// 2 as `-VMO`.  That matters to `src/chip.rs`, which holds cells; this
     /// holds values, so it does not appear here.
     pub fn translate(&self, vaddr: u32) -> Translation {
+        if self.geometry.paged() {
+            return self.translate_14(vaddr);
+        }
         if self.geometry.wide() {
             return self.translate_13(vaddr);
         }
@@ -1566,6 +1615,94 @@ impl Machine {
             write_permitted: l2_data & (1 << 26) != 0,
             access_permitted: l2_data & (1 << 27) != 0,
         }
+    }
+
+    /// **Revision 14's translation** (A14.1, A14.5, A14.6) of `vaddr`: a
+    /// window's fixed entry from the decode; a paged address's TLB entry,
+    /// or on a miss what the walk would find, the no-entry word if
+    /// nothing. Nothing is loaded and no walk is counted here: the engines
+    /// call [`Machine::tlb_fill`] where the hardware walks, before they
+    /// look, so that a miss is filled at the moment the port would fill it.
+    /// `physical` is the 29-bit bus address ([`crate::tlb::bus_address`]),
+    /// `l2_data` the entry's `<29:0>`, and the permissions its access code,
+    /// `<27>` read and `<26>` write.
+    fn translate_14(&self, vaddr: u32) -> Translation {
+        let entry = self.entry_14(vaddr);
+        Translation {
+            physical: crate::tlb::bus_address(vaddr, entry),
+            page: entry & 0o777777,
+            l1_data: 0,
+            l2_data: entry,
+            write_permitted: entry & (1 << 26) != 0,
+            access_permitted: entry & (1 << 27) != 0,
+        }
+    }
+
+    /// The entry `<29:0>` revision 14 gives `vaddr`, as
+    /// [`Machine::translate_14`] says.
+    pub fn entry_14(&self, vaddr: u32) -> u32 {
+        if let Some(e) = crate::tlb::fixed_entry(vaddr) {
+            return e;
+        }
+        self.tlb.lookup(vaddr).unwrap_or_else(|| {
+            crate::tlb::walk(&self.main, self.memory_words.directory, vaddr)
+                .entry
+                .unwrap_or(crate::tlb::NO_ENTRY)
+        })
+    }
+
+    /// **The walk on a miss** (A14.6): when `vaddr` is paged and the TLB
+    /// does not hold it, the walk is made, counted, and what it found
+    /// loaded, unless it found no entry. Returns the walk, for `rtl` to
+    /// time its reads; `None` when nothing walked.
+    pub fn tlb_fill(&mut self, vaddr: u32) -> Option<crate::tlb::Walk> {
+        if crate::tlb::region(vaddr) != crate::tlb::Region::Paged
+            || self.tlb.lookup(vaddr).is_some()
+        {
+            return None;
+        }
+        let walk = crate::tlb::walk(&self.main, self.memory_words.directory, vaddr);
+        self.tlb.walks += 1;
+        if let Some(e) = walk.entry {
+            self.tlb.load(vaddr, e);
+        }
+        Some(walk)
+    }
+
+    /// **A `WRITE-MAP` operation** landing (A14.4), at `now`: a direct
+    /// write, an invalidation, or an empty, which sweeps the TLB and, on
+    /// `rtl`, holds starts and port-B lookups until `now` + N ticks.
+    /// Whether it was an operation, which drops the prefetch's word.
+    pub fn write_map_14(&mut self, vma: Word, md: Word, now: u64) -> bool {
+        match crate::tlb::Operation::of(vma, md) {
+            crate::tlb::Operation::None => return false,
+            crate::tlb::Operation::Write { va, entry } => self.tlb.load(va, entry),
+            crate::tlb::Operation::Invalidate { va } => self.tlb.invalidate(va),
+            crate::tlb::Operation::Empty => self.sweep_tlb(now),
+        }
+        true
+    }
+
+    /// The sweep, at `now` (A14.4): every entry cleared, and on `rtl` the
+    /// sweep's end, N ticks on, which starts wait for.
+    pub fn sweep_tlb(&mut self, now: u64) {
+        self.tlb.sweep();
+        self.tlb.sweep_until = now + self.tlb.sweep_ns();
+    }
+
+    /// `-RESET` on revision 14 (A14.4, A14.9), at `now`: the TLB swept and
+    /// the memory system's words cleared. Nothing on another revision.
+    pub fn reset_memory_system(&mut self, now: u64) {
+        if self.geometry.paged() {
+            self.sweep_tlb(now);
+            self.memory_words = crate::tlb::Words::default();
+        }
+    }
+
+    /// A TLB of `entries`, `--tlb` (A14.4): a power of two from 1,024 to
+    /// 32,768, swept; before the machine runs.
+    pub fn set_tlb_entries(&mut self, entries: usize) {
+        self.tlb = crate::tlb::Tlb::new(entries);
     }
 
     /// Revision 13's level-1 output for the address `addr` (A1.7): the
@@ -1628,6 +1765,10 @@ impl Machine {
     /// settle it.  Microcode 323 writes the levels in separate stores
     /// (`LEVEL-1-MAP-MISS` in `uc-page-fault.lisp`), so the band never asks.
     pub fn write_map(&mut self, vma: Word, md: Word) {
+        if self.geometry.paged() {
+            self.write_map_14(vma, md, self.ns);
+            return;
+        }
         if self.geometry.wide() {
             return self.write_map_13(vma, md as u32);
         }
@@ -2115,7 +2256,14 @@ impl Machine {
             // width in 31:16 and height in 15:0; bits a pixel in 31:16 and
             // words a line in 15:0; and the buffer's first physical address.
             let (width, height, words_per_line) = self.tv.screen();
+            let paged = self.geometry.paged();
             return Word::from(match phys & 0o377 {
+                // Revision 14 (A14.9): word 2 the TLB's entries, word 13
+                // the buffer's device-window address, 220-227 the memory
+                // system's words.
+                0o2 if paged => self.tlb.len() as u32,
+                0o13 if paged => crate::tlb::DEVICE_WINDOW,
+                k @ 0o220..=0o227 if paged => self.memory_words.read(k).unwrap_or(0),
                 0o11 => (width as u32) << 16 | height as u32,
                 0o12 => 1 << 16 | words_per_line as u32,
                 0o13 => WINDOW_13,
@@ -2156,6 +2304,13 @@ impl Machine {
                 0o210 if self.tv.board() == tv::Board::Video => self.tv.read_control(0, self.ns),
                 k => self.quux_input.read(k).unwrap_or(w),
             });
+        }
+        if self.geometry.paged() {
+            return match self.space_14(phys) {
+                Space13::Window(off) => UNBOXED_TAG | Word::from(self.tv.read_buffer(off)),
+                Space13::Main(a) => self.main[a],
+                Space13::Nothing => 0,
+            };
         }
         if self.geometry.has_register_page() {
             return match self.space_13(phys) {
@@ -2210,6 +2365,22 @@ impl Machine {
         match busint::decode_quux_13(phys, self.main.len(), self.tv.buffer_words()) {
             busint::Responder::Memory(_) if phys >= WINDOW_13 => Space13::Window(phys - WINDOW_13),
             busint::Responder::Memory(_) => Space13::Main(phys as usize),
+            _ => {
+                self.bus_error |= bus_error::XBUS_NXM;
+                Space13::Nothing
+            }
+        }
+    }
+
+    /// Revision 14, past the register page: the bus address `bus` in main
+    /// memory, the frame buffer in the device window's slice 0, or nothing
+    /// there, which sets word 101 `<0>` ([`busint::decode_quux_14`]).
+    fn space_14(&mut self, bus: u32) -> Space13 {
+        match busint::decode_quux_14(bus, self.main.len(), self.tv.buffer_words()) {
+            busint::Responder::Memory(_) if bus & crate::tlb::DEVICE != 0 => {
+                Space13::Window(bus & !crate::tlb::DEVICE)
+            }
+            busint::Responder::Memory(_) => Space13::Main(bus as usize),
             _ => {
                 self.bus_error |= bus_error::XBUS_NXM;
                 Space13::Nothing
@@ -2278,6 +2449,10 @@ impl Machine {
                 0o210 if self.tv.board() == tv::Board::Video => {
                     self.tv.write_control(0, value, self.ns);
                 }
+                // Revision 14's memory system's words (A14.9).
+                k @ 0o220..=0o227 if self.geometry.paged() => {
+                    self.memory_words.write(k, value);
+                }
                 k => {
                     self.quux_input.write(k, value);
                 }
@@ -2285,7 +2460,9 @@ impl Machine {
             return;
         }
         if self.geometry.has_register_page() {
-            match self.space_13(phys) {
+            let space =
+                if self.geometry.paged() { self.space_14(phys) } else { self.space_13(phys) };
+            match space {
                 // The window stores the field and drops the tag (G1 §4.2).
                 Space13::Window(off) => self.tv.write_buffer(off, value),
                 Space13::Main(a) => {
@@ -2464,6 +2641,9 @@ impl Machine {
             interrupt_control,
             dispatch_constant,
             overflow,
+            // Not in a checkpoint: a resume starts with it swept (A14.14).
+            tlb: _,
+            memory_words,
             geometry,
             timers,
             macro_dispatch,
@@ -2518,7 +2698,10 @@ impl Machine {
         w.u16(*pdl_index);
         w.word(*q);
         w.u16(*opc);
-        w.u32(*lc);
+        // `<31:0>` with NEED-FETCH in bit 31 to revision 13, as always;
+        // revision 14's counter's `<33:32>` and its NEED-FETCH go at the
+        // end, below.
+        w.u32(*lc as u32);
         w.word(*vma);
         w.word(*md);
         w.u32(*interrupt_control);
@@ -2564,6 +2747,14 @@ impl Machine {
         quux_input.save(w);
         w.u64(*cycles);
         w.u64(*ns);
+        // Revision 14's own (A14.14), after everything revision 13 has:
+        // `LC<40:32>`, NEED-FETCH and the counter's top two bits, and the
+        // memory system's words. The TLB is not kept; the latched entry
+        // behind `MAP(MD)`'s fault bits is the engine's.
+        if geometry.paged() {
+            w.u16((*lc >> 32) as u16);
+            memory_words.save(w);
+        }
     }
 
     /// The first part of [`Machine::load`]: everything a checkpoint holds
@@ -2615,7 +2806,7 @@ impl Machine {
         self.pdl_index = pdl_index;
         self.q = r.word()?;
         self.opc = r.u16()?;
-        self.lc = r.u32()?;
+        self.lc = u64::from(r.u32()?);
         self.vma = r.word()?;
         self.md = r.word()?;
         self.interrupt_control = r.u32()?;
@@ -2641,17 +2832,19 @@ impl Machine {
         self.rtc = Rtc::load(r)?;
         self.file_device.load(r)?;
         self.dma_written = r.bool()?;
-        // The CADR, or QUUX, revision 13, with a PDL buffer of 1K to 16K
+        // The CADR, or QUUX, revision 13 or 14, with a PDL buffer of 1K to 16K
         // words. A 32-bit QUUX is a retired revision's, 12 with the fused
         // return and 11 without, which wrote the CADR's format version and
         // is known by these fields: refused as what it is.
         self.geometry = match (word_bits, l1_bits, pdl_bits, muldiv, tick, fused) {
             (32, 5, 10, false, false, false) => Geometry::CADR,
             (40, 7, 10..=14, true, true, true) => Geometry { pdl_bits, ..Geometry::QUUX },
+            // Revision 14 (A14.14): no level-1 map, its entry 0 bits.
+            (40, 0, 10..=14, true, true, true) => Geometry { pdl_bits, ..Geometry::QUUX_14 },
             (32, 6, 10..=14, true, true, fused) => {
                 let revision = if fused { 12 } else { 11 };
                 return Err(crate::checkpoint::bad(format!(
-                    "a checkpoint of QUUX revision {revision}, which this build no longer runs: it runs the CADR and QUUX revision 13, and a revision-{revision} checkpoint resumes only on an earlier muir-sim"
+                    "a checkpoint of QUUX revision {revision}, which this build no longer runs: it runs the CADR and QUUX revisions 13 and 14, and a revision-{revision} checkpoint resumes only on an earlier muir-sim"
                 )));
             }
             _ => {
@@ -2754,6 +2947,12 @@ impl Machine {
         self.quux_input.load(r)?;
         self.cycles = r.u64()?;
         self.ns = r.u64()?;
+        if self.geometry.paged() {
+            self.lc |= u64::from(r.u16()?) << 32;
+            self.memory_words = crate::tlb::Words::load(r)?;
+            // The TLB is not kept: the resume starts with it swept.
+            self.tlb = crate::tlb::Tlb::new(self.tlb.len());
+        }
         Ok(())
     }
 }

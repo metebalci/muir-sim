@@ -1105,6 +1105,27 @@ pub fn decode_quux_13(phys: u32, memory_words: usize, tv_words: u32) -> Responde
     }
 }
 
+/// **Revision 14's decode** (contract G3 revision 14, A14.1) of a 29-bit
+/// bus address ([`crate::tlb::bus_address`]): with `<28>` clear, main
+/// memory up to `memory_words` and nothing past it; with `<28>` set, the
+/// device window at `<27:0>`: the register page at `1777777400`, a device;
+/// frame buffer 0 from the window's base, `tv_words` of it, on the memory
+/// bus with main memory; and nothing else, the reserved slices and pages
+/// included. A memory's window never reaches here: every reference to it
+/// faults.
+pub fn decode_quux_14(bus: u32, memory_words: usize, tv_words: u32) -> Responder {
+    use crate::tlb::{DEVICE, REGISTER_PAGE_BUS};
+    if bus & !0o377 == REGISTER_PAGE_BUS {
+        Responder::Device
+    } else if bus & DEVICE != 0 && (bus & !DEVICE) < tv_words
+        || bus & DEVICE == 0 && (bus as usize) < memory_words
+    {
+        Responder::Memory(0)
+    } else {
+        Responder::NoXbus
+    }
+}
+
 pub fn decode_for(
     phys: u32,
     memory_words: usize,

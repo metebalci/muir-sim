@@ -50,6 +50,7 @@ pub mod serial;
 pub mod spy;
 pub mod sym;
 pub mod terminal;
+pub mod tlb;
 pub mod trident;
 pub mod ttl;
 pub mod tv;

@@ -5,13 +5,17 @@
 //! saying 13, 32MW of main memory by default (G2 §3), PROM 2001 built in,
 //! and on `rtl` the memory cache's 8-word lines; and a checkpoint of QUUX
 //! revision 12, the 32-bit machine before it, is refused by its version,
-//! which says so (G2 §11.1). The boot PROM alone is run, so nothing here
-//! needs `vendor/`.
+//! which says so (G2 §11.1). `MUIR_QUUX_REVISION=14` runs revision 14
+//! (contract G3 revision 14); the switch is not a documented flag, read
+//! once where the machine is built, and `cadr` does not read it. The boot
+//! PROM alone is run, so nothing here needs `vendor/`.
 
 mod support;
 
 use muir::machine::{Geometry, Machine};
 use support::{Run, cadr, quux, scratch, text};
+
+const SWITCH: &str = "MUIR_QUUX_REVISION";
 
 /// The machine a checkpoint was written of, and how many 64K-word boards
 /// of main memory it had: read from the file, so it is the machine the
@@ -153,5 +157,129 @@ fn a_revision_12_checkpoint_is_refused_by_its_machine() {
                 assert!(t.contains(&said), "{resumer} {engine}: the refusal says whose:\n{t}");
             }
         }
+    }
+}
+
+fn refused(out: &std::process::Output, says: &str) {
+    let t = text(out);
+    assert_eq!(out.status.code(), Some(2), "not refused at the start:\n{t}");
+    assert!(t.contains(says), "the refusal says {says:?}:\n{t}");
+}
+
+/// **`MUIR_QUUX_REVISION=13` is revision 13**, as unset is.
+#[test]
+fn the_switch_at_13_runs_revision_13() {
+    let dir = scratch("revision-13-switch");
+    for engine in ["--micro", "--rtl"] {
+        let chk = dir.join(format!("{}.chk", &engine[2..]));
+        let out = quux()
+            .env(SWITCH, "13")
+            .args([engine, "--stop-after", "10", "--checkpoint"])
+            .arg(&chk)
+            .run();
+        let t = text(&out);
+        assert!(out.status.success(), "{engine}: the run failed:\n{t}");
+        assert_eq!(checkpointed(&chk).0, Geometry::QUUX, "{engine}: the machine built");
+        assert!(t.contains("machine: quux, revision 13: "), "{engine}: {t}");
+    }
+}
+
+/// **Any other value is refused at the start**, naming the two: revision 12 is
+/// retired with System 2000 and refused as any other value.
+#[test]
+fn another_revision_is_refused() {
+    for v in ["12", "15", "11", "", "13 ", "thirteen"] {
+        let out = quux().env(SWITCH, v).args(["--micro", "--stop-after", "1"]).run();
+        refused(&out, &format!("quux: {SWITCH}={v:?}: revision 13 or 14"));
+    }
+}
+
+/// **`MUIR_QUUX_REVISION=14` runs revision 14** (contract G3 revision 14,
+/// A14): its MACHINE-ID saying 14, a 40-bit word, 32MW, the start naming
+/// it and its TLB, `--tlb` taking another size; `--tlb` below revision 14,
+/// and a size that is not a power of two from 1,024 to 32,768, refused.
+#[test]
+fn the_switch_runs_revision_14() {
+    let dir = scratch("revision-14");
+    for engine in ["--micro", "--rtl"] {
+        let chk = dir.join(format!("{}.chk", &engine[2..]));
+        let out = quux()
+            .env(SWITCH, "14")
+            .args([engine, "--stop-after", "10", "--checkpoint"])
+            .arg(&chk)
+            .run();
+        let t = text(&out);
+        assert!(out.status.success(), "{engine}: the run failed:\n{t}");
+        let (g, bits, boards) = checkpointed(&chk);
+        assert_eq!(g, Geometry::QUUX_14, "{engine}: the machine built");
+        assert_eq!(g.revision(), Some(14), "{engine}: MACHINE-ID");
+        assert_eq!(bits, 40, "{engine}: the word");
+        assert_eq!(boards << 16, 32 << 20, "{engine}: 32MW of main memory");
+        assert!(t.contains("machine: quux, revision 14: "), "{engine}: {t}");
+        assert!(t.contains("TLB of 4096 entries"), "{engine}: {t}");
+        let out =
+            quux().env(SWITCH, "14").args([engine, "--tlb", "16384", "--stop-after", "1"]).run();
+        let t = text(&out);
+        assert!(out.status.success(), "{engine}: {t}");
+        assert!(t.contains("TLB of 16384 entries"), "{engine}: {t}");
+    }
+    let out =
+        quux().env(SWITCH, "13").args(["--micro", "--tlb", "4096", "--stop-after", "1"]).run();
+    refused(&out, "--tlb is QUUX revision 14's");
+    for n in ["512", "65536", "3000", "many"] {
+        let out = quux().env(SWITCH, "14").args(["--micro", "--tlb", n, "--stop-after", "1"]).run();
+        refused(&out, "--tlb wants its entries, a power of two from 1024 to 32768");
+    }
+}
+
+/// **Revisions 13 and 14 refuse each other's checkpoints** (A14.13,
+/// decisions.md:255), on both engines, by the revision each records; each
+/// resumes its own.
+#[test]
+fn revisions_13_and_14_refuse_each_other_s_checkpoints() {
+    let dir = scratch("revision-14-checkpoint");
+    for engine in ["--micro", "--rtl"] {
+        let chk = |r: &str| dir.join(format!("{r}-{}.chk", &engine[2..]));
+        for r in ["13", "14"] {
+            let out = quux()
+                .env(SWITCH, r)
+                .args([engine, "--stop-after", "100", "--checkpoint"])
+                .arg(chk(r))
+                .run();
+            assert!(out.status.success(), "{engine} {r}: {}", text(&out));
+        }
+        for (ours, theirs) in [("13", "14"), ("14", "13")] {
+            let c = chk(theirs);
+            let out = quux()
+                .env(SWITCH, ours)
+                .args([engine, "--stop-after", "10", "--resume"])
+                .arg(&c)
+                .run();
+            let p = c.display();
+            refused(
+                &out,
+                &format!(
+                    "--resume {p} is revision {theirs}'s, and this is revision {ours}: {SWITCH}={theirs} quux --resume {p}"
+                ),
+            );
+            let out = quux()
+                .env(SWITCH, ours)
+                .args([engine, "--stop-after", "10", "--resume"])
+                .arg(chk(ours))
+                .run();
+            assert!(out.status.success(), "{engine}: {ours} resumes {ours}: {}", text(&out));
+        }
+    }
+}
+
+/// **`cadr` does not read it**: the CADR is the CADR whatever it says.
+#[test]
+fn cadr_does_not_read_it() {
+    for v in ["13", "14"] {
+        let out = cadr().env(SWITCH, v).args(["--micro", "--stop-after", "1"]).run();
+        let t = text(&out);
+        assert!(out.status.success(), "{v}: {t}");
+        assert!(t.contains("memory: 32 boards, 2 MW"), "{v}: {t}");
+        assert!(!t.contains("revision"), "{v}: {t}");
     }
 }

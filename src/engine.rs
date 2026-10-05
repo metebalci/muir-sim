@@ -81,6 +81,13 @@ pub trait Engine {
     /// register is asked for instead and the mask is what makes the
     /// answers comparable.
     fn lc(&self) -> u32 {
+        self.lc_wide() as u32
+    }
+
+    /// The location counter whole, [`crate::machine::Geometry::lc_counter`]'s
+    /// bits: `LC<33:0>` on revision 14 (A14.11), whose `<33:32>`
+    /// [`Engine::lc`] leaves out.
+    fn lc_wide(&self) -> u64 {
         self.machine().lc & self.machine().geometry.lc_counter()
     }
 

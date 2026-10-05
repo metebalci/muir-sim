@@ -296,6 +296,9 @@ struct Phase {
     prefetch: Option<muir::memory_port::PrefetchCounts>,
     /// What the fused return's checkers counted, where they ran.
     checked: Option<support::macro_dispatch::Counts>,
+    /// Revision 14's TLB over the workload: walks, sweeps, and on `rtl` the
+    /// time held for them (contract G3 revision 14, §11.1).
+    tlb: Option<[u64; 3]>,
     /// Fused returns: macroinstructions dispatched without `QMLP+2`.
     fused: u64,
     hist: Vec<u64>,
@@ -439,6 +442,8 @@ fn run<E: Profiled>(
     let span0 = e.span();
     let prefetch0 = e.prefetch_counts();
     let fused0 = e.machine().macro_dispatch.fused;
+    let tlb_counts = |m: &muir::machine::Machine| [m.tlb.walks, m.tlb.sweeps, m.tlb.held_ns];
+    let tlb0 = tlb_counts(e.machine());
     let checked0 = e.checker().map(|c| c.counts.clone());
     let mut fetches = [[0u64; 2]; 2];
     let qmlp = syms.address(Space::IMem, "QMLP");
@@ -568,6 +573,10 @@ fn run<E: Profiled>(
         prefetch: e.prefetch_counts().zip(prefetch0).map(|(a, b)| prefetch_since(a, b)),
         checked: e.checker().zip(checked0.as_ref()).map(|(c, c0)| c.counts.since(c0)),
         fused: e.machine().macro_dispatch.fused - fused0,
+        tlb: e.machine().geometry.paged().then(|| {
+            let now = tlb_counts(e.machine());
+            std::array::from_fn(|k| now[k] - tlb0[k])
+        }),
         hist,
         stall_hist,
         meters: after.iter().zip(&before).map(|(a, b)| a.wrapping_sub(*b)).collect(),
@@ -685,6 +694,9 @@ fn report(
         };
         println!("   checkers: {}, problems {}", c.report(label), c.problems());
         println!("   {}", handler_returns_line(c, generic, label));
+    }
+    if let Some([walks, sweeps, held]) = p.tlb {
+        println!("   tlb: {walks} walks, {sweeps} sweeps, {held} ns held for them");
     }
     if let Some(c) = &p.prefetch {
         println!("   {}", prefetch_line(c));

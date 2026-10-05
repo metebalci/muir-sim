@@ -1065,6 +1065,7 @@ const OWN_FLAGS: &[(&str, Whose)] = &[
     ("--memory-timing", Whose::Quux),
     ("--rtc", Whose::Quux),
     ("--sync-cycle-ticks", Whose::Quux),
+    ("--tlb", Whose::Quux),
     ("--video-size", Whose::Quux),
 ];
 
@@ -1111,7 +1112,7 @@ const USAGE_QUUX: &str = "usage: quux [--micro|--rtl] [--cache <words>] [--chaos
             [--pace] [--prom <file>] [--resume <file>]
             [--rtc <unix-seconds>|host] [--stop-after <microcycles>]
             [--stop-at <pc>] [--stop-at-prom <pc>]
-            [--sync-cycle-ticks <k>] [--terminal [<endpoint>]]
+            [--sync-cycle-ticks <k>] [--terminal [<endpoint>]] [--tlb <entries>]
             [--tv-capture <gif>] [--tv-capture-no-time]
             [--video-size <w>x<h>] [-h|--help] [-V|--version]";
 
@@ -1757,6 +1758,12 @@ const HELP: &[(Whose, &str)] = &[
                                or more, in lines of 8, 2-way, a hit in 20 ns:
                                write-through, by physical address, main
                                memory and the frame buffer. [default: 4096]",
+    ),
+    (
+        Whose::Quux,
+        "  --tlb <entries>              QUUX revision 14: its TLB of <entries>, a power
+                               of two from 1024 to 32768, direct-mapped.
+                               [default: 4096]",
     ),
     (
         Whose::Quux,
@@ -3881,7 +3888,7 @@ fn say_registers<E: Engine>(e: &E) -> String {
             ("Q", m.q),
             ("VMA", m.vma),
             ("MD", m.md),
-            ("LC", m.lc.into()),
+            ("LC", m.lc),
             ("SPCPTR", m.spcptr.into()),
             ("PDLPTR", m.pdl_pointer.into()),
             ("PDLIDX", m.pdl_index.into()),
@@ -4322,6 +4329,56 @@ fn refuse_other_executable((path, c): &(PathBuf, Checkpoint), exe: &str) {
     {
         let (theirs, p) = (executable_of(saved), path.display());
         usage(&format!("--resume {p} is {theirs}'s, not {exe}'s: {theirs} --resume {p}"));
+    }
+}
+
+/// **Which revision `quux` runs** (contract G3 revision 14): `geometry`
+/// as it is, revision 13, unless `MUIR_QUUX_REVISION` says 14. Unset or
+/// `13` is revision 13, the released machine; any other value is refused
+/// at the start, naming the two. `cadr` does not read it. The switch is
+/// not a documented flag: a bitstream, which muir-fpga builds for one
+/// revision, could not carry it.
+fn quux_revision(geometry: crate::machine::Geometry) -> crate::machine::Geometry {
+    use crate::machine::Geometry;
+    if geometry != Geometry::QUUX {
+        return geometry;
+    }
+    match std::env::var_os("MUIR_QUUX_REVISION") {
+        None => geometry,
+        Some(v) if v == "13" => geometry,
+        Some(v) if v == "14" => Geometry::QUUX_14,
+        Some(v) => {
+            eprintln!(
+                "{}: MUIR_QUUX_REVISION={:?}: revision 13 or 14",
+                executable(),
+                v.to_string_lossy()
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// **A checkpoint of the other revision is refused**, naming the revision
+/// that wrote it and how to resume it: a revision-14 checkpoint's
+/// addresses, TLB and location counter are revision 14's, and the reverse
+/// (A14.13). Settled, like [`refuse_other_executable`], before anything
+/// is built.
+fn refuse_other_revision((path, c): &(PathBuf, Checkpoint), geometry: crate::machine::Geometry) {
+    if c.engine == "chip" {
+        return;
+    }
+    let Ok(saved) = crate::machine::Machine::checkpointed_geometry_at(&c.body, c.word_bits) else {
+        return;
+    };
+    // A retired revision, 11 or 12, is refused by what it is when the
+    // checkpoint is read.
+    if let (Some(theirs @ (13 | 14)), Some(ours)) = (saved.revision(), geometry.revision())
+        && theirs != ours
+    {
+        let p = path.display();
+        usage(&format!(
+            "--resume {p} is revision {theirs}'s, and this is revision {ours}: MUIR_QUUX_REVISION={theirs} quux --resume {p}"
+        ));
     }
 }
 
@@ -5294,9 +5351,15 @@ fn time_chip(
 /// refused by name, saying which executable takes it, and so is a
 /// checkpoint the other one wrote. `netlists` are the boards `--chip`
 /// builds, which only `cadr` takes and so only `cadr` passes.
+///
+/// `quux` is revision 13 unless `MUIR_QUUX_REVISION` says 14
+/// ([`quux_revision`]), read here once, so that everything after it ---
+/// the start's lines, a resume's refusal, the machine --- is the
+/// revision's.
 pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     let exe = executable_of(geometry);
     let _ = EXECUTABLE.set(exe);
+    let geometry = quux_revision(geometry);
     let mut which: Option<Which> = None;
     let mut packs: Vec<Pack> = Vec::new();
     // The glass TTYs asked for, in the order the flags came. Bound after
@@ -5339,6 +5402,8 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     let mut timing_given = false;
     let mut sync_cycle_ticks: Option<u8> = None;
     let mut cache: Option<crate::cache::CacheConfig> = None;
+    // Revision 14's TLB, `--tlb` (A14.4).
+    let mut tlb: Option<usize> = None;
     let mut memory_timing: Option<crate::cache::MemoryTiming> = None;
     // QUUX's real-time clock: live unless `--rtc` gives a second to count
     // from.
@@ -5586,6 +5651,15 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                     cache = Some(c);
                 }
                 None => usage("--cache wants its size in words, a power of two"),
+            },
+            (None, "--tlb") => match args.next().as_deref().and_then(|v| v.parse::<usize>().ok()) {
+                Some(n)
+                    if n.is_power_of_two()
+                        && (crate::tlb::MIN_ENTRIES..=crate::tlb::MAX_ENTRIES).contains(&n) =>
+                {
+                    tlb = Some(n)
+                }
+                _ => usage("--tlb wants its entries, a power of two from 1024 to 32768"),
             },
             (None, "--memory-timing") => {
                 let t = args.next();
@@ -5915,6 +5989,10 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             if which == Which::Micro { "micro" } else { "chip" }
         ));
     }
+    // The TLB is revision 14's.
+    if tlb.is_some() && !geometry.paged() {
+        usage("--tlb is QUUX revision 14's: MUIR_QUUX_REVISION=14");
+    }
     // The memory cache is QUUX's, and `rtl` is what times it.
     if cache.is_some() && which != Which::Rtl {
         usage(&format!(
@@ -6162,6 +6240,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     });
     if let Some(r) = &resume {
         refuse_other_executable(r, exe);
+        refuse_other_revision(r, geometry);
     }
     if let Some((path, c)) = &resume {
         if boards_given && boards != c.memory_boards {
@@ -6500,6 +6579,14 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             )
             .unwrap();
         }
+        if geometry.revision() == Some(14) {
+            writeln!(
+                s,
+                "machine: quux, revision 14: revision 13 with 32-bit virtual addresses, the device window at 34000000000 and the physical memory window at 36000000000, a page table walked by hardware behind a direct-mapped TLB of {} entries, a 34-bit location counter, and the register page at 35777777400",
+                tlb.unwrap_or(crate::tlb::DEFAULT_ENTRIES)
+            )
+            .unwrap();
+        }
         if geometry.revision() == Some(13) {
             writeln!(
                 s,
@@ -6799,6 +6886,9 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 color_tv,
                 (geometry, block_disk, rtc, &file_roots),
             );
+            if let Some(n) = tlb {
+                m.set_tlb_entries(n);
+            }
             m.chaos = chaos.clone();
             m.plug_chaos(0);
             let mut e = Micro::new(m);
@@ -6849,6 +6939,9 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 color_tv,
                 (geometry, block_disk, rtc, &file_roots),
             );
+            if let Some(n) = tlb {
+                m.set_tlb_entries(n);
+            }
             // The Chaosnet, as under chip: the interface on the I/O board
             // and, if a link was bound, the network on its cable.
             m.chaos = chaos.clone();

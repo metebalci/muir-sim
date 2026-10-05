@@ -132,7 +132,7 @@ impl Bus {
         if m.geometry.unibus {
             Bus::Cadr(Box::new(Busint::with_timing_model(m.memory_boards(), model)))
         } else {
-            let mut p = MemoryPort::new();
+            let mut p = MemoryPort::for_geometry(&m.geometry);
             p.keep_timing_model(model);
             Bus::Quux(Box::new(p))
         }
@@ -326,8 +326,9 @@ pub struct Rtl {
     lpc: u16,
 
     // --- LC 1A26-2C05 74S169 counters.  The byte-mode flags are FLAG's, on
-    // --- page FLAG, and not bits of this counter.
-    lc: u32,
+    // --- page FLAG, and not bits of this counter. Revision 14's 34 bits
+    // --- (A14.11).
+    lc: u64,
 
     // --- PDLCTL 4C11 74S175 on CLK4F ---
     /// `PWIDX`: the pending PDL write is to the index rather than the
@@ -575,6 +576,11 @@ pub struct Rtl {
     /// prefetch (`crate::memory_port`): registered with `MEMSTART`, and
     /// kept in a checkpoint as it is.
     memstart_fetch: bool,
+    /// Revision 14: the ports, A and B, have looked up the TLB for this
+    /// microcycle, and walked on a miss: a microcycle held for another
+    /// reason as well does not walk again ([`Rtl::tlb_hold`]). Cleared at
+    /// the edge; not in a checkpoint, a resume starting between two.
+    walked: [bool; 2],
 }
 
 /// The combinational network during the read phase.
@@ -662,6 +668,13 @@ struct Read {
     vmas: Word,
     vmaenb: bool,
     vmo: u32,
+    /// Revision 14: the instruction looks up port B, `MAP(MD)` or a
+    /// dispatch on map bits of a pointer-typed `MD` (A14.5), so a miss
+    /// there walks before it runs ([`Rtl::tlb_hold`]).
+    port_b: bool,
+    /// Revision 14: `LC<33:32>` as a write of the location counter takes
+    /// them, the word's or LC's adder's (A14.11).
+    lc_high: u64,
 
     /// `ILONG` is `IR<45>`, suppressed when the cycle is nopped by a jump or
     /// the console but not by the trap: `-ILONG` is `NAND(IR45, -NOPA)` at
@@ -804,6 +817,7 @@ impl Rtl {
             executed: None,
             fetch_started: None,
             memstart_fetch: false,
+            walked: [false; 2],
         };
         // QUUX drops the delay lines: `sync`, four ticks, unless `muir`
         // sets `--sync-cycle-ticks`'.
@@ -833,6 +847,9 @@ impl Rtl {
         // (contract H8a), and the prefetch's word.
         self.m.macro_dispatch.reset();
         self.drop_prefetched(crate::memory_port::Drop::Reset);
+        // Revision 14's TLB swept, starts waiting N ticks for it, and the
+        // memory system's words cleared (A14.4, A14.9).
+        self.m.reset_memory_system(self.ns);
         // CONTRL 3D26
         self.inop = false;
         self.spushd = false;
@@ -1154,7 +1171,8 @@ impl Rtl {
 
     /// The word address a fetch takes from `LC`: `LC<25:2>`, and on
     /// revision 13 `LC<29:2>` (A1.6).
-    fn fetch_mask(&self) -> u32 {
+    /// On revision 14 `LC<33:2>`, any 32-bit address (A14.11).
+    fn fetch_mask(&self) -> u64 {
         self.m.geometry.lc_counter() >> 2
     }
 
@@ -1163,8 +1181,8 @@ impl Rtl {
     /// mod 40. In halfword mode `LC<1>` = 1 adds 0 and `LC<1>` = 0 adds 24;
     /// in byte mode `LC<1:0>` = 1, 2, 3 and 0 add 0, 32, 24 and 16, the
     /// word's bytes 0 to 3 in stream order.
-    fn lc_rotation_13(&self, lc: u32, rotate: u32) -> u32 {
-        let add = match (self.lc_byte_mode, bit(lc as u64, 1), bit(lc as u64, 0)) {
+    fn lc_rotation_13(&self, lc: u64, rotate: u32) -> u32 {
+        let add = match (self.lc_byte_mode, bit(lc, 1), bit(lc, 0)) {
             (false, true, _) => 0,
             (false, false, _) => 24,
             (true, false, true) => 0,
@@ -1317,9 +1335,9 @@ impl Rtl {
         let mfenb = !mpassm && !(spcenb | pdlenb);
 
         // page LCC --- needed by the MF mux
-        let lc0b = bit(self.lc as u64, 0) && self.lc_byte_mode;
+        let lc0b = bit(self.lc, 0) && self.lc_byte_mode;
         let have_wrong_word = self.newlc | destlc;
-        let last_byte_in_word = !bit(self.lc as u64, 1) && !lc0b;
+        let last_byte_in_word = !bit(self.lc, 1) && !lc0b;
         let needfetch = have_wrong_word | last_byte_in_word;
         let lcinc = self.next_instrd || (irdisp && bit(ir, 24));
         let ifetch = needfetch && lcinc;
@@ -1327,7 +1345,25 @@ impl Rtl {
 
         // pages VMAS, VMEM0 and VMEM1; on revision 13 its two levels, with
         // block `177` for an address whose `<31:28>` is not zero (A1.7).
-        let (mut vmap, mut vmo) = if wide {
+        // Revision 14 (A14.4-A14.5): port A, `VMA` at a start, for the
+        // cycle and its fault bits; port B, `MD`, for `MAP(MD)` and a
+        // dispatch on map bits, which looks up only for a pointer type and
+        // reads not oldspace, not extra PDL otherwise. A miss has walked
+        // already ([`Rtl::tlb_hold`]).
+        let paged = self.m.geometry.paged();
+        let map_dispatch = irdisp && (bit(ir, 8) || bit(ir, 9));
+        let port_b = paged
+            && ((srcmap && !nop) || (map_dispatch && self.m.memory_words.pointer_type(self.m.md)));
+        let vmo_b = if !paged {
+            0
+        } else if srcmap || (map_dispatch && self.m.memory_words.pointer_type(self.m.md)) {
+            self.m.entry_14(self.m.md as u32)
+        } else {
+            3 << 22
+        };
+        let (mut vmap, mut vmo) = if paged {
+            (0, if self.memstart { self.m.entry_14(self.m.vma as u32) } else { self.lvmo })
+        } else if wide {
             let mapi = self.mapi();
             let vmap = self.m.map_level_1_13(mapi);
             (vmap, self.m.l2_map[crate::machine::map_level_2_index_13(vmap, mapi)])
@@ -1376,7 +1412,7 @@ impl Rtl {
                 | (self.prog_unibus_reset as Word) << 36
                 | (self.int_enable as Word) << 35
                 | (self.sequence_break as Word) << 34
-                | Word::from(self.lc & crate::machine::LC_COUNTER_13 & !1)
+                | (self.lc & self.m.geometry.lc_counter() & !1)
                 | lc0b as Word
         } else if srclc {
             ((needfetch as u32) << 31
@@ -1384,7 +1420,7 @@ impl Rtl {
                 | (self.prog_unibus_reset as u32) << 28
                 | (self.int_enable as u32) << 27
                 | (self.sequence_break as u32) << 26
-                | (self.lc & 0x03ff_fffe)
+                | (self.lc as u32 & 0x03ff_fffe)
                 | lc0b as u32)
                 .into()
         } else if srcopc {
@@ -1403,6 +1439,10 @@ impl Rtl {
             self.m.md
         } else if srcvma {
             self.m.vma
+        } else if srcmap && paged {
+            // Revision 14's MAP(MD) (A14.5): `<39:32>` 0, the fault bits,
+            // and port B's entry in `<29:0>`.
+            Word::from((!pfw as u32) << 31 | (!pfr as u32) << 30 | vmo_b)
         } else if srcmap && wide {
             // Revision 13's MAP(MD) (A1.7): the level-1 entry in `<38:32>`,
             // the fault bits in `<31:30>`, the level-2 entry in `<27:0>`.
@@ -1475,10 +1515,10 @@ impl Rtl {
 
         // page SMCTL --- shift and mask amounts, with the LC byte-mode tweak
         let lc_modifies_mrot = bit(ir, 10) && bit(ir, 11);
-        let inst_in_left_half = !((bit(self.lc as u64, 1) ^ lc0b) || !lc_modifies_mrot);
+        let inst_in_left_half = !((bit(self.lc, 1) ^ lc0b) || !lc_modifies_mrot);
         let sh4 = !(inst_in_left_half ^ !bit(ir, 4));
         let inst_in_2nd_or_4th_quarter =
-            !(bit(self.lc as u64, 0) || !lc_modifies_mrot) && self.lc_byte_mode;
+            !(bit(self.lc, 0) || !lc_modifies_mrot) && self.lc_byte_mode;
         let sh3 = !(!bit(ir, 3) ^ inst_in_2nd_or_4th_quarter);
 
         let mr = !irbyte || bit(ir, 13);
@@ -1529,6 +1569,14 @@ impl Rtl {
             _ => mtag | Word::from(((alu << 1) as u32 & !1) | (self.m.q as u32 >> 31)),
         };
 
+        // Revision 14's LC adder (A14.11): an arithmetic function, not
+        // QUUX's multiply or divide, through the ALU or the left shift.
+        let lc_high = if paged && op.is_none() && !ctl.alumode && (osel == 1 || osel == 3) {
+            ttl::lc_high(m, a as u32, ctl.aluf, ctl.cin, osel == 3)
+        } else {
+            ob >> 32 & 3
+        };
+
         // Revision 13's fixnum overflow flag (A1.3): an executed ALU-class
         // word loads it, 1 for an arithmetic function (`IR<8:3>` 20-37)
         // whose 33-bit result has bit 32 unlike bit 31.
@@ -1546,6 +1594,8 @@ impl Rtl {
         let conds = match (bit(ir, 5), wide, field(ir, 4, 0)) {
             (false, ..) => 0,
             (true, true, c @ (0o10 | 0o11)) => c,
+            // Revision 14's condition 12 (A14.10).
+            (true, true, 0o12) if paged => 0o12,
             (true, ..) => field(ir, 2, 0),
         };
         let jcond = match conds {
@@ -1558,6 +1608,7 @@ impl Rtl {
             6 => pgf_or_int_or_sb,
             0o10 => self.m.overflow,
             0o11 => (m as u32) < (a as u32),
+            0o12 => (m as u32) <= (a as u32),
             _ => true,
         };
 
@@ -1582,8 +1633,9 @@ impl Rtl {
         let dmask = (1u32 << len) - 1;
         let map = bit(ir, 8) || bit(ir, 9);
         let meta = if wide { 22 } else { 18 };
-        let daddr0 = (bit(ir, 8) && bit(vmo as u64, meta))
-            || (bit(ir, 9) && bit(vmo as u64, meta + 1))
+        let bits = if paged { vmo_b } else { vmo };
+        let daddr0 = (bit(ir, 8) && bit(bits as u64, meta))
+            || (bit(ir, 9) && bit(bits as u64, meta + 1))
             || (!map && (dmask & 1 != 0) && bit(r, 0))
             || bit(ir, 12);
         let dhigh = if wide { field(ir, 23, 13) } else { field(ir, 22, 13) };
@@ -1645,7 +1697,7 @@ impl Rtl {
         // started counts as having dropped it.
         let buffered = match &self.bus {
             Bus::Quux(p) if needfetch && !have_wrong_word && !self.m.dma_written => {
-                p.prefetched().filter(|w| w.vaddr == (self.lc >> 2) & self.fetch_mask())
+                p.prefetched().filter(|w| u64::from(w.vaddr) == (self.lc >> 2) & self.fetch_mask())
             }
             _ => None,
         };
@@ -1677,12 +1729,13 @@ impl Rtl {
             let inc = if self.lc_byte_mode { 1 } else { 2 };
             let counter = self.m.geometry.lc_counter();
             let lcs = self.lc.wrapping_add(inc) & counter;
+            let lcs32 = lcs as u32;
             let index_rotate = crate::machine::macro_dispatch::index_rotate(wide);
             let rotate = index_rotate as u64;
-            let lc0b = bit(lcs as u64, 0) && self.lc_byte_mode;
-            let left = !(bit(lcs as u64, 1) ^ lc0b);
+            let lc0b = bit(lcs, 0) && self.lc_byte_mode;
+            let left = !(bit(lcs, 1) ^ lc0b);
             let sh4 = !(left ^ !bit(rotate, 4));
-            let sh3 = !(!bit(rotate, 3) ^ (!bit(lcs as u64, 0) && self.lc_byte_mode));
+            let sh3 = !(!bit(rotate, 3) ^ (!bit(lcs32 as u64, 0) && self.lc_byte_mode));
             let shift = (sh4 as u32) << 4 | (sh3 as u32) << 3 | (rotate as u32 & 7);
             let m31 = if let Some(w) = buffered {
                 w.word
@@ -1751,7 +1804,7 @@ impl Rtl {
         // page VCTRL1 / VCTRL2
         let memop = memrd | memwr | ifetch;
         let vmaenb = destvma | ifetch;
-        let vmas = if !ifetch { ob } else { Word::from((self.lc >> 2) & self.fetch_mask()) };
+        let vmas = if !ifetch { ob } else { (self.lc >> 2) & self.fetch_mask() };
 
         // page ICTL: the boot PROM overlays the bottom of the control store,
         // and `-PROMENABLE` is off while `IWRITEDA` is up.  In that cycle
@@ -1850,6 +1903,8 @@ impl Rtl {
             vmas,
             vmaenb,
             vmo,
+            port_b,
+            lc_high,
             ilong: bit(ir, 45) && !nopa,
             statbit: bit(ir, 46) && !nopa,
             imod: destimod0 || destimod1 || self.iwrited || idebug,
@@ -1900,7 +1955,13 @@ impl Rtl {
         if r.dispwr {
             self.m.dmem[r.dadr as usize] = r.a as u32 & 0o377777;
         }
-        if self.wmapd && self.m.geometry.wide() {
+        if self.wmapd && self.m.geometry.paged() {
+            // Revision 14's `WRITE-MAP` operation (A14.4), `VMA`'s word at
+            // `MD`'s address; an operation drops the prefetch's word.
+            if self.m.write_map_14(self.m.vma, self.m.md, self.ns) {
+                self.drop_prefetched(crate::memory_port::Drop::MapWrite);
+            }
+        } else if self.wmapd && self.m.geometry.wide() {
             // Revision 13's map write (A1.7), at the address on `MAPI` as
             // on every machine.
             let mapi = self.mapi();
@@ -2287,6 +2348,52 @@ impl Rtl {
         None
     }
 
+    /// **Revision 14's hold for the TLB** (A14.4-A14.6), before the
+    /// microcycle whose read phase looks it up: port A when a start's
+    /// `MEMSTART` is up, port B for `MAP(MD)` or a dispatch on a pointer
+    /// type's map bits. While a sweep runs, they wait for its end. A miss
+    /// walks: [`Machine::tlb_fill`] reads the tables and loads what it
+    /// found, and the processor is held while the memory port reads the
+    /// directory entry and the page entry through the cache, a hit in the
+    /// cache's hit time and a miss a line fill when main memory is free.
+    /// The hold is whole microcycles, the master clock and the bus running
+    /// on. Whether it held, the read phase to be taken again.
+    fn tlb_hold(&mut self, r: &Read) -> bool {
+        if !self.memstart && !r.port_b {
+            return false;
+        }
+        let mut until = self.ns;
+        if self.m.tlb.sweep_until > self.ns {
+            until = self.m.tlb.sweep_until;
+        } else {
+            let ports =
+                [self.memstart.then_some(self.m.vma as u32), r.port_b.then_some(self.m.md as u32)];
+            for (port, va) in ports.into_iter().enumerate() {
+                let Some(va) = va.filter(|_| !self.walked[port]) else { continue };
+                self.walked[port] = true;
+                let Some(walk) = self.m.tlb_fill(va) else { continue };
+                for phys in walk.reads.into_iter().flatten() {
+                    if let Bus::Quux(p) = &mut self.bus {
+                        until = p.walk_read(until, phys);
+                    }
+                }
+            }
+        }
+        if until <= self.ns {
+            return false;
+        }
+        let cycle = self.timing.cycle_ns(self.speed, r.ilong) as u64;
+        let held = (until - self.ns).div_ceil(cycle) * cycle;
+        for _ in 0..held / cycle {
+            self.ns += cycle;
+            self.bus_cycle(self.ns);
+            self.after_memack(self.ns);
+        }
+        self.m.tlb.held_ns += held;
+        self.stalled_ns += held;
+        true
+    }
+
     /// The MD interlock: the instruction reads `MD` while a read is in
     /// progress, and waits for its word --- `-WAIT`'s `USE.MD AND MBUSY AND
     /// -MEMGRANT` before the grant, `-HANG`'s `RD.IN.PROGRESS AND USE.MD`
@@ -2484,7 +2591,10 @@ impl Rtl {
     /// the page `VMO<13:0>` and `VMA<7:0>`, and on revision 13 the page
     /// `<17:0>` and `VMA<9:0>`, 1024-word pages (contract G2 §2.6, A1.7).
     fn physical(&self) -> u32 {
-        if self.m.geometry.wide() {
+        if self.m.geometry.paged() {
+            // Revision 14's 29-bit bus address (A14.1).
+            crate::tlb::bus_address(self.m.vma as u32, self.lvmo)
+        } else if self.m.geometry.wide() {
             (self.lvmo & 0o777777) << 10 | (self.m.vma as u32 & 0o1777)
         } else {
             (self.lvmo & 0x3fff) << 8 | (self.m.vma as u32 & 0xff)
@@ -2523,11 +2633,12 @@ impl Rtl {
                     // main memory, through the cache (contract Q7); the
                     // register page's device registers; nothing else, no
                     // Unibus window among it (contracts Q5, Q13).
-                    busint::decode_quux_13(
-                        self.bus_addr,
-                        self.m.main.len(),
-                        self.m.tv.buffer_words(),
-                    )
+                    let decode = if self.m.geometry.paged() {
+                        busint::decode_quux_14
+                    } else {
+                        busint::decode_quux_13
+                    };
+                    decode(self.bus_addr, self.m.main.len(), self.m.tv.buffer_words())
                 } else {
                     busint::decode_for(
                         self.bus_addr,
@@ -2616,6 +2727,7 @@ impl Rtl {
         // What the edge captures is what stood before it, so the instruction
         // being replaced is still needed after `IR` has moved on.
         let was_ir = self.ir;
+        self.walked = [false; 2];
         // page IREG: the OA registers substitute fields as the word loads
         let iob = r.i | ((r.ob & 0x003f_ffff) << 26) | (r.ob & 0x03ff_ffff);
         let mut ir = r.i;
@@ -2714,12 +2826,15 @@ impl Rtl {
 
         // page LC
         // Revision 13's counter is `LC<29:0>` (A1.6).
+        // Revision 14's is `LC<33:0>`, `<33:32>` from the read phase: the
+        // word's, or LC's adder's (A14.11).
         let counter = self.m.geometry.lc_counter();
         if r.destlc {
-            self.lc = r.ob as u32 & counter;
+            let value = if self.m.geometry.paged() { r.ob & LOW | r.lc_high << 32 } else { r.ob };
+            self.lc = value & counter;
             self.drop_prefetched(crate::memory_port::Drop::LcWrite);
         } else {
-            let inc = (r.lcinc && !self.lc_byte_mode) as u32 + r.lcinc as u32;
+            let inc = (r.lcinc && !self.lc_byte_mode) as u64 + r.lcinc as u64;
             self.lc = (self.lc & counter).wrapping_add(inc) & counter;
         }
         // Revision 13's fixnum overflow flag (A1.3).
@@ -2824,7 +2939,7 @@ impl Rtl {
         // main memory. A store to it drops it when its cycle goes out
         // ([`MemoryPort::request_at`]), and the read phase takes no word
         // while a store's start stands before that.
-        if r.wmap {
+        if r.wmap && !self.m.geometry.paged() {
             self.drop_prefetched(crate::memory_port::Drop::MapWrite);
         } else if self.m.dma_written {
             self.drop_prefetched(crate::memory_port::Drop::Dma);
@@ -3235,6 +3350,11 @@ impl Rtl {
         let mut stalls = 0;
         loop {
             let r = self.read_phase();
+            // Revision 14: a start or a port-B lookup waits for a sweep, and
+            // a miss walks, before the microcycle runs (A14.4, A14.6).
+            if r.machrun && self.m.geometry.paged() && self.tlb_hold(&r) {
+                continue;
+            }
             self.trace = [
                 self.pc as u64,
                 self.ir,
@@ -3251,7 +3371,7 @@ impl Rtl {
                 // [`Engine::lc`] masks them: this engine keeps the
                 // byte-mode flags beside the counter and the netlist's
                 // `LC0..LC25` are the counter alone. Issue 71.
-                (self.lc & crate::machine::LC_COUNTER) as u64,
+                self.lc & u64::from(crate::machine::LC_COUNTER),
             ];
             self.flags = [
                 self.wmapd as u64,
@@ -3503,6 +3623,7 @@ impl Engine for Rtl {
             // Cleared every microcycle, and only the profile reads it.
             fetch_started: _,
             memstart_fetch,
+            walked: _,
         } = self;
         m.save(w);
         w.u64s(trace);
@@ -3515,7 +3636,7 @@ impl Engine for Rtl {
         w.word(*l);
         w.u16(*pc);
         w.u16(*lpc);
-        w.u32(*lc);
+        w.u32(*lc as u32);
         for bit in [
             pwidx,
             pdlwrited,
@@ -3607,6 +3728,10 @@ impl Engine for Rtl {
         w.u64(*loadmd_at);
         w.opt(*executed, crate::checkpoint::Writer::u16);
         w.bool(*memstart_fetch);
+        // Revision 14's counter's `<33:32>` (A14.14).
+        if m.geometry.paged() {
+            w.u8((*lc >> 32) as u8);
+        }
     }
 
     fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()> {
@@ -3622,7 +3747,7 @@ impl Engine for Rtl {
         self.l = r.word()?;
         self.pc = r.u16()?;
         self.lpc = r.u16()?;
-        self.lc = r.u32()?;
+        self.lc = u64::from(r.u32()?);
         for bit in [
             &mut self.pwidx,
             &mut self.pdlwrited,
@@ -3662,7 +3787,7 @@ impl Engine for Rtl {
             1 => {
                 // The prefetch's reach is this engine's setting; its word
                 // is the checkpoint's.
-                let mut p = MemoryPort::new();
+                let mut p = MemoryPort::for_geometry(&self.m.geometry);
                 p.set_prefetch(self.prefetch());
                 p.load(r)?;
                 Bus::Quux(Box::new(p))
@@ -3719,6 +3844,12 @@ impl Engine for Rtl {
         self.loadmd_at = r.u64()?;
         self.executed = r.opt(Reader::u16)?;
         self.memstart_fetch = r.bool()?;
+        // Revision 14: the counter's `<33:32>`, and the TLB, which is not
+        // kept, swept from the resume's instant (A14.14).
+        if self.m.geometry.paged() {
+            self.lc |= u64::from(r.u8()? & 3) << 32;
+            self.m.sweep_tlb(self.ns);
+        }
         self.bus.keep_timing_model(self.timing);
         self.m.disk.set_timing_model(self.timing);
         Ok(())
@@ -3743,7 +3874,7 @@ impl Engine for Rtl {
 
     /// The 74S169 counters at LC 1A26-2C05, which is where this engine
     /// keeps the location counter: `Machine::lc` is never written here.
-    fn lc(&self) -> u32 {
+    fn lc_wide(&self) -> u64 {
         self.lc & self.m.geometry.lc_counter()
     }
 

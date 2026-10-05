@@ -166,6 +166,9 @@ pub struct MemoryPort {
     prefetched: Option<Prefetched>,
     fetch_vaddr: Option<u32>,
     pub prefetch_counts: PrefetchCounts,
+    /// Revision 14's port ([`MemoryPort::for_geometry`]): 32-bit virtual
+    /// addresses.
+    paged: bool,
 }
 
 /// Words a cache line (contract G1 §4.1, G2 §3): a line of packed
@@ -178,6 +181,11 @@ pub const PAGE_WORDS: u32 = 1024;
 
 /// The virtual word address's bits: 28.
 const VADDR_MASK: u32 = 0x0fff_ffff;
+
+/// Revision 14's virtual word address's bits: 32 (G3 revision 14,
+/// A14.11). Its frame buffer is in the device window, its bus addresses'
+/// `<28>` set (A14.1).
+const VADDR_MASK_14: u32 = 0xffff_ffff;
 
 /// The cache QUUX's port fits for `config`: its 8-word line, whatever
 /// line `config` asks for.
@@ -195,6 +203,18 @@ impl MemoryPort {
     /// QUUX's port: the cache at its shape with 8-word lines, main memory
     /// at the nominal timing, and the prefetch with page reach.
     pub fn new() -> MemoryPort {
+        Self::with_paged(false)
+    }
+
+    /// The port a machine of `geometry` has: [`new`]'s, over 32-bit
+    /// virtual addresses on revision 14 ([`crate::machine::Geometry::paged`]).
+    ///
+    /// [`new`]: MemoryPort::new
+    pub fn for_geometry(geometry: &crate::machine::Geometry) -> MemoryPort {
+        Self::with_paged(geometry.paged())
+    }
+
+    fn with_paged(paged: bool) -> MemoryPort {
         MemoryPort {
             state: State::Idle,
             write: false,
@@ -209,7 +229,13 @@ impl MemoryPort {
             prefetched: None,
             fetch_vaddr: None,
             prefetch_counts: PrefetchCounts::default(),
+            paged,
         }
+    }
+
+    /// The virtual word address's bits: 28, and 32 on revision 14.
+    fn vaddr_mask(&self) -> u32 {
+        if self.paged { VADDR_MASK_14 } else { VADDR_MASK }
     }
 
     /// The cache-only prefetch fitted with another reach, or taken out, for
@@ -231,7 +257,7 @@ impl MemoryPort {
     /// The cycle just requested is the stream's macroinstruction fetch of
     /// virtual word `vaddr`.
     pub fn mark_fetch(&mut self, vaddr: u32) {
-        self.fetch_vaddr = Some(vaddr & VADDR_MASK);
+        self.fetch_vaddr = Some(vaddr & self.vaddr_mask());
     }
 
     /// The buffer dropped, if it holds a word, and counted by `why`.
@@ -272,7 +298,7 @@ impl MemoryPort {
             c.next_line += 1;
         }
         self.prefetched = Some(Prefetched {
-            vaddr: (vaddr + 1) & VADDR_MASK,
+            vaddr: (vaddr + 1) & self.vaddr_mask(),
             phys: next,
             word: main[next as usize],
         });
@@ -381,9 +407,29 @@ impl MemoryPort {
     /// in every 512), is taken as one: **unverified**, until muir-fpga
     /// measures a fill at 40 bits (D5).
     fn fill_ns(&self) -> u64 {
+        self.fill_ns_at(self.addr)
+    }
+
+    /// [`MemoryPort::fill_ns`] of the line at `addr`: on revision 14 the
+    /// frame buffer's bus addresses, `<28>` set, lie above the window's
+    /// revision-13 base too.
+    fn fill_ns_at(&self, addr: u32) -> u64 {
         const TICK: u64 = 10;
-        let beats = if self.addr >= crate::machine::WINDOW_13 { 2 } else { 3 };
+        let beats = if addr >= crate::machine::WINDOW_13 { 2 } else { 3 };
         self.timing.read_ns + beats * TICK
+    }
+
+    /// **One read of revision 14's walk** (A14.6) at main memory's word
+    /// `phys`, from `now`: through the cache, a hit answered after its hit
+    /// time and a miss filling its line when main memory is free, as a
+    /// processor's read is. When it is done.
+    pub fn walk_read(&mut self, now: u64, phys: u32) -> u64 {
+        if self.cache.read(phys) {
+            return now + self.cache.config.hit_ns;
+        }
+        let done = now.max(self.memory_free_at) + self.fill_ns_at(phys);
+        self.memory_free_at = done;
+        done
     }
 
     /// Advances to `now` and reports the acknowledgement if it has come.
@@ -451,6 +497,8 @@ impl MemoryPort {
             prefetched,
             fetch_vaddr,
             prefetch_counts: _,
+            // The revision is the machine's.
+            paged: _,
         } = self;
         match *state {
             State::Idle => w.u8(0),
@@ -507,10 +555,10 @@ impl MemoryPort {
         self.buffer_free_at = r.u64()?;
         // The word the prefetch held, and a fetch it is to look past; kept
         // only where the engine has the prefetch fitted.
-        let prefetched = r.opt(|r| {
-            Ok(Prefetched { vaddr: r.u32()? & VADDR_MASK, phys: r.u32()?, word: r.word()? })
-        })?;
-        let fetch_vaddr = r.opt(|r| Ok(r.u32()? & VADDR_MASK))?;
+        let mask = self.vaddr_mask();
+        let prefetched =
+            r.opt(|r| Ok(Prefetched { vaddr: r.u32()? & mask, phys: r.u32()?, word: r.word()? }))?;
+        let fetch_vaddr = r.opt(|r| Ok(r.u32()? & mask))?;
         if self.prefetch.is_some() {
             self.prefetched = prefetched;
             self.fetch_vaddr = fetch_vaddr;

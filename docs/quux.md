@@ -7,7 +7,9 @@ is the CADR as MIT built it; muir-fpga and muir-sys choose it with
 
 This page says where QUUX, revision 13, differs from the CADR. Everything
 it does not mention is the CADR's. Its word is 40 bits, the tag `<39:32>`
-over the field `<31:0>` (contract G2).
+over the field `<31:0>` (contract G2). Revision 13 is what `quux` runs by
+default; [revision 14](#revision-14-a-page-table-behind-a-tlb), at the
+end, is what it runs when `MUIR_QUUX_REVISION` is `14`.
 
 QUUX's software is numbered in the 2000s and the CADR's in the 1000s: QUUX
 runs muir-sys's System 2001 on microcode 2001 and boots on PROM 2001.
@@ -1579,6 +1581,125 @@ word. A checkpoint's body is 168,204,521 bytes, main memory 5 bytes a
 word; the file packs runs of zeros, and is 248 bytes of an empty memory
 and 167,772,410 of one full of other words. Writing that full checkpoint
 on `micro` peaked at 757 MB of host memory.
+
+## Revision 14: a page table behind a TLB
+
+muir has QUUX revision 14 beside revision 13 (contract G3 revision 14 and
+its appendix A14): `Geometry::QUUX_14` in the library, which `quux` runs
+when `MUIR_QUUX_REVISION` is `14`; unset or `13`, it runs revision 13, and
+any other value is refused at the start. It is
+revision 13's 40-bit machine with a 32-bit virtual address space, two
+untranslated windows, a page table in memory walked by hardware behind a
+TLB in place of the two map levels, a 34-bit location counter, and jump
+condition 12. What follows is what muir's revision 14 does and which tests
+hold it (`tests/revision_14.rs`, every program on `micro` and `rtl`);
+everything it does not mention is revision 13's. No boot PROM or microcode
+for it exists yet: `quux` loads PROM 2001 on it, which expects revision
+13's map, so a run boots no system.
+
+**The address space**, by `VA<31:28>`, the decode `VA<31:29>` = `111` for
+the windows and `VA<28>` between them; `VA<39:32>` is never looked at:
+
+| `VA<31:28>` | Virtual | What |
+|---|---|---|
+| `0000`-`1101` | `0`-`33777777777` | paged, through the TLB |
+| `1110` | `34000000000`-`35777777777` | the device window |
+| `1111` | `36000000000`-`37777777777` | the physical memory window: main memory at physical `VA<27:0>`, past its end nothing there |
+
+In the device window, frame buffer 0 from its base holds the field, a write
+dropping the tag and a read giving `005`; A memory's window,
+`35700000000`-`35700001777`, faults on every reference; the register page
+is at `35777777400`, with revision 13's offsets; the rest is reserved and
+nothing there, reading 0 and setting word 101 `<0>`
+(`the_device_window_and_its_register_page`,
+`nothing_there_past_main_memory_and_in_the_reserved_slices`,
+`a_memory_s_window_faults_with_status_7`). A window address never consults
+the TLB and never walks (`the_windows_never_touch_the_tlb`), and the
+physical memory window aliases a translated frame coherently, setting no
+bit in its entry (`the_physical_memory_window_aliases_a_translated_frame`).
+A reference goes out on a 29-bit bus address, which is the cache's key:
+`<28>` clear and the physical word for main memory, `<28>` set and
+`VA<27:0>` for the device window.
+
+**The page table.** Register-page word 220 holds the directory's first
+frame, a multiple of 4; 0 is no directory. A miss on a paged address walks:
+the directory entry at `{base<17:2>, VA<31:20>}`, present when its status
+`<26:24>` is 4 and its frame `<17:0>` is in main memory, then the page entry
+at `{frame, VA<19:10>}`. What it finds is loaded into the TLB unless it is
+no entry: no directory, a missing directory entry, a page entry of status 0,
+one of status 7 (A memory's window's, never in a table), or one in core
+whose frame is past main memory's end. A not-in-core entry, status 1, is
+loaded; the reference faults, and `MAP(MD)` then reads it with no further
+walk. A no-entry reference faults, and the next one walks again. A walk
+never faults and reads memory by physical address, a word past main memory
+reading 0 (`no_entry_faults_and_loads_nothing`,
+`a_walk_with_no_directory_reads_nothing`,
+`a_not_in_core_entry_faults_and_map_md_reads_it_without_a_walk`). Faults
+are the entry's access code, `<27>` read and `<26>` write, as revision 13's.
+Accessed and modified are not written back yet, and status 5 faults as its
+access code says.
+
+**The TLB** is direct-mapped, `--tlb <entries>` of them, a power of two from
+1,024 to 32,768, 4,096 by default, on both engines (`quux` refuses `--tlb`
+below revision 14). The index is `VA<9+k:10>` and the tag `VA<31:10+k>`, k
+being log2 of the entries, and its contents are modelled: two pages that
+share an index evict each other, and an entry changed in memory keeps
+translating to the old frame until it is invalidated
+(`two_pages_sharing_an_index_translate_to_their_own_frames`,
+`pages_either_side_of_2_31_translate_to_their_own_frames`,
+`a_stale_entry_is_kept_until_it_is_invalidated`). A store to `WRITE-MAP`
+is an operation, landing in the microcycle after it as revision 13's map
+write does: `VMA<33:32>` 1 a direct write of `VMA<29:0>` at `MD`'s index
+and tag, 2 an invalidation at `MD`'s index whatever its tag, 3 an empty;
+0, revision 13's map-write word, and any operation at a window address do
+nothing (`a_direct_write_loads_and_an_empty_clears`). An empty, and
+`-RESET`, sweep the TLB: at once on `micro`, and on `rtl` in one tick of 10
+ns an entry, a memory start or a `MAP(MD)` or map-bit dispatch lookup
+waiting for the sweep's end (`an_empty_takes_n_ticks_on_rtl`). On `rtl` a
+walk holds the processor, in whole microcycles, while its reads go through
+the cache, a hit in the cache's hit time and a miss a line fill.
+
+**`MAP(MD)`** reads `<39:32>` 0, the fault bits `<31:30>` of the last memory
+cycle's entry as before, and `<29:0>` the entry for `MD`'s address, looked
+up whatever `MD`'s type and walked for on a miss; a window's address reads
+its fixed entry, `11` and `1460` with the frame `VA<27:10>` for the
+physical memory window and 0 for the device window, `11` and `0760` for A
+memory's window, and no entry `00` and `0060` (`map_md_reads_the_entry_and_the_fixed_entries`).
+**A dispatch on map bits** looks up `MD`'s page only when `MD<37:32>`'s
+bit is set in the pointer-type register, words 222 and 223; otherwise its
+map bits read 1 and 1, with no lookup (`a_transport_on_a_fixnum_walks_nothing`).
+
+**The location counter** is `LC<33:0>`, read with NEED-FETCH in `<39>` and
+the four flags in `<37:34>`. Destination 1 writes `<31:0>` from the bus and
+`<33:32>` from the word, except for an arithmetic ALU function through the
+ALU or the left shift, which take them from LC's adder: M's `<33:32>`, plus
+A's sign twice, plus the carry into bit 32, and under the left shift that
+sum shifted. The stepper counts over all 34 bits, and a fetch takes
+`LC<33:2>` (`lc_s_adder_carries_branches_across_2_30_and_2_31_words`,
+`lc_rebuilt_from_a_relative_pc_and_an_fef_address`,
+`qlenx_s_shifted_write_takes_the_sum_s_carry`,
+`the_stepper_carries_and_a_fetch_reads_lc_33_2`).
+
+**Jump condition 12** is M ≤ A on the fields, unsigned
+(`condition_12_is_m_at_most_a_unsigned`).
+
+**The register page** gains the memory system's words, 220-227: 220 the
+directory base, 221 `<0>` the ephemeral-reference enable, 222 and 223 the
+pointer-type register, types 0-31 and 32-63, all read and written; 224 a
+count of refused write-backs, which a write clears; 225-227 reserved.
+`-RESET` clears them, `RESET-DEVICES` does not
+(`the_memory_system_words_read_back_and_set_the_directory`). The feature
+page says revision 14 in word 0, 0 in word 1 (no level-1 map), the TLB's
+entries in word 2, and the buffer's device-window address, `34000000000`,
+in word 13.
+
+**The checkpoint** of revision 14 is version 50, as revision 13's, and says
+its revision by its geometry: no level-1 map. After revision 13's fields it
+keeps the location counter's `<33:32>` and the memory system's words; the
+TLB is not kept, and a resume starts with it swept, timed on `rtl` as a
+reset's sweep (`a_checkpoint_keeps_the_34_bit_counter_and_the_words`).
+`quux` refuses a checkpoint of revision 13 on revision 14 and the reverse,
+naming the revision that wrote it (`tests/quux_revision.rs`).
 
 ## Not modeled
 
