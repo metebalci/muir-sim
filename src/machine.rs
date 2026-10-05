@@ -1659,9 +1659,9 @@ impl Machine {
 
     /// **The walk on a miss** (A14.6): when `vaddr` is paged and the TLB
     /// does not hold it, the walk is made, counted, and what it found
-    /// loaded, unless it found no entry. Returns the walk, for `rtl` to
-    /// time its reads; `None` when nothing walked.
-    pub fn tlb_fill(&mut self, vaddr: u32) -> Option<crate::tlb::Walk> {
+    /// loaded through `port`, unless it found no entry. Returns the walk,
+    /// for `rtl` to time its reads; `None` when nothing walked.
+    pub fn tlb_fill(&mut self, vaddr: u32, port: crate::tlb::Port) -> Option<crate::tlb::Walk> {
         if crate::tlb::region(vaddr) != crate::tlb::Region::Paged
             || self.tlb.lookup(vaddr).is_some()
         {
@@ -1670,7 +1670,7 @@ impl Machine {
         let walk = crate::tlb::walk(&self.main, self.memory_words.directory, vaddr);
         self.tlb.walks += 1;
         if let Some(e) = walk.entry {
-            self.tlb.load(vaddr, e);
+            self.tlb.fill(vaddr, e, port);
         }
         Some(walk)
     }
@@ -3036,7 +3036,7 @@ impl Machine {
             self.pdl_copies =
                 crate::tlb::PdlCopies { base: r.u32()?, head: r.u16()? & crate::tlb::PDL_INDEX };
             // The TLB is not kept: the resume starts with it swept.
-            self.tlb = crate::tlb::Tlb::new(self.tlb.len());
+            self.tlb = self.tlb.swept_copy();
         }
         Ok(())
     }

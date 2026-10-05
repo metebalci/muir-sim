@@ -2387,15 +2387,23 @@ impl Rtl {
         } else {
             let ports =
                 [self.memstart.then_some(self.m.vma as u32), r.port_b.then_some(self.m.md as u32)];
+            let mut missed = [None; 2];
             for (port, va) in ports.into_iter().enumerate() {
                 let Some(va) = va.filter(|_| !self.walked[port]) else { continue };
                 self.walked[port] = true;
-                let Some(walk) = self.m.tlb_fill(va) else { continue };
+                let which = [crate::tlb::Port::A, crate::tlb::Port::B][port];
+                let Some(walk) = self.m.tlb_fill(va, which) else { continue };
+                missed[port] = Some(self.m.tlb.index(va));
                 for phys in walk.reads.into_iter().flatten() {
                     if let Bus::Quux(p) = &mut self.bus {
                         until = p.walk_read(until, phys);
                     }
                 }
+            }
+            if let [Some(a), Some(b)] = missed
+                && a == b
+            {
+                self.m.tlb.double_misses += 1;
             }
         }
         let cycle = self.timing.cycle_ns(self.speed, r.ilong) as u64;

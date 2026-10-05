@@ -289,6 +289,9 @@ fn category(label: &str, file: &str) -> String {
     }
 }
 
+/// The TLB's counts a phase keeps ([`Phase::tlb`]).
+const TLB_COUNTS: usize = 27;
+
 struct Phase {
     /// The microcycles and the time, the memory's and in all.
     span: Span,
@@ -300,8 +303,11 @@ struct Phase {
     /// held for them, write-backs, those carrying accessed, modified and
     /// ephemeral-reference, the guard's refusals, and the PDL buffer
     /// redirect's references inside and outside the buffer (contract G3
-    /// revision 14, §11.1).
-    tlb: Option<[u64; 10]>,
+    /// revision 14, §11.1); then the model's counts of directly written
+    /// entries a fill replaced, by port A then B, each by the replaced
+    /// entry's status 0-7, and of microcycles in which both ports missed at
+    /// one index.
+    tlb: Option<[u64; TLB_COUNTS]>,
     /// Fused returns: macroinstructions dispatched without `QMLP+2`.
     fused: u64,
     hist: Vec<u64>,
@@ -449,7 +455,22 @@ fn run<E: Profiled>(
         let t = &m.tlb;
         let [a, b, c] = t.written_bits;
         let [r_in, r_out] = t.redirects;
-        [t.walks, t.sweeps, t.held_ns, t.write_backs, a, b, c, t.refusals, r_in, r_out]
+        let mut v = [0; TLB_COUNTS];
+        v[..10].copy_from_slice(&[
+            t.walks,
+            t.sweeps,
+            t.held_ns,
+            t.write_backs,
+            a,
+            b,
+            c,
+            t.refusals,
+            r_in,
+            r_out,
+        ]);
+        v[10..26].copy_from_slice(t.evicted.as_flattened());
+        v[26] = t.double_misses;
+        v
     };
     let tlb0 = tlb_counts(e.machine());
     let checked0 = e.checker().map(|c| c.counts.clone());
@@ -703,9 +724,24 @@ fn report(
         println!("   checkers: {}, problems {}", c.report(label), c.problems());
         println!("   {}", handler_returns_line(c, generic, label));
     }
-    if let Some([walks, sweeps, held, wbs, a, m, e, refused, r_in, r_out]) = p.tlb {
+    if let Some(t) = p.tlb {
+        let [walks, sweeps, held, wbs, a, m, e, refused, r_in, r_out] = t[..10].try_into().unwrap();
+        let evicted = |port: usize| {
+            let by = &t[10 + 8 * port..18 + 8 * port];
+            let statuses: Vec<String> =
+                (0..8).filter(|&s| by[s] != 0).map(|s| format!("status {s} {}", by[s])).collect();
+            let sum: u64 = by.iter().sum();
+            if statuses.is_empty() {
+                sum.to_string()
+            } else {
+                format!("{sum} ({})", statuses.join(", "))
+            }
+        };
         println!(
-            "   tlb: {walks} walks, {sweeps} sweeps, {held} ns held for them and the redirect; {wbs} write-backs, accessed {a}, modified {m}, ephemeral-reference {e}, {refused} refused; redirected {r_in} inside the PDL buffer, {r_out} outside"
+            "   tlb: {walks} walks, {sweeps} sweeps, {held} ns held for them and the redirect; {wbs} write-backs, accessed {a}, modified {m}, ephemeral-reference {e}, {refused} refused; redirected {r_in} inside the PDL buffer, {r_out} outside; direct writes evicted by a fill, port A {}, port B {}; {} microcycles with both ports missing at one index",
+            evicted(0),
+            evicted(1),
+            t[26]
         );
     }
     if let Some(c) = &p.prefetch {

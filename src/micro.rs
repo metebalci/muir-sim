@@ -170,6 +170,12 @@ pub struct Micro {
     /// Revision 14: the redirect the start in progress takes (A14.7). Set
     /// and used within one start.
     redirect: Option<crate::tlb::Redirect>,
+    /// Revision 14: the TLB index port A missed at in this microcycle's
+    /// start, for the count of port A and port B missing at one index in
+    /// the next microcycle, the one `rtl` walks both in
+    /// ([`crate::tlb::Tlb::double_misses`]). Set and used within one step,
+    /// across its microcycle's edge.
+    port_a_missed: Option<usize>,
     /// The PDL buffer write an instruction hands to the next microcycle's
     /// write phase, `PDLWRITED`: the address and the word, the address
     /// [`PDL_AT_INDEX`] for a write by PDL-INDEX.
@@ -266,6 +272,7 @@ impl Micro {
             write_va: None,
             write_pdl: None,
             redirect: None,
+            port_a_missed: None,
             pdl_write: None,
             spc_write: None,
             opc: [0; 8],
@@ -1013,8 +1020,14 @@ impl Micro {
     /// which lands last.
     fn head_of_microcycle_14(&mut self) {
         self.land_md();
+        let a_missed = self.port_a_missed.take();
         if self.reads_port_b() {
-            self.m.tlb_fill(self.m.md as u32);
+            let va = self.m.md as u32;
+            if self.m.tlb_fill(va, crate::tlb::Port::B).is_some()
+                && a_missed == Some(self.m.tlb.index(va))
+            {
+                self.m.tlb.double_misses += 1;
+            }
         }
         self.map_seen = self.map_write_d.is_some().then(|| self.m.translate(self.m.md as u32));
         self.land_map_write();
@@ -1215,7 +1228,9 @@ impl Micro {
         // Revision 14's port A: a miss walks and fills before the start
         // translates (A14.6).
         if self.m.geometry.paged() {
-            self.m.tlb_fill(self.m.vma as u32);
+            let va = self.m.vma as u32;
+            self.port_a_missed =
+                self.m.tlb_fill(va, crate::tlb::Port::A).is_some().then(|| self.m.tlb.index(va));
         }
         self.lvmo = self.m.translate(self.m.vma as u32).l2_data;
         // Revision 14's PDL buffer redirect (A14.7): the reference then
@@ -2065,6 +2080,8 @@ impl Engine for Micro {
             write_pdl,
             // Set and used within one start.
             redirect: _,
+            // Set and used within one step.
+            port_a_missed: _,
             pdl_write,
             spc_write,
             opc,

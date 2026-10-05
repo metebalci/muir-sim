@@ -307,6 +307,26 @@ pub struct Tlb {
     /// On `rtl`, the instant the sweep in progress ends: a memory start or
     /// a port-B lookup waits for it (A14.4). `micro` sweeps at once.
     pub sweep_until: u64,
+    /// Directly written entries a fill replaced before their invalidation,
+    /// by the port that walked ([`Port`]) and by the replaced entry's
+    /// status. The model's count, not the hardware's: nothing in an entry
+    /// says how it was loaded. Not in a checkpoint: the profile's.
+    pub evicted: [[u64; 8]; 2],
+    /// Microcycles in which port A and port B both missed at one index, so
+    /// that both walked and the second fill replaced the first's entry. Not
+    /// in a checkpoint: the profile's.
+    pub double_misses: u64,
+    /// Which entries a direct write loaded, the model's mark for
+    /// [`Tlb::evicted`].
+    direct: Vec<bool>,
+}
+
+/// The TLB's two read ports (A14.4): A addressed by `VMA` at a start, B
+/// by `MD` for `MAP(MD)` and the dispatches on map bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Port {
+    A = 0,
+    B = 1,
 }
 
 const VALID: u64 = 1 << 63;
@@ -325,6 +345,23 @@ impl Tlb {
             entries.is_power_of_two() && (MIN_ENTRIES..=MAX_ENTRIES).contains(&entries),
             "a TLB of {entries} entries: a power of two from {MIN_ENTRIES} to {MAX_ENTRIES}"
         );
+        Tlb::any(entries)
+    }
+
+    /// **A test aid, not a configuration:** an empty TLB of `entries`, any
+    /// power of two up to [`MAX_ENTRIES`], down to 1. A TLB smaller than
+    /// [`MIN_ENTRIES`] is no revision 14's, and `--tlb` does not take one;
+    /// at 1 entry every fill evicts what the TLB held, so a program that
+    /// relies on an entry surviving another page's lookup fails at once.
+    pub fn small_for_tests(entries: usize) -> Tlb {
+        assert!(
+            entries.is_power_of_two() && entries <= MAX_ENTRIES,
+            "a TLB of {entries} entries: a power of two up to {MAX_ENTRIES}"
+        );
+        Tlb::any(entries)
+    }
+
+    fn any(entries: usize) -> Tlb {
         Tlb {
             entries: vec![0; entries],
             k: entries.trailing_zeros(),
@@ -336,7 +373,15 @@ impl Tlb {
             redirects: [0; 2],
             held_ns: 0,
             sweep_until: 0,
+            evicted: [[0; 8]; 2],
+            double_misses: 0,
+            direct: vec![false; entries],
         }
+    }
+
+    /// An empty TLB of this one's size, whether or not [`Tlb::new`] takes it.
+    pub fn swept_copy(&self) -> Tlb {
+        Tlb::any(self.entries.len())
     }
 
     /// Its entries, N.
@@ -344,7 +389,7 @@ impl Tlb {
         self.entries.len()
     }
 
-    /// Never: N is at least [`MIN_ENTRIES`].
+    /// Never: N is at least 1.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -372,10 +417,24 @@ impl Tlb {
         (e & VALID != 0, (e >> 32) & 0x7fff_ffff, e as u32 & ENTRY_BITS)
     }
 
-    /// Loads `entry`'s `<29:0>` for `va`: a walk's fill, or a direct write.
+    /// Loads `entry`'s `<29:0>` for `va` by a direct write (A14.4).
     pub fn load(&mut self, va: u32, entry: u32) {
         let i = self.index(va);
         self.entries[i] = VALID | self.tag(va) << 32 | u64::from(entry & ENTRY_BITS);
+        self.direct[i] = true;
+    }
+
+    /// Loads `entry`'s `<29:0>` for `va` by a walk's fill through `port`
+    /// (A14.6), whatever the index held; a directly written entry it
+    /// replaces is counted in [`Tlb::evicted`].
+    pub fn fill(&mut self, va: u32, entry: u32, port: Port) {
+        let i = self.index(va);
+        let (valid, _, old) = self.at(i);
+        if valid && self.direct[i] {
+            self.evicted[port as usize][status(u64::from(old)) as usize] += 1;
+        }
+        self.entries[i] = VALID | self.tag(va) << 32 | u64::from(entry & ENTRY_BITS);
+        self.direct[i] = false;
     }
 
     /// ORs `bits` into the entry for `va`, if the TLB holds it.
@@ -390,12 +449,14 @@ impl Tlb {
     pub fn invalidate(&mut self, va: u32) {
         let i = self.index(va);
         self.entries[i] = 0;
+        self.direct[i] = false;
     }
 
     /// Clears every entry's valid bit: the sweep, all at once. On `rtl` the
     /// caller times it, [`Tlb::sweep_until`].
     pub fn sweep(&mut self) {
         self.entries.iter_mut().for_each(|e| *e = 0);
+        self.direct.iter_mut().for_each(|d| *d = false);
         self.sweeps += 1;
     }
 

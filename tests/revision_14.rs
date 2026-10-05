@@ -1663,7 +1663,194 @@ fn a_redirect_inside_holds_one_microcycle_on_rtl() {
     assert_eq!(cycles2, cycles1, "no memory cycle inside the buffer");
 }
 
-// --- the .mcr's section 6 (A14.13) ----------------------------------------------
+// --- a port-B fill against a direct write (A14.4-A14.6) ----------------------
+
+/// The lookup an eviction test makes between the direct write and the write
+/// start: `MAP(MD)` of a list pointer, a map-bit dispatch on one, or a
+/// map-bit dispatch on a fixnum, which looks nothing up (A14.5).
+#[derive(Clone, Copy, Debug)]
+enum Lookup {
+    MapMd,
+    Dispatch,
+    Fixnum,
+}
+
+/// The fiddle's page, a stack page whose table entry has status 5 or 6
+/// and access `01`, at frame 200; the buffer's copies name it.
+const FIDDLED: u32 = 0o2005 << 10;
+/// A page sharing its index in a TLB of 4,096 entries or fewer, mapped at
+/// frame 300.
+const SAME_INDEX: u32 = FIDDLED + (4096 << 10);
+/// The word the test writes, one past the page's first word: inside the
+/// copies' range, at the buffer's index 101.
+const FIDDLE_WORD: Word = w(0o025, 0x5a5a);
+
+/// **The fiddle and a lookup** run on both engines: the table gives
+/// [`FIDDLED`] status `status` with access `01`; a direct write gives it
+/// access `11`; `lookup` then names [`SAME_INDEX`]; then [`FIDDLE_WORD`] is
+/// written to the page's word 1, M 20 the write's fault. `tlb`, if any, is
+/// the TLB the machine is built with.
+fn fiddle(status: u64, lookup: Lookup, tlb: Option<usize>) -> [(&'static str, Machine); 2] {
+    let mut p = Prog::default();
+    p.m(0o33, 2);
+    p.copies(FIDDLED, 0o100);
+    p.tlb_op(1, FIDDLED as Word, entry(status, 3, 0o200) & tlb::ENTRY_BITS as Word);
+    match lookup {
+        Lookup::MapMd => {
+            p.map(LIST | SAME_INDEX as Word, 0o10);
+        }
+        Lookup::Dispatch => transport(&mut p, LIST | SAME_INDEX as Word, 0o10),
+        Lookup::Fixnum => transport(&mut p, FIX | SAME_INDEX as Word, 0o10),
+    }
+    p.write(FIDDLE_WORD, (FIDDLED + 1) as Word, 0o20);
+    p.stop();
+    let setup = move |m: &mut Machine| {
+        if let Some(n) = tlb {
+            m.tlb = tlb::Tlb::small_for_tests(n);
+        }
+        plant_pdl(m);
+        map_page(m, FIDDLED, entry(status, 1, 0o200));
+        map_page(m, SAME_INDEX, rw(0o300));
+    };
+    let after_boot = |m: &mut Machine| {
+        m.pdl_pointer = 0o107;
+        m.memory_words.pointer_types = 1 << 0o16;
+    };
+    run_with(&p, &setup, &after_boot)
+}
+
+/// The fiddled write's word in memory, and the buffer's word 101.
+fn fiddled(m: &Machine) -> (Word, Word) {
+    (m.main[0o200 << 10 | 1], m.pdl[0o101])
+}
+
+/// **E1: a port-B fill evicts the fiddle at status 5** (A14.4, A14.6,
+/// A14.7): after a direct write gives a status-5 page access `11`,
+/// `MAP(MD)` of a list pointer to a page with the same index, and
+/// separately a map-bit dispatch on it, misses, walks and loads that
+/// page's entry in its place; the write to the status-5 page then walks
+/// again, takes the table's access `01`, and is redirected into the PDL
+/// buffer, memory unchanged. The model counts the eviction as port B's of
+/// a status-5 entry. The control, a dispatch on a fixnum naming the same
+/// page, looks nothing up: the direct write stays and the write reaches
+/// memory. **Fails** a TLB whose port-B fill does not replace the entry
+/// it finds at the index.
+#[test]
+fn e1_a_port_b_fill_evicts_a_status_5_fiddle_and_the_write_is_redirected() {
+    for lookup in [Lookup::MapMd, Lookup::Dispatch] {
+        for (engine, m) in &fiddle(5, lookup, None) {
+            let what = format!("{engine}, {lookup:?}");
+            assert_eq!(m.mmem[0o20], 0, "{what}: no fault");
+            assert_eq!(
+                fiddled(m),
+                (0, FIDDLE_WORD),
+                "{what}: evicted, so the write is redirected into the buffer, memory unchanged"
+            );
+            assert_eq!(m.tlb.redirects, [1, 0], "{what}: one redirect, inside");
+            let mut want = [[0; 8]; 2];
+            want[1][5] = 1;
+            assert_eq!(m.tlb.evicted, want, "{what}: one eviction, port B, status 5");
+        }
+    }
+    for (engine, m) in &fiddle(5, Lookup::Fixnum, None) {
+        assert_eq!(m.mmem[0o20], 0, "{engine}, control: no fault");
+        assert_eq!(
+            fiddled(m),
+            (FIDDLE_WORD, pdl_word(0o101)),
+            "{engine}, control: the direct write stays and the write reaches memory"
+        );
+        assert_eq!(m.tlb.redirects, [0, 0], "{engine}, control: no redirect");
+        assert_eq!(m.tlb.evicted, [[0; 8]; 2], "{engine}, control: no eviction");
+    }
+}
+
+/// **E2: the same at status 6** (A14.7, the MAR's status): after the
+/// eviction the write walks, takes the table's access `01` and faults, as
+/// the redirect serves status 5 alone; memory and the buffer are
+/// unchanged. The control's write reaches memory. **Fails** a TLB whose
+/// port-B fill does not replace the entry it finds at the index.
+#[test]
+fn e2_a_port_b_fill_evicts_a_status_6_fiddle_and_the_write_faults() {
+    for lookup in [Lookup::MapMd, Lookup::Dispatch] {
+        for (engine, m) in &fiddle(6, lookup, None) {
+            let what = format!("{engine}, {lookup:?}");
+            assert_eq!(m.mmem[0o20], 1, "{what}: evicted, so the write faults");
+            assert_eq!(fiddled(m), (0, pdl_word(0o101)), "{what}: nothing written");
+            assert_eq!(m.tlb.redirects, [0, 0], "{what}: no redirect at status 6");
+            let mut want = [[0; 8]; 2];
+            want[1][6] = 1;
+            assert_eq!(m.tlb.evicted, want, "{what}: one eviction, port B, status 6");
+        }
+    }
+    for (engine, m) in &fiddle(6, Lookup::Fixnum, None) {
+        assert_eq!(m.mmem[0o20], 0, "{engine}, control: no fault");
+        assert_eq!(fiddled(m), (FIDDLE_WORD, pdl_word(0o101)), "{engine}, control: to memory");
+    }
+}
+
+/// **A 1-entry TLB, the test aid** ([`tlb::Tlb::small_for_tests`]): every
+/// page shares the one index, so every fill evicts. E1's control still
+/// runs as at 4,096 entries, its direct write kept because nothing looks
+/// up between it and the write, and E1's `MAP(MD)` still evicts it.
+/// **Fails** a TLB that takes fewer than 1,024 entries wrongly (its index
+/// or tag at k = 0), and a test aid that is not one entry.
+#[test]
+fn a_1_entry_tlb_runs_e1_s_control_and_evicts_on_every_fill() {
+    for (engine, m) in &fiddle(5, Lookup::Fixnum, Some(1)) {
+        assert_eq!(m.tlb.len(), 1, "{engine}: one entry");
+        assert_eq!(m.mmem[0o20], 0, "{engine}, control: no fault");
+        assert_eq!(fiddled(m), (FIDDLE_WORD, pdl_word(0o101)), "{engine}, control: to memory");
+        assert_eq!(m.tlb.redirects, [0, 0], "{engine}, control: no redirect");
+        assert_eq!(
+            m.tlb.lookup(FIDDLED),
+            Some((entry(5, 3, 0o200) | A | M) as u32 & tlb::ENTRY_BITS),
+            "{engine}, control: the direct write, with the write's accessed and modified"
+        );
+    }
+    for (engine, m) in &fiddle(5, Lookup::MapMd, Some(1)) {
+        assert_eq!(fiddled(m), (0, FIDDLE_WORD), "{engine}: evicted, redirected");
+    }
+}
+
+/// **The model's counts of a same-index double miss** (A14.4): a write
+/// start to a page P, its MD a list pointer to a page Q with P's index,
+/// and in the next microcycle `MAP(MD)`: port A misses on P in the
+/// microcycle its `MEMSTART` is up, and port B on Q in the same one, so
+/// both walk and one double miss is counted. Port A's fill replaces an
+/// entry directly written for a third page R at the index, counted as port
+/// A's eviction of a status-4 entry; port B's replaces P's walked entry,
+/// not counted. The control, Q at another index, counts no double miss.
+/// **Fails** a count that misses either engine's pairing of the two ports.
+#[test]
+fn a_double_miss_at_one_index_and_a_port_a_eviction_are_counted() {
+    const P: u32 = 0o3001 << 10;
+    const R: u32 = P + (8192 << 10);
+    for (q, doubles) in [(P + (4096 << 10), 1), (P + (1 << 10), 0)] {
+        let mut p = Prog::default();
+        p.tlb_op(1, R as Word, rw(0o302) & tlb::ENTRY_BITS as Word);
+        let (qa, pa) = (p.k(LIST | q as Word), p.k(P as Word));
+        p.op(ALU | SETA | a_src(qa) | MD);
+        p.op(ALU | SETA | a_src(pa) | START_WRITE);
+        p.op(ALU | SETM | SRC_MAP | m_dest(0o10));
+        p.fill(2);
+        p.stop();
+        let setup = move |m: &mut Machine| {
+            map_page(m, P, rw(0o300));
+            map_page(m, q, rw(0o301));
+        };
+        let ms = run_with(&p, &setup, &|_| {});
+        for (engine, m) in &ms {
+            assert_eq!(m.tlb.double_misses, doubles, "{engine}: Q at {q:o}");
+            let mut want = [[0; 8]; 2];
+            want[0][4] = 1;
+            assert_eq!(m.tlb.evicted, want, "{engine}: port A evicted R's direct write");
+            assert_eq!(m.main[0o300 << 10], LIST | q as Word, "{engine}: the write went out");
+        }
+        assert_eq!(walks(&ms), [2, 2], "P and Q walked");
+    }
+}
+
+// --- the .mcr's section 6 (A14.13)----------------------------------------------
 
 /// A 32-bit word as MIT's `.mcr` puts it out: the high half, then the low,
 /// each little-endian.

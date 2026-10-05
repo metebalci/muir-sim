@@ -1656,7 +1656,15 @@ reference inside holds the microcycle after its start one microcycle, the
 port using the PDL buffer's, and a read's word is in `MD` from the
 microcycle after that (`a_redirect_inside_holds_one_microcycle_on_rtl`);
 `micro` holds nothing. `MAP(MD)` of a status-5 page reads the entry as it
-is held.
+is held. A port-B lookup that misses fills the one TLB too, so a `MAP(MD)`
+or a pointer-typed map-bit dispatch on a page sharing the fiddle's index
+evicts the fiddle, and the next write to the status-5 page walks, takes the
+table's access `01` and is redirected into the buffer, while a dispatch on
+a fixnum looks nothing up and leaves it
+(`e1_a_port_b_fill_evicts_a_status_5_fiddle_and_the_write_is_redirected`).
+At status 6, the MAR's, the same eviction makes the write fault, the
+redirect serving status 5 alone
+(`e2_a_port_b_fill_evicts_a_status_6_fiddle_and_the_write_faults`).
 
 **The write-backs.** A reference to a paged address that does not fault
 sets bits in its page's entry: accessed `<28>` by the first read, write
@@ -1699,7 +1707,17 @@ nothing (`a_direct_write_loads_and_an_empty_clears`). An empty, and
 ns an entry, a memory start or a `MAP(MD)` or map-bit dispatch lookup
 waiting for the sweep's end (`an_empty_takes_n_ticks_on_rtl`). On `rtl` a
 walk holds the processor, in whole microcycles, while its reads go through
-the cache, a hit in the cache's hit time and a miss a line fill.
+the cache, a hit in the cache's hit time and a miss a line fill. As a test
+aid only, `Tlb::small_for_tests` builds a TLB of any power of two down to 1
+entry, where every fill evicts, which `--tlb` does not take
+(`a_1_entry_tlb_runs_e1_s_control_and_evicts_on_every_fill`). The profile
+harness's `tlb:` line counts, as the model's figures and not the
+hardware's, the directly written entries a fill replaced before their
+invalidation, by port and by the replaced entry's status, and the
+microcycles in which port A and port B both missed at one index, on `micro`
+port A's miss at a start paired with port B's in the next instruction, the
+microcycle in which `rtl` walks both
+(`a_double_miss_at_one_index_and_a_port_a_eviction_are_counted`).
 
 **`MAP(MD)`** reads `<39:32>` 0, the fault bits `<31:30>` of the last memory
 cycle's entry as before, and `<29:0>` the entry for `MD`'s address, looked
