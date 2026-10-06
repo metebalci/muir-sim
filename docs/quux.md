@@ -1683,9 +1683,13 @@ entry written directly differs from it (`accessed_is_set_by_the_first_reference_
 `modified_is_set_by_the_first_write_and_the_table_keeps_its_bits`,
 `the_guard_refuses_a_write_through_a_stale_entry`,
 `the_setter_marks_a_store_of_an_ephemeral_pointer`). On `rtl` the
-write-back's reads go through the cache, unless the walk has just made
-them, and its write through the write buffer, and the reference's cycle
-waits behind it (`a_write_back_holds_the_reference_on_rtl`); on `micro` a
+write-back's reads go through the cache, after a TLB hit too, unless port
+A's walk in the same microcycle has just made them for this reference, and
+its write through the write buffer, and the reference's cycle waits behind
+it: at K = 4 a write through a TLB hit that writes modified back is
+acknowledged 330 ns after its grant with both table lines in the cache, 60
+ns when the guard refuses (`a_write_back_holds_the_reference_on_rtl`,
+`a_write_back_after_a_tlb_hit_reads_the_tables_again_on_rtl`); on `micro` a
 read's write-back is made at its start and a write's as it goes out, with
 the word it writes.
 
@@ -1707,7 +1711,13 @@ nothing (`a_direct_write_loads_and_an_empty_clears`). An empty, and
 ns an entry, a memory start or a `MAP(MD)` or map-bit dispatch lookup
 waiting for the sweep's end (`an_empty_takes_n_ticks_on_rtl`). On `rtl` a
 walk holds the processor, in whole microcycles, while its reads go through
-the cache, a hit in the cache's hit time and a miss a line fill. As a test
+the cache, a hit in the cache's hit time and a miss a line fill; a hit on a
+line whose fill is still in flight is answered when the fill is done
+(`a_walk_read_of_a_line_being_filled_waits_for_the_fill_on_rtl`). A port
+looks an address up once a microcycle, and port B again when `MD` changes
+while the microcycle waits, as when a dispatch on `MD` waits for a read:
+a miss then walks, counted, filled and timed as any other
+(`a_port_b_lookup_walks_for_the_md_that_lands_during_its_wait`). As a test
 aid only, `Tlb::small_for_tests` builds a TLB of any power of two down to 1
 entry, where every fill evicts, which `--tlb` does not take
 (`a_1_entry_tlb_runs_e1_s_control_and_evicts_on_every_fill`). The profile

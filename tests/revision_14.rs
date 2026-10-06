@@ -237,11 +237,13 @@ fn machine(p: &Prog, setup: &dyn Fn(&mut Machine)) -> Machine {
     m
 }
 
-/// Runs to the stop, and eight microcycles on.
+/// Runs to the stop, and 64 microcycles on: on `rtl` a last write's cycle
+/// waits behind its write-back, whose re-reads of the tables may be two
+/// line fills (A14.6), about 1.1 us in all at the nominal timing.
 fn finish<E: Engine>(e: &mut E, name: &str) {
     for _ in 0..20_000 {
         if e.machine().opc == STOP as u16 {
-            e.run(8);
+            e.run(64);
             return;
         }
         e.step().unwrap();
@@ -787,6 +789,12 @@ fn map_md_reads_the_entry_and_the_fixed_entries() {
 fn transport(p: &mut Prog, md: Word, slot: u64) {
     let a = p.k(md);
     p.op(ALU | SETA | a_src(a) | MD);
+    dispatch_on_md(p, md, slot);
+}
+
+/// [`transport`]'s dispatch alone, on whatever `MD` holds when it runs,
+/// its entries made for `md`'s data type.
+fn dispatch_on_md(p: &mut Prog, md: Word, slot: u64) {
     // Rotate 9: <37:32> to <6:1>; 7 bits.
     p.op(disp(0, 7, 9) | MAP_23 | src(0o12));
     p.fill(1);
@@ -1848,6 +1856,200 @@ fn a_double_miss_at_one_index_and_a_port_a_eviction_are_counted() {
         }
         assert_eq!(walks(&ms), [2, 2], "P and Q walked");
     }
+}
+
+// --- rtl's time for the walk and the write-back (A14.6) ----------------------
+
+/// `p`'s machine on `rtl`, booted, the directory base and `after_boot` set.
+fn rtl_for(p: &Prog, setup: &dyn Fn(&mut Machine), after_boot: &dyn Fn(&mut Machine)) -> Rtl {
+    let mut r = Rtl::new(machine(p, setup));
+    r.boot();
+    with_directory(r.machine_mut());
+    after_boot(r.machine_mut());
+    r
+}
+
+/// Steps `r` until the microcycle at control store address `pc` has run.
+fn run_past(r: &mut Rtl, pc: u64) {
+    for _ in 0..20_000 {
+        r.step().unwrap();
+        if r.executed() == Some(pc as u16) {
+            return;
+        }
+    }
+    panic!("the microcycle at {pc:o} never ran");
+}
+
+/// **A write-back through a TLB hit reads the tables again** (A14.6: "the
+/// port reads the directory entry and the page entry again, and writes the
+/// page entry back"; at once only "when the walk has just read the entry
+/// for this reference"): a page read, which walks and writes accessed back
+/// at once; then, its entry in the TLB and both table lines in the cache, a
+/// write to it, which hits and writes modified back. On `rtl` at K = 4 its
+/// cycle, granted at the edge it goes out at, waits for the two re-reads,
+/// cache hits of 20 ns each, then for the write-back's write through the
+/// write buffer (answered 20 ns on), whose main memory write, 290 ns from
+/// the second re-read's end, the cycle's own buffered write waits behind:
+/// acknowledged 40 + 290 = 330 ns after its grant. With the page's table
+/// entry moved to another frame before the write and no invalidation, the
+/// guard refuses: the re-reads' 40 ns, then the write's buffered answer, 20
+/// ns: 60. Both engines write the same tables. **Fails** a write-back that
+/// skips the re-reads after a TLB hit (290 and 20).
+#[test]
+fn a_write_back_after_a_tlb_hit_reads_the_tables_again_on_rtl() {
+    const PAGE: u32 = 0o1051 << 10;
+    let at = {
+        let mut probe = Machine::new();
+        entry_at(&mut probe, PAGE) as u32
+    };
+    let moved = rw(0o201);
+    let run = |stale: bool| {
+        let mut p = Prog::default();
+        p.read(PAGE as Word, 0o33, 0o10);
+        if stale {
+            p.write(moved, phys_va(at), 0o10);
+        }
+        // Main memory and the write buffer idle again.
+        p.fill(30);
+        let (wa, aa) = (p.k(w(0o025, 1)), p.k(PAGE as Word));
+        p.op(ALU | SETA | a_src(wa) | MD);
+        let start = p.at();
+        p.op(ALU | SETA | a_src(aa) | START_WRITE);
+        p.taken(jcond(4), 0o11);
+        p.fill(1);
+        p.stop();
+        let setup = |m: &mut Machine| map_page(m, PAGE, rw(0o200));
+        let mut r = rtl_for(&p, &setup, &|_| {});
+        run_past(&mut r, start);
+        // The microcycle `MEMSTART` is up in; its cycle goes out, and is
+        // granted, at the edge ending it.
+        r.step().unwrap();
+        let grant = r.ns();
+        let ack = r.bus_ack_at().expect("the write granted at the edge it goes out at");
+        let walks = r.machine().tlb.walks;
+        let ms = run_with(&p, &setup, &|_| {});
+        (ack - grant, walks, ms)
+    };
+    let (ns, walks, ms) = run(false);
+    assert_eq!(ns, 330, "rtl: two cached re-reads, the write-back's write, then the cycle's");
+    assert_eq!(walks, 1, "rtl: the write hits");
+    expect(&ms, &[(0o10, 0, "no fault"), (0o11, 0, "the write does not fault")]);
+    assert_eq!(table(&ms, PAGE), [rw(0o200) | A | M; 2], "accessed, then modified");
+    assert_eq!(write_backs(&ms), [2, 2], "the read's and the write's");
+    let (ns, _, ms) = run(true);
+    assert_eq!(ns, 60, "rtl: two cached re-reads, refused, then the cycle's buffered write");
+    assert_eq!(table(&ms, PAGE), [moved; 2], "the moved entry untouched");
+    for (engine, m) in &ms {
+        assert_eq!(m.tlb.refusals, 1, "{engine}: the write's write-back refused");
+    }
+}
+
+/// **A port-B lookup for an `MD` that changes while the microcycle waits**
+/// (A14.6: "a map-bit dispatch on a pointer type that misses on port B"
+/// walks): `MAP(MD)` of a list pointer to page P walks and loads P; a read
+/// of P's word 0, a list pointer to page Q, starts; and the microcycle
+/// after next dispatches on `MD`'s type and oldspace bit, waiting for the
+/// read. It looks P up while it waits, a hit; when the word lands it looks
+/// Q up, misses, and walks: counted, Q's entry loaded, and on `rtl` the
+/// dispatch held for the walk's two reads, cache hits (P's walk read the
+/// same directory entry and the same line of the table), 40 ns. Both
+/// engines take Q's oldspace bit, 1. **Fails** a port that looks up once a
+/// microcycle whatever `MD` becomes, which translates Q by a walk that is
+/// not counted, loads nothing and takes no time.
+#[test]
+fn a_port_b_lookup_walks_for_the_md_that_lands_during_its_wait() {
+    const P: u32 = 0o1061 << 10;
+    const Q: u32 = 0o1062 << 10;
+    let mut p = Prog::default();
+    p.m(0o33, 2);
+    p.map(LIST | P as Word, 0o12);
+    let pa = p.k(P as Word);
+    let start = p.at();
+    p.op(ALU | SETA | a_src(pa) | START_READ);
+    p.fill(1);
+    let dispatch = p.at();
+    dispatch_on_md(&mut p, LIST | Q as Word, 0o10);
+    p.stop();
+    let setup = |m: &mut Machine| {
+        map_page(m, P, rw(0o200));
+        map_page(m, Q, rw(0o201));
+        m.main[0o200 << 10] = LIST | Q as Word;
+    };
+    let types = |m: &mut Machine| m.memory_words.pointer_types = 1 << 0o16;
+    let ms = run_with(&p, &setup, &types);
+    expect(&ms, &[(0o10, 2, "Q's oldspace bit, 1")]);
+    for (engine, m) in &ms {
+        assert!(m.tlb.lookup(Q).is_some(), "{engine}: Q's entry loaded");
+    }
+    assert_eq!(walks(&ms), [2, 2], "P by MAP(MD), Q by the dispatch, counted on both engines");
+    let mut r = rtl_for(&p, &setup, &types);
+    run_past(&mut r, start);
+    let held = r.machine().tlb.held_ns;
+    run_past(&mut r, dispatch);
+    let held = r.machine().tlb.held_ns - held;
+    assert_eq!(held, 40, "rtl: from the start to the dispatch, held for Q's walk alone");
+}
+
+/// **A walk's read of a line whose fill is in flight waits for it** (A14.6:
+/// the reads go through the cache, and a line being filled holds no words
+/// yet): a page V2 read first, so the directory entry's line and V2's page
+/// entry's line are in the cache; then, with `MD` = V, a page eight entries
+/// on, so its page entry is in another line, a read through the physical
+/// memory window of the word after V's page entry, which misses and fills
+/// that line, and which holds V, so that `MD` is V before the word lands
+/// and after; and in the microcycle after next, `MAP(MD)`, which misses on port B and
+/// walks: the directory entry hits, and V's page entry is in the line the
+/// read is still filling. The walk's answer, and the microcycle, wait for
+/// the fill: `MAP(MD)` ends at least a microcycle after the read's
+/// acknowledgement. Both engines read V's entry and walk twice. **Fails**
+/// a walk read answered at the hit time, before the line's words exist.
+#[test]
+fn a_walk_read_of_a_line_being_filled_waits_for_the_fill_on_rtl() {
+    const V2: u32 = 0o1071 << 10;
+    const V: u32 = V2 + (8 << 10);
+    let at = {
+        let mut probe = Machine::new();
+        entry_at(&mut probe, V2);
+        entry_at(&mut probe, V) as u32
+    };
+    let mut p = Prog::default();
+    p.read(V2 as Word, 0o33, 0o10);
+    p.fill(30);
+    let (va, pa) = (p.k(V as Word), p.k(phys_va(at + 1)));
+    p.op(ALU | SETA | a_src(va) | MD);
+    let start = p.at();
+    p.op(ALU | SETA | a_src(pa) | START_READ);
+    p.fill(1);
+    let map = p.at();
+    p.op(ALU | SETM | SRC_MAP | m_dest(0o11));
+    p.fill(4);
+    p.stop();
+    let setup = |m: &mut Machine| {
+        map_page(m, V2, rw(0o200));
+        map_page(m, V, rw(0o201));
+        // The word the read takes, V itself, so that `MAP(MD)` looks V up
+        // whenever the word lands.
+        m.main[at as usize + 1] = V as Word;
+    };
+    let mut r = rtl_for(&p, &setup, &|_| {});
+    run_past(&mut r, start);
+    // The microcycle `MEMSTART` is up in; the read goes out, and is
+    // granted, at the edge ending it.
+    r.step().unwrap();
+    let ack = r.bus_ack_at().expect("the window's read granted at the edge it goes out at");
+    run_past(&mut r, map);
+    assert!(
+        r.ns() >= ack + 40,
+        "rtl: MAP(MD) ran before the line its walk read was filled: it ended at {} ns, the \
+         fill at {ack}",
+        r.ns()
+    );
+    let ms = run_with(&p, &setup, &|_| {});
+    for (engine, m) in &ms {
+        let want = rw(0o201) & tlb::ENTRY_BITS as Word;
+        assert_eq!(m.mmem[0o11] & tlb::ENTRY_BITS as Word, want, "{engine}: V's entry");
+    }
+    assert_eq!(walks(&ms), [2, 2], "V2 and V");
 }
 
 // --- the .mcr's section 6 (A14.13)----------------------------------------------

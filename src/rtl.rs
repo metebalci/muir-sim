@@ -576,11 +576,17 @@ pub struct Rtl {
     /// prefetch (`crate::memory_port`): registered with `MEMSTART`, and
     /// kept in a checkpoint as it is.
     memstart_fetch: bool,
-    /// Revision 14: the ports, A and B, have looked up the TLB for this
-    /// microcycle, and walked on a miss: a microcycle held for another
-    /// reason as well does not walk again ([`Rtl::tlb_hold`]). Cleared at
-    /// the edge; not in a checkpoint, a resume starting between two.
-    walked: [bool; 2],
+    /// Revision 14: the address each port, A and B, has looked the TLB up
+    /// at in this microcycle, and walked for on a miss: a microcycle held
+    /// for another reason as well does not look the same address up again
+    /// ([`Rtl::tlb_hold`]), and port B looks up again when `MD` has
+    /// changed meanwhile. Cleared at the edge; not in a checkpoint, a
+    /// resume starting between two.
+    looked: [Option<u32>; 2],
+    /// Revision 14: port A walked in this microcycle, so the walk has just
+    /// read the page entry for this microcycle's reference, and its
+    /// write-back writes at once (A14.6). Cleared at the edge.
+    walked_a: bool,
     /// Revision 14: the redirect's held microcycle has been taken for the
     /// start translated in this one (A14.7). Cleared at the edge.
     redirect_held: bool,
@@ -823,7 +829,8 @@ impl Rtl {
             executed: None,
             fetch_started: None,
             memstart_fetch: false,
-            walked: [false; 2],
+            looked: [None; 2],
+            walked_a: false,
             redirect_held: false,
         };
         // QUUX drops the delay lines: `sync`, four ticks, unless `muir`
@@ -2376,7 +2383,9 @@ impl Rtl {
     /// directory entry and the page entry through the cache, a hit in the
     /// cache's hit time and a miss a line fill when main memory is free.
     /// The hold is whole microcycles, the master clock and the bus running
-    /// on. Whether it held, the read phase to be taken again.
+    /// on. A port looks an address up once a microcycle, and port B again
+    /// when `MD` changes while the microcycle waits, a miss then walking as
+    /// any other. Whether it held, the read phase to be taken again.
     fn tlb_hold(&mut self, r: &Read) -> bool {
         if !self.memstart && !r.port_b {
             return false;
@@ -2389,10 +2398,13 @@ impl Rtl {
                 [self.memstart.then_some(self.m.vma as u32), r.port_b.then_some(self.m.md as u32)];
             let mut missed = [None; 2];
             for (port, va) in ports.into_iter().enumerate() {
-                let Some(va) = va.filter(|_| !self.walked[port]) else { continue };
-                self.walked[port] = true;
+                let Some(va) = va.filter(|&va| self.looked[port] != Some(va)) else { continue };
+                self.looked[port] = Some(va);
                 let which = [crate::tlb::Port::A, crate::tlb::Port::B][port];
                 let Some(walk) = self.m.tlb_fill(va, which) else { continue };
+                if port == 0 {
+                    self.walked_a = true;
+                }
                 missed[port] = Some(self.m.tlb.index(va));
                 for phys in walk.reads.into_iter().flatten() {
                     if let Bus::Quux(p) = &mut self.bus {
@@ -2435,14 +2447,15 @@ impl Rtl {
     /// now, `write` its direction, with `MD` the word it writes: the bits
     /// [`Machine::write_back`] sets, and the port's time for them, which
     /// the cycle waits behind. The directory entry and the page entry are
-    /// read again through the cache unless this microcycle's walk has just
-    /// read them, and the page entry is written through the write buffer.
+    /// read again through the cache, after a TLB hit too, unless port A's
+    /// walk in this microcycle has just read them for this reference, and
+    /// the page entry is written through the write buffer.
     fn write_back(&mut self, write: bool) {
         let va = self.m.vma as u32;
         let Some(wb) = self.m.write_back(va, self.lvmo, write, self.m.md) else { return };
         let Bus::Quux(p) = &mut self.bus else { return };
         let mut t = self.ns;
-        if !self.walked[0] {
+        if !self.walked_a {
             for phys in wb.reads.into_iter().flatten() {
                 t = p.walk_read(t, phys);
             }
@@ -3026,7 +3039,8 @@ impl Rtl {
         // leaves it, below: a cycle going out at the edge that starts
         // another takes the new one's direction.
         self.start_bus_cycle(r, if r.memop { r.memwr } else { self.wrcyc });
-        self.walked = [false; 2];
+        self.looked = [None; 2];
+        self.walked_a = false;
         self.redirect_held = false;
         // `WRCYC` and `RDCYC` are one flip-flop: 1C23's 74S175 on `CLK2A`,
         // whose D comes off the 74S51 at 1D16 as
@@ -3700,7 +3714,8 @@ impl Engine for Rtl {
             // Cleared every microcycle, and only the profile reads it.
             fetch_started: _,
             memstart_fetch,
-            walked: _,
+            looked: _,
+            walked_a: _,
             redirect_held: _,
         } = self;
         m.save(w);
