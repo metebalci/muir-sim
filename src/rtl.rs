@@ -2380,8 +2380,10 @@ impl Rtl {
     /// type's map bits. While a sweep runs, they wait for its end. A miss
     /// walks: [`Machine::tlb_fill`] reads the tables and loads what it
     /// found, and the processor is held while the memory port reads the
-    /// directory entry and the page entry through the cache, a hit in the
-    /// cache's hit time and a miss a line fill when main memory is free.
+    /// directory entry and the page entry through the cache, no earlier
+    /// than the acknowledgement of the processor's cycle in flight
+    /// ([`MemoryPort::walk_taken_at`]), a hit in the cache's hit time and a
+    /// miss a line fill when main memory is free.
     /// The hold is whole microcycles, the master clock and the bus running
     /// on. A port looks an address up once a microcycle, and port B again
     /// when `MD` changes while the microcycle waits, a miss then walking as
@@ -2397,6 +2399,7 @@ impl Rtl {
             let ports =
                 [self.memstart.then_some(self.m.vma as u32), r.port_b.then_some(self.m.md as u32)];
             let mut missed = [None; 2];
+            let md_wait = r.port_b && self.md_interlock(r);
             for (port, va) in ports.into_iter().enumerate() {
                 let Some(va) = va.filter(|&va| self.looked[port] != Some(va)) else { continue };
                 self.looked[port] = Some(va);
@@ -2406,8 +2409,17 @@ impl Rtl {
                     self.walked_a = true;
                 }
                 missed[port] = Some(self.m.tlb.index(va));
-                for phys in walk.reads.into_iter().flatten() {
-                    if let Bus::Quux(p) = &mut self.bus {
+                if port == 1 && md_wait {
+                    self.m.tlb.walks_waiting_md += 1;
+                }
+                if let Bus::Quux(p) = &mut self.bus {
+                    // The profile's meter: a walk behind the cycle in flight.
+                    let taken = p.walk_taken_at(until);
+                    if walk.reads.iter().flatten().next().is_some() && taken > until {
+                        self.m.tlb.walks_waited[port] += 1;
+                        self.m.tlb.walks_waited_ns[port] += taken - until;
+                    }
+                    for phys in walk.reads.into_iter().flatten() {
                         until = p.walk_read(until, phys);
                     }
                 }
@@ -2457,7 +2469,7 @@ impl Rtl {
         let mut t = self.ns;
         if !self.walked_a {
             for phys in wb.reads.into_iter().flatten() {
-                t = p.walk_read(t, phys);
+                t = p.write_back_read(t, phys);
             }
         }
         if let Some(phys) = wb.write {

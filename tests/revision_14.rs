@@ -1990,21 +1990,203 @@ fn a_port_b_lookup_walks_for_the_md_that_lands_during_its_wait() {
     assert_eq!(held, 40, "rtl: from the start to the dispatch, held for Q's walk alone");
 }
 
-/// **A walk's read of a line whose fill is in flight waits for it** (A14.6:
-/// the reads go through the cache, and a line being filled holds no words
-/// yet): a page V2 read first, so the directory entry's line and V2's page
-/// entry's line are in the cache; then, with `MD` = V, a page eight entries
-/// on, so its page entry is in another line, a read through the physical
-/// memory window of the word after V's page entry, which misses and fills
-/// that line, and which holds V, so that `MD` is V before the word lands
-/// and after; and in the microcycle after next, `MAP(MD)`, which misses on port B and
-/// walks: the directory entry hits, and V's page entry is in the line the
-/// read is still filling. The walk's answer, and the microcycle, wait for
-/// the fill: `MAP(MD)` ends at least a microcycle after the read's
-/// acknowledgement. Both engines read V's entry and walk twice. **Fails**
-/// a walk read answered at the hit time, before the line's words exist.
+/// `p` on `rtl` at K = 4, run past `before`, then the microcycle after it,
+/// whose `MEMSTART`, if it has one, sends its cycle out and has it granted
+/// at the edge ending it; then the microcycle at `map`, which must follow.
+/// The instant that edge falls at, which is when `map`'s microcycle
+/// starts; the cycle's acknowledgement, if one is granted; and the time
+/// `map`'s microcycle is held for the TLB. The profile's meter counts
+/// `map`'s walk behind the cycle in flight on port B, with the time from
+/// the microcycle's start to the acknowledgement, and never as made while
+/// the microcycle waits for `MD`: `MAP(MD)` does not wait for it.
+fn held_at_map(
+    p: &Prog,
+    setup: &dyn Fn(&mut Machine),
+    before: u64,
+    map: u64,
+) -> (u64, Option<u64>, u64) {
+    let mut r = rtl_for(p, setup, &|_| {});
+    run_past(&mut r, before);
+    r.step().unwrap();
+    let start = r.ns();
+    let ack = r.bus_ack_at();
+    let t = r.machine().tlb.clone();
+    r.step().unwrap();
+    assert_eq!(r.executed(), Some(map as u16), "MAP(MD) runs in the microcycle after the grant");
+    let u = &r.machine().tlb;
+    let waited = ack.map_or(0, |ack| ack - start);
+    assert_eq!(
+        (u.walks_waited[0] - t.walks_waited[0], u.walks_waited_ns[0] - t.walks_waited_ns[0]),
+        (0, 0),
+        "the meter: no port-A walk"
+    );
+    assert_eq!(
+        (u.walks_waited[1] - t.walks_waited[1], u.walks_waited_ns[1] - t.walks_waited_ns[1]),
+        (u64::from(waited > 0), waited),
+        "the meter: port B's walk behind the cycle in flight"
+    );
+    assert_eq!(
+        u.walks_waiting_md - t.walks_waiting_md,
+        0,
+        "the meter: MAP(MD) does not wait for MD"
+    );
+    (start, ack, u.held_ns - t.held_ns)
+}
+
+/// A walk of two cached reads taken at the acknowledgement `ack` (A14.6,
+/// clarification 74), held from the microcycle's start `start` in whole
+/// microcycles of 40 ns.
+fn held_behind(start: u64, ack: u64) -> u64 {
+    (ack + 40 - start).div_ceil(40) * 40
+}
+
+/// A main memory line fill at the nominal timing: the read's 380 ns and
+/// three ticks more for the 40-byte line's further beats.
+const FILL_NS: u64 = 380 + 30;
+
+/// Pages whose page entries share one line of the table: V2's, V's (the
+/// next page) and U's (the one after).
+const V2: u32 = 0o1071 << 10;
+const V: u32 = V2 + (1 << 10);
+const U: u32 = V2 + (2 << 10);
+/// A word of main memory in a line no table is in, and in a set of the
+/// cache neither table line is in, so that its fill evicts neither.
+const X: u32 = (0o300 << 10) + 0o400;
+
+/// The walk tests' program: V2 read first, so the directory entry's line
+/// and the line with V2's, V's and U's page entries are in the cache;
+/// `pre` next; then `MD` = V, a read of `read`'s virtual address, if any,
+/// whose word is V so that `MD` is V before the word lands and after, and
+/// in the microcycle after next `MAP(MD)`, which misses on port B and
+/// walks: two cached reads. Returns the program, the address before the
+/// grant's microcycle, and `MAP(MD)`'s.
+fn walk_behind(pre: &dyn Fn(&mut Prog), read: Option<Word>) -> (Prog, u64, u64) {
+    let mut p = Prog::default();
+    p.read(V2 as Word, 0o33, 0o10);
+    pre(&mut p);
+    // Main memory and the write buffer idle again.
+    p.fill(30);
+    let va = p.k(V as Word);
+    p.op(ALU | SETA | a_src(va) | MD);
+    let before = p.at();
+    match read {
+        Some(at) => {
+            let a = p.k(at);
+            p.op(ALU | SETA | a_src(a) | START_READ);
+        }
+        None => {
+            p.fill(1);
+        }
+    }
+    p.fill(1);
+    let map = p.at();
+    p.op(ALU | SETM | SRC_MAP | m_dest(0o11));
+    p.fill(4);
+    let reg = |k: u32| (tlb::REGISTER_PAGE + k) as Word;
+    p.read(reg(0o224), 0o13, 0o14);
+    p.stop();
+    (p, before, map)
+}
+
+/// The walk tests' tables: V2, V and U mapped to frames 200-202; the
+/// window's word X, and U's word 0, hold V.
+fn walk_tables(m: &mut Machine) {
+    map_page(m, V2, rw(0o200));
+    map_page(m, V, rw(0o201));
+    map_page(m, U, rw(0o202));
+    m.main[X as usize] = V as Word;
+    m.main[0o202 << 10] = V as Word;
+}
+
+/// Both engines read V's entry by `MAP(MD)`, and the guard refused nothing.
+fn expect_v(ms: &[(&str, Machine)]) {
+    let want = rw(0o201) & tlb::ENTRY_BITS as Word;
+    for (engine, m) in ms {
+        assert_eq!(m.mmem[0o11] & tlb::ENTRY_BITS as Word, want, "{engine}: V's entry");
+        assert!(m.tlb.lookup(V).is_some(), "{engine}: V's entry loaded");
+    }
+    expect(ms, &[(0o13, 0, "word 224: nothing refused"), (0o14, 0, "its read does not fault")]);
+}
+
+/// **W1: a walk's read waits for the cycle in flight, on another line**
+/// (A14.6, clarification 74: a walk's read is taken no earlier than the
+/// acknowledgement of the processor's cycle the port has granted): a read
+/// through the physical memory window of X, which misses and fills a line
+/// neither table entry is in; `MAP(MD)`, in the microcycle that starts at
+/// the read's grant, walks for V, its two reads cache hits taken at the
+/// read's acknowledgement, a line fill on: held to the acknowledgement and
+/// 40 ns, in whole microcycles. **Fails** a walk read that hits under the
+/// miss (40 ns).
 #[test]
-fn a_walk_read_of_a_line_being_filled_waits_for_the_fill_on_rtl() {
+fn w1_a_walk_read_waits_for_a_fill_in_flight_on_another_line_on_rtl() {
+    let (p, before, map) = walk_behind(&|_| {}, Some(phys_va(X)));
+    let (start, ack, held) = held_at_map(&p, &walk_tables, before, map);
+    let ack = ack.expect("the window's read granted at the edge it goes out at");
+    assert_eq!(ack - start, FILL_NS, "the window's read misses");
+    assert_eq!(held, held_behind(start, ack), "rtl: the walk taken at the acknowledgement");
+    let ms = run_with(&p, &walk_tables, &|_| {});
+    expect_v(&ms);
+    assert_eq!(walks(&ms), [2, 2], "V2 and V");
+}
+
+/// **The profile's meter of walks behind a cycle in flight** (the model's
+/// count): `MAP(MD)` loads P; with `MD` a list pointer to R, mapped and not
+/// in the TLB, a read of P's word 0, a list pointer to Q, writes P's
+/// accessed back and misses, as in W4; the
+/// dispatch on `MD`, in the microcycle that starts at the read's grant,
+/// waits for the word, and port B looks R up on the `MD` it waits to
+/// replace: a walk made while the microcycle waits for `MD`, taken at the
+/// read's acknowledgement; when the
+/// word lands, Q's walk, which waits for nothing. Port A walks nothing
+/// behind a cycle. **Fails** a meter that counts every port-B walk, or none.
+#[test]
+fn the_meter_counts_a_port_b_walk_on_the_md_a_dispatch_waits_to_replace_on_rtl() {
+    const P: u32 = 0o1101 << 10;
+    const Q: u32 = 0o1102 << 10;
+    const R: u32 = 0o1103 << 10;
+    let mut p = Prog::default();
+    p.m(0o33, 2);
+    p.map(LIST | P as Word, 0o12);
+    p.fill(30);
+    let (ra, pa) = (p.k(LIST | R as Word), p.k(P as Word));
+    p.op(ALU | SETA | a_src(ra) | MD);
+    let before = p.at();
+    p.op(ALU | SETA | a_src(pa) | START_READ);
+    p.fill(1);
+    let dispatch = p.at();
+    dispatch_on_md(&mut p, LIST | Q as Word, 0o10);
+    p.stop();
+    let setup = |m: &mut Machine| {
+        map_page(m, P, rw(0o200));
+        map_page(m, Q, rw(0o201));
+        map_page(m, R, rw(0o202));
+        m.main[0o200 << 10] = LIST | Q as Word;
+    };
+    let types = |m: &mut Machine| m.memory_words.pointer_types = 1 << 0o16;
+    let mut r = rtl_for(&p, &setup, &types);
+    run_past(&mut r, before);
+    r.step().unwrap();
+    let start = r.ns();
+    let ack = r.bus_ack_at().expect("P's read granted at the edge it goes out at");
+    assert_eq!(ack - start, 40 + 290 + FILL_NS, "P's write-back, then its word's fill");
+    let t = r.machine().tlb.clone();
+    run_past(&mut r, dispatch);
+    let u = &r.machine().tlb;
+    assert_eq!(u.walks - t.walks, 2, "R's walk, then Q's");
+    assert_eq!(u.walks_waiting_md - t.walks_waiting_md, 1, "R's, on the MD the dispatch waits for");
+    assert_eq!(u.walks_waited[1] - t.walks_waited[1], 1, "R's walk behind the read");
+    assert_eq!(u.walks_waited_ns[1] - t.walks_waited_ns[1], ack - start, "to the acknowledgement");
+    assert_eq!(u.walks_waited[0], 0, "port A walks behind no cycle");
+}
+
+/// **W2: a walk's read of a line being filled waits for the fill** (A14.6,
+/// clarification 74): W1 with the read of the word after V's page entry,
+/// which misses and fills the line holding V's page entry; the walk's two
+/// reads are taken at the read's acknowledgement, when the line is in, and
+/// hit: held as W1. **Fails** a walk read answered at the hit time, before
+/// the line's words exist.
+#[test]
+fn w2_a_walk_read_of_a_line_being_filled_waits_for_the_fill_on_rtl() {
     const V2: u32 = 0o1071 << 10;
     const V: u32 = V2 + (8 << 10);
     let at = {
@@ -2017,7 +2199,7 @@ fn a_walk_read_of_a_line_being_filled_waits_for_the_fill_on_rtl() {
     p.fill(30);
     let (va, pa) = (p.k(V as Word), p.k(phys_va(at + 1)));
     p.op(ALU | SETA | a_src(va) | MD);
-    let start = p.at();
+    let before = p.at();
     p.op(ALU | SETA | a_src(pa) | START_READ);
     p.fill(1);
     let map = p.at();
@@ -2031,24 +2213,78 @@ fn a_walk_read_of_a_line_being_filled_waits_for_the_fill_on_rtl() {
         // whenever the word lands.
         m.main[at as usize + 1] = V as Word;
     };
-    let mut r = rtl_for(&p, &setup, &|_| {});
-    run_past(&mut r, start);
-    // The microcycle `MEMSTART` is up in; the read goes out, and is
-    // granted, at the edge ending it.
-    r.step().unwrap();
-    let ack = r.bus_ack_at().expect("the window's read granted at the edge it goes out at");
-    run_past(&mut r, map);
-    assert!(
-        r.ns() >= ack + 40,
-        "rtl: MAP(MD) ran before the line its walk read was filled: it ended at {} ns, the \
-         fill at {ack}",
-        r.ns()
-    );
+    let (start, ack, held) = held_at_map(&p, &setup, before, map);
+    let ack = ack.expect("the window's read granted at the edge it goes out at");
+    assert_eq!(ack - start, FILL_NS, "the window's read misses");
+    assert_eq!(held, held_behind(start, ack), "rtl: the walk taken at the fill's end");
     let ms = run_with(&p, &setup, &|_| {});
     for (engine, m) in &ms {
         let want = rw(0o201) & tlb::ENTRY_BITS as Word;
         assert_eq!(m.mmem[0o11] & tlb::ENTRY_BITS as Word, want, "{engine}: V's entry");
     }
+    assert_eq!(walks(&ms), [2, 2], "V2 and V");
+}
+
+/// **W3: a walk's read waits for a read hit in flight** (clarification 74:
+/// the cache serves one lookup at a time): W1 with X read once before, so
+/// the window's read hits, acknowledged 20 ns after its grant; the walk's
+/// two hits follow it, 60 ns from the microcycle's start: held 80 ns at
+/// K = 4. **Fails** a walk read beside the processor's lookup (40 ns).
+#[test]
+fn w3_a_walk_read_waits_for_a_read_hit_in_flight_on_rtl() {
+    let pre = |p: &mut Prog| {
+        p.read(phys_va(X), 0o15, 0o10);
+    };
+    let (p, before, map) = walk_behind(&pre, Some(phys_va(X)));
+    let (start, ack, held) = held_at_map(&p, &walk_tables, before, map);
+    let ack = ack.expect("the window's read granted at the edge it goes out at");
+    assert_eq!(ack - start, 20, "the window's read hits");
+    assert_eq!(held, 80, "rtl: the walk's two hits after the read's");
+    let ms = run_with(&p, &walk_tables, &|_| {});
+    expect_v(&ms);
+    expect(&ms, &[(0o15, V as Word, "X's word")]);
+    assert_eq!(walks(&ms), [2, 2], "V2 and V");
+}
+
+/// **W4: a walk's read waits for a cycle behind its write-back**
+/// (clarification 74: the acknowledgement follows the cycle's write-back,
+/// whose reads belong to their cycle): U's entry loaded by `MAP(MD)`,
+/// accessed 0; a read of U hits the TLB, and at its grant its write-back
+/// reads the two table entries again (cache hits, 40 ns) and writes U's
+/// entry with accessed through the write buffer, main memory busy 290 ns
+/// behind; the read then misses and fills U's line when main memory is
+/// free: acknowledged 40 + 290 + a fill after its grant. `MAP(MD)` walks
+/// for V from that acknowledgement, held as W1. Both engines write U's
+/// entry back with accessed, load V's, and refuse nothing. **Fails** a walk
+/// read that hits under the write-back or the miss (40 ns).
+#[test]
+fn w4_a_walk_read_waits_for_a_cycle_behind_its_write_back_on_rtl() {
+    let pre = |p: &mut Prog| {
+        p.map(U as Word, 0o12);
+    };
+    let (p, before, map) = walk_behind(&pre, Some(U as Word));
+    let (start, ack, held) = held_at_map(&p, &walk_tables, before, map);
+    let ack = ack.expect("U's read granted at the edge it goes out at");
+    assert_eq!(ack - start, 40 + 290 + FILL_NS, "the re-reads, the write, then U's fill");
+    assert_eq!(held, held_behind(start, ack), "rtl: the walk taken at the acknowledgement");
+    let ms = run_with(&p, &walk_tables, &|_| {});
+    expect_v(&ms);
+    assert_eq!(table(&ms, U), [rw(0o202) | A; 2], "U's entry written back, accessed");
+    assert_eq!(write_backs(&ms), [2, 2], "V2's read's and U's");
+    assert_eq!(walks(&ms), [3, 3], "V2, U and V");
+}
+
+/// **W5: a walk with no cycle in flight** (clarification 74, the control):
+/// W1 with no read; `MAP(MD)`'s walk is its two cache hits, 40 ns. **Fails**
+/// a wait that is too wide, such as one for main memory to be free.
+#[test]
+fn w5_a_walk_with_no_cycle_in_flight_holds_its_two_hits_on_rtl() {
+    let (p, before, map) = walk_behind(&|_| {}, None);
+    let (_, ack, held) = held_at_map(&p, &walk_tables, before, map);
+    assert_eq!(ack, None, "no cycle granted");
+    assert_eq!(held, 40, "rtl: two cache hits");
+    let ms = run_with(&p, &walk_tables, &|_| {});
+    expect_v(&ms);
     assert_eq!(walks(&ms), [2, 2], "V2 and V");
 }
 

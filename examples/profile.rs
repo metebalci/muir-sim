@@ -290,7 +290,7 @@ fn category(label: &str, file: &str) -> String {
 }
 
 /// The TLB's counts a phase keeps ([`Phase::tlb`]).
-const TLB_COUNTS: usize = 27;
+const TLB_COUNTS: usize = 32;
 
 struct Phase {
     /// The microcycles and the time, the memory's and in all.
@@ -306,7 +306,9 @@ struct Phase {
     /// revision 14, §11.1); then the model's counts of directly written
     /// entries a fill replaced, by port A then B, each by the replaced
     /// entry's status 0-7, and of microcycles in which both ports missed at
-    /// one index.
+    /// one index; then, on `rtl`, walks that waited for the processor's
+    /// cycle in flight, by port A then B, the time they waited, by port,
+    /// and port-B walks made while the microcycle waits for `MD`.
     tlb: Option<[u64; TLB_COUNTS]>,
     /// Fused returns: macroinstructions dispatched without `QMLP+2`.
     fused: u64,
@@ -470,6 +472,9 @@ fn run<E: Profiled>(
         ]);
         v[10..26].copy_from_slice(t.evicted.as_flattened());
         v[26] = t.double_misses;
+        v[27..29].copy_from_slice(&t.walks_waited);
+        v[29..31].copy_from_slice(&t.walks_waited_ns);
+        v[31] = t.walks_waiting_md;
         v
     };
     let tlb0 = tlb_counts(e.machine());
@@ -742,6 +747,10 @@ fn report(
             evicted(0),
             evicted(1),
             t[26]
+        );
+        println!(
+            "   tlb walks behind a cycle in flight: port A {} ({} ns), port B {} ({} ns); port-B walks while the microcycle waits for MD {}",
+            t[27], t[29], t[28], t[30], t[31]
         );
     }
     if let Some(c) = &p.prefetch {

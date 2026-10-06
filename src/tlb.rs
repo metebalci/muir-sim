@@ -316,6 +316,16 @@ pub struct Tlb {
     /// that both walked and the second fill replaced the first's entry. Not
     /// in a checkpoint: the profile's.
     pub double_misses: u64,
+    /// On `rtl`, walks whose first read waited for the processor's cycle
+    /// in flight (clarification 74), by the port that walked ([`Port`]),
+    /// and the time they waited. The model's count. Not in a checkpoint:
+    /// the profile's.
+    pub walks_waited: [u64; 2],
+    pub walks_waited_ns: [u64; 2],
+    /// On `rtl`, port-B walks made while the microcycle waits for `MD`,
+    /// its lookup taken on the `MD` it waits to replace. The model's
+    /// count. Not in a checkpoint: the profile's.
+    pub walks_waiting_md: u64,
     /// Which entries a direct write loaded, the model's mark for
     /// [`Tlb::evicted`].
     direct: Vec<bool>,
@@ -375,6 +385,9 @@ impl Tlb {
             sweep_until: 0,
             evicted: [[0; 8]; 2],
             double_misses: 0,
+            walks_waited: [0; 2],
+            walks_waited_ns: [0; 2],
+            walks_waiting_md: 0,
             direct: vec![false; entries],
         }
     }

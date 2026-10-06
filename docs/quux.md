@@ -1711,9 +1711,19 @@ nothing (`a_direct_write_loads_and_an_empty_clears`). An empty, and
 ns an entry, a memory start or a `MAP(MD)` or map-bit dispatch lookup
 waiting for the sweep's end (`an_empty_takes_n_ticks_on_rtl`). On `rtl` a
 walk holds the processor, in whole microcycles, while its reads go through
-the cache, a hit in the cache's hit time and a miss a line fill; a hit on a
-line whose fill is still in flight is answered when the fill is done
-(`a_walk_read_of_a_line_being_filled_waits_for_the_fill_on_rtl`). A port
+the cache, a hit in the cache's hit time and a miss a line fill when main
+memory is free. A walk's read is taken at the later of the instant it is
+asked and the acknowledgement of the processor's cycle the memory port has
+granted and not yet acknowledged, if any, which follows that cycle's
+write-back: the cache serves one lookup at a time, so a walk never reads
+beside the processor's lookup or meets a line fill in flight
+(`w1_a_walk_read_waits_for_a_fill_in_flight_on_another_line_on_rtl`,
+`w2_a_walk_read_of_a_line_being_filled_waits_for_the_fill_on_rtl`,
+`w3_a_walk_read_waits_for_a_read_hit_in_flight_on_rtl`,
+`w4_a_walk_read_waits_for_a_cycle_behind_its_write_back_on_rtl`,
+`w5_a_walk_with_no_cycle_in_flight_holds_its_two_hits_on_rtl`). A
+write-back's own reads of the tables belong to its cycle, made before the
+cycle is requested, and wait for no cycle in flight. A port
 looks an address up once a microcycle, and port B again when `MD` changes
 while the microcycle waits, as when a dispatch on `MD` waits for a read:
 a miss then walks, counted, filled and timed as any other
@@ -1727,7 +1737,10 @@ invalidation, by port and by the replaced entry's status, and the
 microcycles in which port A and port B both missed at one index, on `micro`
 port A's miss at a start paired with port B's in the next instruction, the
 microcycle in which `rtl` walks both
-(`a_double_miss_at_one_index_and_a_port_a_eviction_are_counted`).
+(`a_double_miss_at_one_index_and_a_port_a_eviction_are_counted`); and on
+`rtl`, also the model's, the walks whose first read waited for a cycle in
+flight, by port, with the time they waited, and the port-B walks made
+while the microcycle waits for `MD`, on the `MD` it waits to replace.
 
 **`MAP(MD)`** reads `<39:32>` 0, the fault bits `<31:30>` of the last memory
 cycle's entry as before, and `<29:0>` the entry for `MD`'s address, looked

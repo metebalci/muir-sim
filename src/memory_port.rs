@@ -172,20 +172,7 @@ pub struct MemoryPort {
     /// Revision 14's port ([`MemoryPort::for_geometry`]): 32-bit virtual
     /// addresses.
     paged: bool,
-    /// The last [`FILLS`] line fills, each its line and the instant its
-    /// words are in, so that a walk's read of a line still being filled
-    /// waits for it ([`MemoryPort::walk_read`]). Main memory fills one line
-    /// at a time and a walk's reads follow one another, so a line in flight
-    /// when a walk reads is the processor's last read's, a write-back's
-    /// re-read, or the walk's own, all among the last few. Not in a
-    /// checkpoint: a resume sweeps the TLB, holding every start and port-B
-    /// lookup for N ticks, far longer than a fill, before any walk reads.
-    fills: [(u32, u64); FILLS],
-    fill_next: usize,
 }
-
-/// The line fills [`MemoryPort`] remembers.
-const FILLS: usize = 4;
 
 /// Words a cache line (contract G1 §4.1, G2 §3): a line of packed
 /// storage, which [`MemoryPort::set_cache`] keeps whatever size is asked
@@ -247,8 +234,6 @@ impl MemoryPort {
             fetch_vaddr: None,
             prefetch_counts: PrefetchCounts::default(),
             paged,
-            fills: [(u32::MAX, 0); FILLS],
-            fill_next: 0,
         }
     }
 
@@ -411,9 +396,6 @@ impl MemoryPort {
         let start = now.max(self.memory_free_at);
         let done = start + if self.write { self.timing.write_ns } else { self.fill_ns() };
         self.memory_free_at = done;
-        if !self.write {
-            self.filled(self.addr, done);
-        }
         if self.write && self.cache.config.write_buffer {
             let at = (now + hit_ns).max(self.buffer_free_at);
             self.buffer_free_at = done;
@@ -443,31 +425,45 @@ impl MemoryPort {
         self.timing.read_ns + beats * TICK
     }
 
-    /// The line holding `phys` is being filled, its words in at `done`.
-    fn filled(&mut self, phys: u32, done: u64) {
-        self.fills[self.fill_next] = (phys / self.cache.config.line_words, done);
-        self.fill_next = (self.fill_next + 1) % FILLS;
-    }
-
-    /// When the words of the line holding `phys` are in: the end of its
-    /// fill, if one is remembered, and 0 otherwise.
-    fn line_in_at(&self, phys: u32) -> u64 {
-        let line = phys / self.cache.config.line_words;
-        self.fills.iter().filter(|&&(l, _)| l == line).map(|&(_, done)| done).max().unwrap_or(0)
+    /// When a walk's read asked for at `now` is taken (A14.6,
+    /// clarification 74): no earlier than the acknowledgement of the
+    /// processor's cycle the port has granted and not yet acknowledged, if
+    /// any, which follows that cycle's write-back. The cache serves one
+    /// lookup at a time, so a walk never reads beside the processor's
+    /// lookup or meets a line fill in flight.
+    pub fn walk_taken_at(&self, now: u64) -> u64 {
+        match self.state {
+            State::Granted { ack, .. } => now.max(ack),
+            _ => now,
+        }
     }
 
     /// **One read of revision 14's walk** (A14.6) at main memory's word
-    /// `phys`, from `now`: through the cache, a hit answered after its hit
-    /// time, or when its line's fill is done if that is still in flight,
-    /// the words not there before; and a miss filling its line when main
-    /// memory is free, as a processor's read is. When it is done.
+    /// `phys`, asked for at `now`: taken at [`MemoryPort::walk_taken_at`],
+    /// then through the cache, a hit answered after its hit time and a miss
+    /// filling its line when main memory is free, as a processor's read is.
+    /// When it is done.
     pub fn walk_read(&mut self, now: u64, phys: u32) -> u64 {
+        let now = self.walk_taken_at(now);
+        self.table_read(now, phys)
+    }
+
+    /// **One read of revision 14's write-back** (A14.6) at main memory's
+    /// word `phys`, from `now`: as [`MemoryPort::walk_read`]'s, but its own
+    /// cycle's, made before that cycle is requested, so it waits for no
+    /// cycle in flight. When it is done.
+    pub fn write_back_read(&mut self, now: u64, phys: u32) -> u64 {
+        self.table_read(now, phys)
+    }
+
+    /// A read of a table word through the cache from `now`: a hit after the
+    /// hit time, a miss when main memory has filled its line.
+    fn table_read(&mut self, now: u64, phys: u32) -> u64 {
         if self.cache.read(phys) {
-            return (now + self.cache.config.hit_ns).max(self.line_in_at(phys));
+            return now + self.cache.config.hit_ns;
         }
         let done = now.max(self.memory_free_at) + self.fill_ns_at(phys);
         self.memory_free_at = done;
-        self.filled(phys, done);
         done
     }
 
@@ -562,9 +558,6 @@ impl MemoryPort {
             prefetch_counts: _,
             // The revision is the machine's.
             paged: _,
-            // A resume's sweep outlasts every fill.
-            fills: _,
-            fill_next: _,
         } = self;
         match *state {
             State::Idle => w.u8(0),
@@ -635,7 +628,6 @@ impl MemoryPort {
         if self.paged {
             self.write_back_until = r.u64()?;
         }
-        self.fills = [(u32::MAX, 0); FILLS];
         Ok(())
     }
 }
