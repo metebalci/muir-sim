@@ -1335,18 +1335,21 @@ impl Keyboard {
                 }
                 return Went::Nothing("a prefix acts on its press");
             }
-            if !down {
-                return Went::Nothing("the prefix stands until a key is pressed behind it");
+            // A key-up is not looked up behind it: the prefix stands
+            // until a key is pressed behind it, and a key held from
+            // before it and let go meanwhile goes up below as any
+            // release does, rather than staying down for the machine.
+            if down {
+                self.prefix = None;
+                self.tapped.push(keysym);
+                let behind = self.map.after_prefix(first, keysym);
+                if let Some((p, wants)) = behind
+                    && !self.behind_prefix(p, wants)
+                {
+                    return Went::Refused { p, shifted: wants };
+                }
+                return Went::Behind(first, behind);
             }
-            self.prefix = None;
-            self.tapped.push(keysym);
-            let behind = self.map.after_prefix(first, keysym);
-            if let Some((p, wants)) = behind
-                && !self.behind_prefix(p, wants)
-            {
-                return Went::Refused { p, shifted: wants };
-            }
-            return Went::Behind(first, behind);
         }
         if self.map.is_prefix(keysym) {
             if down {

@@ -238,6 +238,73 @@ fn a_prefix_reaches_a_key_no_host_key_is_spare_for() {
     assert_eq!(words, [up_down(a, false), up_down(a, true)], "and the key after it is itself");
 }
 
+/// **A key released while a prefix stands is let go.** The prefix waits
+/// for the next key pressed, not for the next keysym: a key held from
+/// before it and released meanwhile goes up at once, and is not left
+/// down for the machine, where its next press would find it down already
+/// and send nothing.
+#[test]
+fn a_key_released_while_a_prefix_stands_is_let_go() {
+    let m = Mapping::parse("prefix Scroll_Lock d Delete\n").unwrap();
+    let prefix = 0xff14;
+    let a = 0o123;
+
+    // `a` held, the prefix, `a` let go, the prefix again to let it go,
+    // and `a` pressed again: two strokes of `a`.
+    let words = typed(
+        m,
+        &[
+            &[('a' as u32, true)][..],
+            &tap(prefix),
+            &[('a' as u32, false)],
+            &tap(prefix),
+            &tap('a' as u32),
+        ]
+        .concat(),
+    );
+    assert_eq!(
+        words,
+        [up_down(a, false), up_down(a, true), up_down(a, false), up_down(a, true)],
+        "the release goes at once, and the second press is sent"
+    );
+}
+
+/// **A key released while a prefix stands leaves the prefix standing**:
+/// the key pressed after the release is the one looked up behind it.
+#[test]
+fn a_prefix_still_applies_after_a_key_released_while_it_stands() {
+    let m = Mapping::parse("prefix Scroll_Lock d Delete\n").unwrap();
+    let prefix = 0xff14;
+    let delete = named("Delete").unwrap();
+    let a = 0o123;
+
+    // `a` held, the prefix, `a` let go, then the prefix's own key `d`
+    // and `a` again.
+    let words = typed(
+        m,
+        &[
+            &[('a' as u32, true)][..],
+            &tap(prefix),
+            &[('a' as u32, false)],
+            &tap('d' as u32),
+            &tap('a' as u32),
+        ]
+        .concat(),
+    );
+    assert_eq!(
+        words,
+        [
+            up_down(a, false),
+            up_down(a, true),
+            up_down(delete, false),
+            up_down(delete, true),
+            up_down(a, false),
+            up_down(a, true)
+        ],
+        "`a` up, Delete tapped behind the prefix, then `a` again"
+    );
+}
+
 /// **A file changes the mapping, and what it does not say the default
 /// still says.** A user with a keyboard whose Super the desktop takes
 /// binds another key to it and keeps everything else.
