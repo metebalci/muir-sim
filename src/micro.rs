@@ -84,10 +84,30 @@ pub struct Micro {
     /// `lcinc = next_instrd || (irdisp && IR<24>)` in `rtl`.
     next_instrd: bool,
 
+    /// IMOD's pending flags: an OA register written in the microcycle
+    /// before, to be ORed into this one's word. Never set on revision 15.
     oal: bool,
     oah: bool,
+    /// The OA registers, `IMOD<25:0>` and `IMOD<47:26>`, in `IR`'s
+    /// positions less 0 and 26: on revision 15 OA-REG-LOW and OA-REG-HIGH,
+    /// which keep their word until the next write and are read only through
+    /// a word's OA select (A15b.15).
     oa_low: u64,
     oa_high: u64,
+    /// **The OA select check** (revision 15, A15b.15): `micro` keeps a
+    /// shadow of IMOD's pending flags, [`Micro::oa_shadow`], and halts on a
+    /// select whose register the word executed before did not write, and on
+    /// a write the next executed word does not select
+    /// (`Halt::OaSelectWithoutWrite`, `Halt::OaWriteWithoutSelect`). Always
+    /// on in a run; tests turn it off to run a pair it would halt on. Not
+    /// kept in a checkpoint.
+    pub oa_select_check: bool,
+    /// The shadow: OA-REG-LOW and OA-REG-HIGH written by the word executed
+    /// in the microcycle before, as IMOD's pending flags would stand, a
+    /// nopped microcycle dropping them as it drops IMOD's. Kept in a
+    /// revision-15 checkpoint, so that a resume between a write and its
+    /// select checks as the run would have.
+    oa_shadow: [bool; 2],
 
     new_md: Word,
     new_md_delay: u8,
@@ -209,6 +229,10 @@ pub struct Micro {
     /// (`crate::machine::macro_dispatch`), handed to the machine at its
     /// edge. Set and used within one step.
     operand: Option<crate::machine::Operand>,
+    /// The fetched word a return D dispatched in this microcycle arms for
+    /// M 31 (revision 15, [`Micro::d_word`]), handed to the machine at its
+    /// edge as the operand address is. Set and used within one step.
+    d_m31: Option<Word>,
     /// Revision 14's LC adder's `<33:32>` for this microcycle's ALU word,
     /// when it is an arithmetic function through the ALU or the left shift
     /// (A14.11), for a write of the location counter. Set and used within
@@ -240,6 +264,8 @@ impl Micro {
             oah: false,
             oa_low: 0,
             oa_high: 0,
+            oa_select_check: true,
+            oa_shadow: [false; 2],
             new_md: 0,
             new_md_delay: 0,
             aaddr: 0,
@@ -283,6 +309,7 @@ impl Micro {
             spc_popped: false,
             macro_write: None,
             operand: None,
+            d_m31: None,
             lc_adder: None,
         }
     }
@@ -298,6 +325,13 @@ impl Micro {
     /// board and retires nothing, so it is not an executed instruction.
     pub fn executed(&self) -> Option<u16> {
         self.executed
+    }
+
+    /// The OA registers' words, OA-REG-LOW in `IR<25:0>`'s positions and
+    /// OA-REG-HIGH in `IR<47:26>`'s less 26: revision 15's (A15b.15), and
+    /// IMOD's on every other machine.
+    pub fn oa_registers(&self) -> (u64, u64) {
+        (self.oa_low, self.oa_high)
     }
 
     /// The master clock edge, as far as this engine has one: the run and
@@ -336,6 +370,8 @@ impl Micro {
             // Revision 14's TLB is swept, at once here, and its memory
             // system's words cleared (A14.4, A14.9).
             self.m.reset_memory_system(self.m.ns);
+            // Revision 15's OA registers are cleared (A15b.15).
+            self.reset_oa_registers();
         }
         if boot {
             self.m.vmaok = false;
@@ -587,6 +623,54 @@ impl Micro {
         }
     }
 
+    /// **Revision 15's OA selects** (A15b.15): the word `word` as it
+    /// executes, its `IR<47:0>` with OA-REG-LOW ORed into the fields its
+    /// select SL, `IR<60>`, names and OA-REG-HIGH into those of SH,
+    /// `IR<61>`. A register bit that is in neither the word nor those fields
+    /// halts at OA-OUTSIDE-FIELDS before the word does anything. Under
+    /// [`Micro::oa_select_check`] the shadow is held to the selects first.
+    /// The shadow is spent here: the word is the one IMOD would have
+    /// modified.
+    fn oa_selected(&mut self, word: Insn) -> Result<Insn, Halt> {
+        let selects = [word.oa_low_select(), word.oa_high_select()];
+        let shadow = std::mem::take(&mut self.oa_shadow);
+        if self.oa_select_check {
+            for (high, (&select, &written)) in selects.iter().zip(&shadow).enumerate() {
+                let (pc, high) = (self.p0_pc, high == 1);
+                if select && !written {
+                    return Err(Halt::OaSelectWithoutWrite { pc, high });
+                }
+                if written && !select {
+                    return Err(Halt::OaWriteWithoutSelect { pc, high });
+                }
+            }
+        }
+        let mut ir = word.low_48().raw();
+        let fields = oa_fields(ir);
+        for (select, (bits, fields)) in
+            selects.into_iter().zip([(self.oa_low, fields[0]), (self.oa_high << 26, fields[1])])
+        {
+            if !select {
+                continue;
+            }
+            let outside = bits & !ir & !fields;
+            if outside != 0 {
+                return Err(Halt::OaOutsideFields { pc: self.p0_pc, bits: outside });
+            }
+            ir |= bits;
+        }
+        Ok(Insn::new(ir))
+    }
+
+    /// `-RESET` clears revision 15's OA registers (A15b.15), and the shadow
+    /// with them. The CADR's and revisions 13 and 14's IMOD registers keep
+    /// their words; their pending flags are the boot's to drop.
+    fn reset_oa_registers(&mut self) {
+        if self.m.geometry.extended() {
+            (self.oa_low, self.oa_high, self.oa_shadow) = (0, 0, [false; 2]);
+        }
+    }
+
     /// **Revision 15's PDL address field** (A15b.2): the index the field
     /// `(base, displacement)` forms, (B + D) AND 37777, B as the word finds
     /// it --- `M-AP` and `A-LOCALP` from the machine's copies of them
@@ -618,9 +702,13 @@ impl Micro {
     /// `IR<24>`). The counter steps a microcycle later, so the halfword is
     /// chosen by it as stepped.
     fn main_loop_return(&mut self, word: u32, advance: bool) -> u32 {
+        // Revision 15's D: a return that needs a fetch fuses on the fetched
+        // word, where D's enable lets it and the word comes with condition
+        // 6 false (A15b.9).
+        let fetched = if self.needfetch() { self.d_word() } else { None };
         let target = self.pop_asks_for_a_fetch(word);
         if !self.m.geometry.macro_dispatch
-            || self.needfetch()
+            || (self.needfetch() && fetched.is_none())
             || advance
             || self.next_instrd
             || self.pushed
@@ -635,11 +723,8 @@ impl Micro {
         let wide = self.m.geometry.wide();
         let index_rotate = crate::machine::macro_dispatch::index_rotate(wide);
         let rotate = self.lc_rotation(stepped, index_rotate);
-        let rotated = if wide {
-            rol40(self.m.mmem[0o31], rotate)
-        } else {
-            rol(self.m.mmem[0o31] as u32, rotate).into()
-        };
+        let m31 = fetched.unwrap_or(self.m.mmem[0o31]);
+        let rotated = if wide { rol40(m31, rotate) } else { rol(m31 as u32, rotate).into() };
         match self.m.macro_dispatch.fused_return(word, rotated, index_rotate) {
             Some(f) => {
                 if f.keep {
@@ -647,10 +732,39 @@ impl Micro {
                 }
                 self.m.macro_dispatch.fused += 1;
                 self.operand = f.operand;
+                self.d_m31 = fetched;
                 f.handler as u32
             }
             None => target,
         }
+    }
+
+    /// **D, revision 15's dispatch from the fetched word** (contract G3
+    /// revision 15, A15b.9; its first contract's A15.2): for a return that
+    /// needs a fetch, the word the stream's fetch will read, `LC<33:2>`, if
+    /// D may dispatch on it: the MACRO-DISPATCH register's `<31>` and
+    /// `<30>` set, condition 6 false --- no page fault, the fetch's own
+    /// included, no interrupt and no sequence break --- and the word in
+    /// main memory. Otherwise `None`, and the return goes to the main loop,
+    /// `QMLP`, as today; so does one whose entry has R or P. This engine has
+    /// no fetch timing, so the word is had at the return, with no wait; the
+    /// stream's fetch still steps the counter and reads the word into `MD`
+    /// a microcycle later, as ever.
+    fn d_word(&self) -> Option<Word> {
+        use crate::machine::macro_dispatch::{D_ENABLE, ENABLE};
+        let register = self.m.macro_dispatch.register;
+        if !self.m.geometry.extended() || register & (ENABLE | D_ENABLE) != ENABLE | D_ENABLE {
+            return None;
+        }
+        let int_enabled = self.m.interrupt_control & (1 << 27) != 0;
+        let sequence_break = self.m.interrupt_control & (1 << 26) != 0;
+        if !self.m.vmaok || (int_enabled && self.m.interrupt()) || sequence_break {
+            return None;
+        }
+        let at = ((self.m.lc & self.m.geometry.lc_counter()) >> 2) as u32;
+        let t = self.m.translate(at);
+        let main = t.physical & crate::tlb::DEVICE == 0;
+        (t.access_permitted && main).then(|| self.m.main.get(t.physical as usize).copied())?
     }
 
     /// A pop by a jump with R, fused as [`Micro::main_loop_return`] says
@@ -718,6 +832,17 @@ impl Micro {
             self.m.pdl_index = adr as u16 & self.m.geometry.pdl_mask();
         }
         self.m.macro_dispatch.operand = self.operand.take();
+        // M 31 takes the word D dispatched on at the end of the microcycle
+        // after the return, as the operand address is loaded: that
+        // microcycle reads the old word, the handler the new one (A15b.9,
+        // as `rtl`'s fused return on its prefetched word).
+        if let Some(w) = self.m.macro_dispatch.m31.take() {
+            self.m.mmem[0o31] = w;
+            self.m.amem[0o31] = w;
+            self.m.macro_dispatch.a_written(0o31, w);
+            self.m.macro_dispatch.m_written(0o31, w);
+        }
+        self.m.macro_dispatch.m31 = self.d_m31.take();
         if let Some((physical, WriteOut::Started)) = self.write_out {
             if self.next_microcycle_holds_the_write() {
                 self.write_out = Some((physical, WriteOut::Next));
@@ -1143,13 +1268,18 @@ impl Micro {
             0o15 => self.push_spc(data),
             // IMOD<25:0> and IMOD<47:26>: the OA register merge into the
             // next instruction.
+            // Revision 15's are OA-REG-LOW and OA-REG-HIGH, loaded at the
+            // end of the word, which nothing ORs into a word but a select
+            // (A15b.15).
             0o16 => {
                 self.oa_low = data as u64 & 0o377777777;
-                self.oal = true;
+                self.oal = !self.m.geometry.extended();
+                self.oa_shadow[0] = true;
             }
             0o17 => {
                 self.oa_high = data as u64 & 0o37777777;
-                self.oah = true;
+                self.oah = !self.m.geometry.extended();
+                self.oa_shadow[1] = true;
             }
             // VMA, and the three that start a cycle with it
             0o20 => self.m.vma = word,
@@ -1472,6 +1602,32 @@ enum WriteOut {
     Next = 1,
     /// Out at the end of this microcycle.
     Due = 2,
+}
+
+/// **The fields revision 15's OA selects reach** (A15b.15) in the word
+/// `ir`, by its class, as `IR` masks: OA-REG-LOW's through SL, then
+/// OA-REG-HIGH's through SH.
+///
+/// | Select | Class | Fields |
+/// |---|---|---|
+/// | SL | ALU | the A destination `<23:14>` if `IR<25>` is 1, the M destination `<18:14>` if 0; the ALU function `<6:3>` |
+/// | SL | BYTE | the destination as ALU's; the rotate `<5:0>`, the length − 1 `<11:6>` |
+/// | SL | JUMP | the address `<25:12>`: the target, or `WRITE-I-MEM`'s address |
+/// | SL | DISPATCH, a dispatch-memory write only | the address `<23:12>` |
+/// | SH | ALU, BYTE, JUMP | the A source `<41:32>`; the M source `<30:26>` when it is M memory, `IR<31>` 0 |
+///
+/// Any other class, or a transferring dispatch, takes nothing.
+fn oa_fields(ir: u64) -> [u64; 2] {
+    let insn = Insn::new(ir);
+    let dest = if ir >> 25 & 1 != 0 { 0o1777 << 14 } else { 0o37 << 14 };
+    let source = 0o1777 << 32 | if ir >> 31 & 1 == 0 { 0o37 << 26 } else { 0 };
+    match insn.op() {
+        Op::Alu => [dest | 0o17 << 3, source],
+        Op::Byte => [dest | 0o7777, source],
+        Op::Jump => [0o37777 << 12, source],
+        Op::Dispatch if insn.misc() == 2 => [0o7777 << 12, 0],
+        Op::Dispatch => [0, 0],
+    }
 }
 
 /// [`Micro`]'s `pdl_write` address for a write by PDL-INDEX, resolved when
@@ -2043,6 +2199,7 @@ impl Engine for Micro {
         self.write_pdl = None;
         // Revision 14's TLB swept and its memory system's words cleared.
         self.m.reset_memory_system(self.m.ns);
+        self.reset_oa_registers();
     }
     fn save(&self, w: &mut crate::checkpoint::Writer) {
         let Micro {
@@ -2060,6 +2217,9 @@ impl Engine for Micro {
             oah,
             oa_low,
             oa_high,
+            // A run setting.
+            oa_select_check: _,
+            oa_shadow,
             new_md,
             new_md_delay,
             aaddr,
@@ -2108,6 +2268,7 @@ impl Engine for Micro {
             spc_popped: _,
             macro_write: _,
             operand: _,
+            d_m31: _,
             lc_adder: _,
         } = self;
         m.save(w);
@@ -2173,6 +2334,12 @@ impl Engine for Micro {
         if m.geometry.paged() {
             w.opt(*write_va, crate::checkpoint::Writer::u32);
             w.opt(*write_pdl, crate::checkpoint::Writer::u16);
+        }
+        // Revision 15's: the OA select check's shadow (A15b.13); the OA
+        // registers are above, where IMOD's are.
+        if m.geometry.extended() {
+            w.bool(oa_shadow[0]);
+            w.bool(oa_shadow[1]);
         }
     }
 
@@ -2242,6 +2409,9 @@ impl Engine for Micro {
         if self.m.geometry.paged() {
             self.write_va = r.opt(crate::checkpoint::Reader::u32)?;
             self.write_pdl = r.opt(crate::checkpoint::Reader::u16)?;
+        }
+        if self.m.geometry.extended() {
+            self.oa_shadow = [r.bool()?, r.bool()?];
         }
         Ok(())
     }
@@ -2333,6 +2503,7 @@ impl Engine for Micro {
             // first word (`tests/oa_boot.rs`).
             self.oal = false;
             self.oah = false;
+            self.oa_shadow = [false; 2];
             // Nopped, the instruction's misc field decodes to nothing.
             self.halted = false;
             self.land_writes();
@@ -2355,7 +2526,7 @@ impl Engine for Micro {
         let mut pdl_field = None;
         if self.m.geometry.extended() {
             let word = self.p0;
-            self.p0 = word.low_48();
+            self.p0 = self.oa_selected(word)?;
             if matches!(word.op(), Op::Alu | Op::Byte) {
                 pdl_field = word.pdl_field().map(|f| self.pdl_field_index(f));
             }
@@ -2414,6 +2585,10 @@ impl Engine for Micro {
         }
         if let Some((code, data)) = self.macro_write.take() {
             self.m.macro_dispatch.write(code, data);
+            // Revision 15 keeps D's enable, `<30>` (A15b.9).
+            if code == 5 && self.m.geometry.extended() {
+                self.m.macro_dispatch.register |= data & crate::machine::macro_dispatch::D_ENABLE;
+            }
         }
         // The PDL address field's index against the index written (A15b.2),
         // before the edge, whose operand-address load is a fused return's.

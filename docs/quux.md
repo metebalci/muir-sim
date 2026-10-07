@@ -1829,6 +1829,75 @@ mismatch halts the run at PDL-FIELD-MISMATCH, `Halt::PdlFieldMismatch`,
 the word committed (`a_wrong_pdl_field_halts_at_pdl_field_mismatch`). The
 control store and the PROM hold 64-bit words.
 
+**The OA registers replace IMOD** (A15b.15). Destinations 16 and 17 load
+OA-REG-LOW, 26 bits in `IR<25:0>`'s positions, and OA-REG-HIGH, 22 bits in
+`IR<47:26>`'s, at the end of the word, writing M as every functional
+destination does; each keeps its word until the next write, `-RESET`
+clears both, and no source reads them. Nothing ORs them into the next word,
+as IMOD does on the CADR and revisions 13 and 14: a word reads one only
+through its OA select, SL `IR<60>` for OA-REG-LOW and SH `IR<61>` for
+OA-REG-HIGH (`an_oa_write_leaves_a_word_without_a_select_alone`,
+`a_select_takes_a_value_written_three_words_before`,
+`reset_clears_the_oa_registers`). A select ORs its register into nine
+fields (`each_of_the_nine_fields_is_taken_through_its_select`):
+
+| Select | Class | Fields |
+|---|---|---|
+| SL | ALU | the A destination `<23:14>` if `IR<25>` is 1, the M destination `<18:14>` if 0; the ALU function `<6:3>` |
+| SL | BYTE | the destination as ALU's; the rotate `<5:0>`, the length − 1 `<11:6>` |
+| SL | JUMP | the address `<25:12>`: the target, or `WRITE-I-MEM`'s address |
+| SL | DISPATCH, a dispatch-memory write only | the address `<23:12>` |
+| SH | ALU, BYTE, JUMP | the A source `<41:32>`; the M source `<30:26>` when it is M memory, `IR<31>` 0 |
+
+A register bit that is set neither in the word nor in its class's fields
+halts the run before the word commits, at OA-OUTSIDE-FIELDS,
+`Halt::OaOutsideFields`, where the CADR would run a word outside its
+fields; a bit already in the word does not
+(`oa_outside_fields_fires_on_a_bit_outside_and_not_on_one_in_the_word`).
+
+**The OA select check** keeps on `micro` a shadow of IMOD's pending flags:
+a write of destination 16 or 17 sets its flag, the next microcycle spends
+it, and a nopped one drops it, as IMOD's is dropped. The run halts when a
+word selects a register the word executed before it did not write,
+`Halt::OaSelectWithoutWrite`, and when a word does not select a register
+the word before it wrote, `Halt::OaWriteWithoutSelect`. Counting executed
+words, it honours N: a write in the slot of a taken transfer with N is
+nopped and asks for no select, and a write in the slot of one not taken is
+followed by the fall-through (`the_shadow_check_halts_on_each_breach`). It
+sees computed targets as they run. It is on by default, `Micro`'s
+`oa_select_check`, and a checkpoint keeps the shadow, so that a halt or a
+resume between a write and its select runs on as the run would have
+(`a_halt_and_a_checkpoint_between_a_write_and_its_select_resume`).
+
+**D, the dispatch from the fetched word** (A15b.9). The MACRO-DISPATCH
+register keeps `<30>` on revision 15, D's enable, with `<31>`. A return
+that [the fused return](#the-fused-return) would fuse but for a needed
+fetch fuses on the fetched word when both are set, the word comes with
+condition 6 false --- no page fault, the fetch's own included, no interrupt
+and no sequence break --- and it is in main memory: the next PC is its
+halfword's entry's address, the popped word stays unless the entry's N is
+set, the operand address is armed as a fused return's, and M 31 takes the
+word at the end of the microcycle after the return, so that microcycle
+reads the old word and the handler the new one. The stream's step and
+fetch are as ever. Otherwise, and when the entry has R or P, the return
+goes to the main loop, `QMLP`, as today. `micro` has no fetch timing, so
+it has the word at the return and waits for nothing; the wait is a
+pipeline's. A15.2 says M 31 takes the word in the microcycle the dispatch
+is made in; A15b, which supersedes it, has `rtl` equal `micro` at every
+boundary, and `micro` loads it a microcycle after the return, as `rtl`'s
+fused return on its prefetched word does. With `<30>` clear revision 15
+runs as revision 14, microcycle
+for microcycle (`d_dispatches_a_return_that_needs_a_fetch`,
+`d_s_enable_clear_is_revision_14_microcycle_for_microcycle`,
+`condition_6_a_faulting_fetch_and_p_go_to_the_main_loop`,
+`m31_and_the_operand_address_after_d_are_a_fused_return_s`).
+
+**CMD_PROD** is taken once every write before it is answered (A15b.5).
+`micro` posts no writes: a write goes out by the end of the microcycle
+after its start, and a start right after it waits for it, so a command's
+entry written before the producer index is in main memory when the index
+is taken (`cmd_prod_is_taken_after_every_earlier_write`).
+
 **`WRITE-I-MEM`** writes `IWR<63:32>` from `A<31:0>` and `IWR<31:0>` from
 `M<31:0>`: a word with `<63:48>` set is written whole, and a tag left in
 `A<39:32>` reaches no bit of it, where revisions 13 and 14 take `A<15:0>`
@@ -1868,13 +1937,17 @@ revision-15 file is refused on revisions 13 and 14, and MIT's sections on
 revision 15, the refusal naming the format and the revision the file is
 for (`each_format_is_refused_on_the_other_s_revisions`); a revision-15
 file whose section 6 says another revision is refused as on revision 14.
-The symbol area's start is bounded only by the 32-bit physical space.
+The symbol area is refused when its start or extent passes the largest
+main memory, 64MW, and `Mcr::check_main_memory` holds it to a machine's own
+(`the_symbol_area_lies_in_main_memory`).
 
 **The checkpoint** of revision 15 is version 50, as revision 14's. It says
 its revision in the byte where revision 13 keeps its level-1 entry's width
 and revision 14 a 0: `0o217`, 15 with `<7>` set, a value no width takes.
-It keeps the control store's 64 bits and word 225 after revision 14's
-fields (`a_checkpoint_records_revision_15_and_keeps_64_bits`). `quux`
+It keeps the control store's 64 bits and the OA registers, in IMOD's
+registers' place, with no pending flag; after revision 14's fields, word
+225 and the check's shadow
+(`a_checkpoint_records_revision_15_and_keeps_64_bits`). `quux`
 refuses a checkpoint of revision 13 or 14 on revision 15 and the reverse,
 naming the revision that wrote it
 (`revision_15_and_the_others_refuse_each_other_s_checkpoints`).

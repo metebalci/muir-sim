@@ -6604,7 +6604,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         if geometry.revision() == Some(15) {
             writeln!(
                 s,
-                "machine: quux, revision 15: revision 14 with a 64-bit microinstruction, MIT's 48 bits and an extension, and its own .mcr; on micro alone"
+                "machine: quux, revision 15: revision 14 with a 64-bit microinstruction, MIT's 48 bits and an extension, the OA registers read through a word's OA select in place of IMOD, and its own .mcr; on micro alone"
             )
             .unwrap();
         }

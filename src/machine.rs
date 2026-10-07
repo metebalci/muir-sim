@@ -290,9 +290,10 @@ impl Geometry {
 
     /// **QUUX's, revision 15** (contract G3 revision 15, appendix A15b), on
     /// `micro`: revision 14's machine with a 64-bit microinstruction, MIT's
-    /// 48 bits and an extension (A15b.2); its own `.mcr` (A15b.7); feature
-    /// word 25 and register-page word 225 (A15b.1). All of it keyed on
-    /// [`Geometry::extended`]. `rtl` does not run it.
+    /// 48 bits and an extension (A15b.2); the OA registers read only through
+    /// a word's OA select, in place of IMOD (A15b.15); its own `.mcr`
+    /// (A15b.7); feature word 25 and register-page word 225 (A15b.1). All of
+    /// it keyed on [`Geometry::extended`]. `rtl` does not run it.
     pub const QUUX_15: Geometry =
         Geometry { machine_id: Some((0x5155 << 16) | (15 << 4) | 4), ..Geometry::QUUX_14 };
 
@@ -302,8 +303,8 @@ impl Geometry {
         self.revision().is_some_and(|r| r >= 14)
     }
 
-    /// Whether the microinstruction is 64 bits, revision 15's
-    /// ([`Geometry::QUUX_15`]).
+    /// Whether the microinstruction is 64 bits with the OA selects in place
+    /// of IMOD, revision 15's ([`Geometry::QUUX_15`]).
     pub fn extended(self) -> bool {
         self.revision().is_some_and(|r| r >= 15)
     }
@@ -543,6 +544,11 @@ impl Geometry {
 pub mod macro_dispatch {
     /// `<31>` of the register, the enable.
     pub const ENABLE: u32 = 1 << 31;
+    /// `<30>` of the register on revision 15, D's enable, with `<31>`
+    /// (contract G3 revision 15, A15b.9): a return that would fuse but for
+    /// a needed fetch dispatches on the fetched word. Below revision 15 the
+    /// bit is reserved and not kept.
+    pub const D_ENABLE: u32 = 1 << 30;
     /// The register's bits kept: `<31>` and `<28:0>`.
     pub const REGISTER_BITS: u32 = ENABLE | 0o3777777777;
     /// The MACRO DISPATCH MEMORY's entries.
@@ -661,10 +667,10 @@ pub struct MacroDispatch {
     /// The operand address armed by a fused return, loaded into PDL-INDEX
     /// at the end of the next microcycle.
     pub operand: Option<Operand>,
-    /// The prefetched word a fused return on the fetch path arms for M 31,
-    /// a register beside M memory (`crate::memory_port`, `rtl` alone),
-    /// loaded into it at the end of the next microcycle. Kept in a
-    /// checkpoint.
+    /// The word a fused return on the fetch path arms for M 31, a register
+    /// beside M memory: `rtl`'s prefetched word (`crate::memory_port`), or
+    /// the word revision 15's D dispatched on, on `micro`; loaded into it at
+    /// the end of the next microcycle. Kept in a checkpoint.
     pub m31: Option<Word>,
     /// How many returns have been fused: a count for the profile and the
     /// tests, not kept in a checkpoint.
@@ -1099,6 +1105,21 @@ pub enum Halt {
     /// 37777 of its base as the word found it, is not the index it wrote,
     /// `written`. Only a wrong assembly makes one; the word has committed.
     PdlFieldMismatch { pc: u16, formed: u16, written: u16 },
+    /// **OA-OUTSIDE-FIELDS** (revision 15, A15b.15): the word at `pc`
+    /// selects an OA register with `bits` set, in the word's `IR`
+    /// positions, that are neither in the word nor in the fields its class
+    /// takes from that register: where the CADR would run a word outside its
+    /// fields, revision 15 stops before the word commits.
+    OaOutsideFields { pc: u16, bits: u64 },
+    /// **The OA select check's shadow** (revision 15, A15b.15), under
+    /// `Micro::oa_select_check`: the word at `pc` selects OA-REG-HIGH
+    /// (`high`) or OA-REG-LOW, and the word executed before it did not
+    /// write that register, so IMOD would not have modified it.
+    OaSelectWithoutWrite { pc: u16, high: bool },
+    /// The same check: the word executed before the one at `pc` wrote
+    /// OA-REG-HIGH (`high`) or OA-REG-LOW, and the word at `pc` does not
+    /// select it, where IMOD would have modified it.
+    OaWriteWithoutSelect { pc: u16, high: bool },
 }
 
 /// The location counter itself, `LC<25:0>`: the 74S169 counters on page LC

@@ -56,7 +56,9 @@
 //! 1,024-byte blocks. The types, in this order, 6 first and 4 last:
 //! 6 the hardware revision, 1 the control store at 64 bits, 2 the dispatch
 //! memory at 18, 3 the microcode symbol area at 40, 4 A memory at 40.
-//! [`parse_15`] reads it and refuses everything A15b.7 lists.
+//! [`parse_15`] reads it and refuses everything A15b.7 lists, and a symbol
+//! area past the largest main memory; [`Mcr::check_main_memory`] holds the
+//! area to one machine's.
 
 use crate::isa::Insn;
 
@@ -228,7 +230,10 @@ pub fn parse_15(bytes: &[u8], holds: Holds) -> Result<Mcr, String> {
             )),
             (1, Holds::Prom) => past(prom + crate::machine::PROM_WORDS as u64, "the PROM"),
             (2, _) => past(crate::machine::DMEM_WORDS as u64, "the dispatch memory"),
-            (3, _) => past(1 << 32, "the physical space"),
+            // The symbol area lies in main memory: no QUUX has more than
+            // [`crate::machine::MAX_MAIN_WORDS_13`];
+            // [`Mcr::check_main_memory`] holds it to one machine's.
+            (3, _) => past(crate::machine::MAX_MAIN_WORDS_13 as u64, "main memory"),
             (4, _) => past(1024, "A memory"),
             _ => None,
         };
@@ -345,6 +350,21 @@ impl Mcr {
             (None, Some(ours)) if ours >= 14 && microcode => Err(format!(
                 "no section 6 first: microcode for revision 13 or below, \
                  and revision {ours} loads microcode whose section 6 says {ours}"
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl Mcr {
+    /// Whether revision 15's symbol area (A15b.7) lies in a main memory of
+    /// `words`: its start and its extent below the end. The PROM copies it
+    /// there word by word, so an area past the end has nowhere to go.
+    pub fn check_main_memory(&self, words: usize) -> Result<(), String> {
+        match &self.symbol_area {
+            Some((start, items)) if *start as usize + items.len() > words => Err(format!(
+                "the symbol area runs from {start:o} for {:o} words, past main memory's {words:o}",
+                items.len()
             )),
             _ => Ok(()),
         }

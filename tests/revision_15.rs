@@ -17,8 +17,9 @@ use muir::engine::Engine;
 use muir::isa::Insn;
 use muir::isa::asm::{
     ALU, ALWAYS, DISPATCH, JUMP, LDB, MD, N, P, POPJ, R, SETA, SETM, SRC_MD, START_READ,
-    START_WRITE, a_src, filler, m_dest, m_src, pdl_field, predicted, src, target,
+    START_WRITE, a_dest, a_src, filler, m_dest, m_src, pdl_field, predicted, src, target,
 };
+use muir::isa::asm::{CARRY_IN, DMEM_WRITE, M_PLUS_C, OA_HIGH_SELECT as SH, OA_LOW_SELECT as SL};
 use muir::machine::{Geometry, Halt, Machine, Word};
 use muir::mcr::{self, Holds};
 use muir::micro::Micro;
@@ -766,4 +767,669 @@ fn revision_15_and_the_others_refuse_each_other_s_checkpoints() {
     }
     let out = start("15", false).args(["--stop-after", "10", "--resume"]).arg(chk("15")).run();
     assert!(out.status.success(), "15 resumes 15: {}", text(&out));
+}
+
+// --- the OA registers and selects (A15b.15) -----------------------------------------
+
+/// Destinations 16 and 17: OA-REG-LOW and OA-REG-HIGH, writing M 36 too.
+const OA_LOW: u64 = fd(0o16);
+const OA_HIGH: u64 = fd(0o17);
+
+impl Prog {
+    /// OA-REG-LOW (`high` false) or OA-REG-HIGH <- `v`.
+    fn oa(&mut self, high: bool, v: Word) -> &mut Self {
+        let a = self.k(v);
+        self.op(ALU | SETA | a_src(a) | if high { OA_HIGH } else { OA_LOW })
+    }
+}
+
+/// Runs `p` on `geometry` with the OA select check `check`: the machine,
+/// and the halt if it stopped at one.
+fn run_checked(p: &Prog, geometry: Geometry, check: bool) -> (Micro, Option<Halt>) {
+    let mut u = Micro::new(machine(p, geometry, &|_| {}));
+    u.oa_select_check = check;
+    u.boot();
+    for _ in 0..20_000 {
+        if u.machine().opc == STOP as u16 {
+            let (_, halt) = u.run(16);
+            return (u, halt);
+        }
+        if let Err(h) = u.step() {
+            return (u, Some(h));
+        }
+    }
+    panic!("the program never reached its stop");
+}
+
+/// **An OA write followed by a word without a select runs that word
+/// unmodified** (A15b.15): on revision 15 OA-REG-LOW's `<18:14>` leaves the
+/// next word's M destination alone, where revision 14's IMOD ORs it in and
+/// writes M 25 for M 20. The shadow check is off: the pair is the breach it
+/// halts on (`the_shadow_check_halts_on_each_breach`). **Fails** a revision
+/// 15 that keeps IMOD.
+#[test]
+fn an_oa_write_leaves_a_word_without_a_select_alone() {
+    let mut p = Prog::default();
+    p.oa(false, 0o5 << 14);
+    p.op(ALU | SETA | a_src(ONE) | m_dest(0o20));
+    p.stop();
+    let (u, halt) = run_checked(&p, REV15, false);
+    assert_eq!(halt, None);
+    expect(u.machine(), &[(0o20, 1, "revision 15: M 20"), (0o25, 0, "revision 15: not M 25")]);
+    let (u, halt) = run_checked(&p, Geometry::QUUX_14, false);
+    assert_eq!(halt, None);
+    expect(u.machine(), &[(0o20, 0, "revision 14: not M 20"), (0o25, 1, "revision 14: M 25")]);
+}
+
+/// **Each of the nine fields is taken through its select** (A15b.15), each
+/// word right after its register's write, with the shadow check on: SL into
+/// an ALU word's A destination and M destination, its ALU function, a BYTE
+/// word's rotate and length, a JUMP's target and `WRITE-I-MEM`'s address,
+/// a dispatch-memory write's address; SH into the A source and the M
+/// source. Each result is the one the ORed field gives and the word alone
+/// does not. **Fails** an OR left out of any one field, and a check that
+/// halts on a right pair.
+#[test]
+fn each_of_the_nine_fields_is_taken_through_its_select() {
+    let mut p = Prog::default();
+    let (v777, vab, vff, vword, ventry) = (p.k(0o777), 0o30, 0o31, p.k(0o1234_5670), p.k(0o12345));
+    p.mmem.push((vab, 0xab00));
+    p.mmem.push((vff, 0xff));
+    p.amem.push((0o307, 0o7654));
+    // A destination: A 200 | 43, a bit above the M destination's.
+    p.oa(false, 0o43 << 14).op(ALU | SETA | a_src(ONE) | a_dest(0o200) | SL);
+    // M destination: M 10 | 5.
+    p.oa(false, 0o5 << 14).op(ALU | SETA | a_src(ONE) | m_dest(0o10) | SL);
+    // The ALU function: SETZ | 5, SETA.
+    p.oa(false, 0o5 << 3).op(ALU | a_src(v777) | m_dest(0o21) | SL);
+    // The rotate: an LDB of <15:8>, rotate 32.
+    p.oa(false, 0o40).op(byte(LDB, 0, 8) | m_src(vab) | m_dest(0o22) | SL);
+    // The length - 1: 0 | 7.
+    p.oa(false, 0o7 << 6).op(byte(LDB, 0, 1) | m_src(vff) | m_dest(0o23) | SL);
+    // The A source: A 0 | 307.
+    p.oa(true, 0o307 << 6).op(ALU | SETA | a_src(0) | m_dest(0o24) | SH);
+    // The M source: M 0 | 30.
+    p.oa(true, vab).op(ALU | SETM | m_src(0) | m_dest(0o25) | SH);
+    // A dispatch-memory write at 0 | 123.
+    p.oa(false, 0o123 << 12).op(disp(0) | DMEM_WRITE | a_src(ventry) | SL);
+    // WRITE-I-MEM at 0 | 650: A 0, M 0's word.
+    p.op(ALU | SETA | a_src(vword) | m_dest(0));
+    p.oa(false, 0o650 << 12).op(JUMP | P | R | ALWAYS | target(0) | a_src(ZERO) | m_src(0) | SL);
+    p.fill(2);
+    // The target: 0 | 700, which marks M 26.
+    p.oa(false, 0o700 << 12).op(JUMP | ALWAYS | target(0) | N | SL);
+    p.fill(1);
+    p.stop();
+    while p.at() < 0o700 {
+        p.fill(1);
+    }
+    p.set(1, 0o26);
+    p.stop();
+    let (u, halt) = run_checked(&p, REV15, true);
+    assert_eq!(halt, None, "a right pair halted");
+    let m = u.machine();
+    assert_eq!(m.amem[0o243], 1, "the A destination");
+    expect(
+        m,
+        &[
+            (0o10, 0, "not M 10"),
+            (0o15, 1, "the M destination"),
+            (0o21, 0o777, "the ALU function"),
+            (0o22, 0xab, "the rotate"),
+            (0o23, 0xff, "the length"),
+            (0o24, 0o7654, "the A source"),
+            (0o25, 0xab00, "the M source"),
+            (0o26, 1, "the jump's target"),
+        ],
+    );
+    assert_eq!(m.dmem[0o123], 0o12345, "the dispatch-memory write's address");
+    assert_eq!(m.imem[0o650].raw(), 0o1234_5670, "WRITE-I-MEM's address");
+}
+
+/// **A select takes a value written three words before** (A15b.15): the
+/// registers keep their word until the next write. The shadow check is off,
+/// since IMOD would have dropped the value. **Fails** a register valid for
+/// one word, or cleared by its reader.
+#[test]
+fn a_select_takes_a_value_written_three_words_before() {
+    let mut p = Prog::default();
+    p.oa(false, 0o5 << 14).fill(2);
+    p.op(ALU | SETA | a_src(ONE) | m_dest(0o10) | SL);
+    p.op(ALU | SETA | a_src(ONE) | m_dest(0o20) | SL);
+    p.stop();
+    let (u, halt) = run_checked(&p, REV15, false);
+    assert_eq!(halt, None);
+    expect(u.machine(), &[(0o15, 1, "three words on"), (0o25, 1, "and again")]);
+}
+
+/// **OA-OUTSIDE-FIELDS** (A15b.15): a register bit that is in neither the
+/// word nor its class's fields halts before the word commits --- OA-REG-LOW
+/// `<13>`, the output bus select, into an ALU word; OA-REG-HIGH's `<5>`,
+/// `IR<31>`, which would make an M-memory source functional; OA-REG-HIGH's
+/// M-source bits into a word reading a functional source. The controls: a
+/// bit already set in the word, `<12>` of every ALU word, does not fire,
+/// and the same M-source bits into an M-memory source are taken. **Fails**
+/// a halt left out, and one that does not count the word's own bits.
+#[test]
+fn oa_outside_fields_fires_on_a_bit_outside_and_not_on_one_in_the_word() {
+    let pair = |high: bool, v: Word, word: u64| {
+        let mut p = Prog::default();
+        p.oa(high, v);
+        let at = p.at() as u16;
+        p.op(word);
+        p.stop();
+        (at, run_checked(&p, REV15, true))
+    };
+    let (at, (u, halt)) = pair(false, 1 << 13, ALU | SETA | a_src(ONE) | m_dest(0o10) | SL);
+    assert_eq!(halt, Some(Halt::OaOutsideFields { pc: at, bits: 1 << 13 }));
+    assert_eq!(u.machine().mmem[0o10], 0, "the word did not commit");
+    let (_, (u, halt)) = pair(false, 1 << 12, ALU | SETA | a_src(ONE) | m_dest(0o10) | SL);
+    assert_eq!(halt, None, "a bit in the word");
+    expect(u.machine(), &[(0o10, 1, "the word ran as written")]);
+    let (at, (_, halt)) = pair(true, 1 << 5, ALU | SETM | m_src(0) | m_dest(0o10) | SH);
+    assert_eq!(halt, Some(Halt::OaOutsideFields { pc: at, bits: 1 << 31 }));
+    let functional = ALU | SETM | src(0o7) | m_dest(0o10) | SH;
+    let (at, (_, halt)) = pair(true, 0o10, functional);
+    assert_eq!(halt, Some(Halt::OaOutsideFields { pc: at, bits: 0o10 << 26 }));
+    let (_, (_, halt)) = pair(true, 0o10, ALU | SETM | m_src(0o20) | m_dest(0o10) | SH);
+    assert_eq!(halt, None, "into an M-memory source");
+}
+
+/// **`-RESET` clears both registers** on revision 15 (A15b.15); on revision
+/// 14 the boot drops IMOD's pending flags and leaves the registers (the
+/// control). **Fails** a reset that leaves revision 15's registers.
+#[test]
+fn reset_clears_the_oa_registers() {
+    let mut p = Prog::default();
+    p.oa(false, 0o5 << 14).op(ALU | SETA | a_src(ONE) | m_dest(0o10) | SL);
+    p.oa(true, 0o7).op(ALU | SETM | m_src(0o20) | m_dest(0o11) | SH);
+    p.stop();
+    for (g, kept) in [(REV15, false), (Geometry::QUUX_14, true)] {
+        let (mut u, halt) = run_checked(&p, g, g == REV15);
+        assert_eq!(halt, None);
+        assert_eq!(u.oa_registers(), (0o5 << 14, 0o7), "{g:?}: loaded");
+        u.boot();
+        let want = if kept { (0o5 << 14, 0o7) } else { (0, 0) };
+        assert_eq!(u.oa_registers(), want, "{g:?}: after the boot's -RESET");
+    }
+}
+
+/// **A halt and a checkpoint taken between a writer and its consuming word
+/// resume to the same end** (A15b.13, A15b.15): the register is kept, and
+/// so is the check's shadow, which a resume reads back. **Fails** a
+/// checkpoint without the registers, and one that drops the shadow (the
+/// consuming word then halts at the check).
+#[test]
+fn a_halt_and_a_checkpoint_between_a_write_and_its_select_resume() {
+    let mut p = Prog::default();
+    p.fill(2);
+    let writer = p.at() as u16;
+    p.oa(false, 0o5 << 14).op(ALU | SETA | a_src(ONE) | m_dest(0o10) | SL);
+    p.stop();
+    let (whole, halt) = run_checked(&p, REV15, true);
+    assert_eq!(halt, None);
+    let to_writer = || {
+        let mut u = Micro::new(machine(&p, REV15, &|_| {}));
+        u.boot();
+        while u.executed() != Some(writer) {
+            u.step().unwrap();
+        }
+        u
+    };
+    let finish = |u: &mut Micro| {
+        for _ in 0..1000 {
+            if u.machine().opc == STOP as u16 {
+                return u.run(16).1;
+            }
+            if let Err(h) = u.step() {
+                return Some(h);
+            }
+        }
+        panic!("never stopped");
+    };
+    let mut halted = to_writer();
+    halted.machine_mut().clock_control.run = false;
+    halted.run(5);
+    halted.machine_mut().clock_control.run = true;
+    assert_eq!(finish(&mut halted), None, "after a halt");
+    expect(halted.machine(), &[(0o15, 1, "after a halt")]);
+    let saved = to_writer();
+    let mut wr = muir::checkpoint::Writer::new();
+    saved.save(&mut wr);
+    let body = wr.finish();
+    let mut resumed = Micro::new(machine(&p, REV15, &|_| {}));
+    resumed.load(&mut muir::checkpoint::Reader::for_word_bits(&body, 40)).unwrap();
+    assert_eq!(finish(&mut resumed), None, "after a resume");
+    assert_eq!(resumed.machine().mmem, whole.machine().mmem, "the same end");
+}
+
+/// **The shadow check halts on each breach, and honours N** (A15b.15): a
+/// select with no write before it, a select two words after its write, a
+/// write followed by a word without its select, a write of one register
+/// and a select of the other; the console's NOP11 on the word after a
+/// write, which drops the write as it drops IMOD's, so that a select on the
+/// word after that halts and a word without one runs; a write
+/// in the slot of a taken jump with N is nopped, so the jump's target needs
+/// no select and one there halts; a write in the slot of a conditional jump
+/// with N not taken is followed by the fall-through, and a write in the
+/// slot of a jump with N clear by its target, each with its select running
+/// clean. **Fails** a check that counts a nopped word, or one that ignores
+/// either breach.
+#[test]
+fn the_shadow_check_halts_on_each_breach() {
+    let check = |p: &Prog| run_checked(p, REV15, true).1;
+    let consumer = ALU | SETA | a_src(ONE) | m_dest(0o10);
+    // A select with no write before it.
+    let mut p = Prog::default();
+    p.fill(1);
+    let at = p.at() as u16;
+    p.op(consumer | SL).stop();
+    assert_eq!(check(&p), Some(Halt::OaSelectWithoutWrite { pc: at, high: false }));
+    // A select two words after its write: the word between breaks it.
+    let mut p = Prog::default();
+    p.oa(false, 0);
+    let at = p.at() as u16;
+    p.fill(1).op(consumer | SL).stop();
+    assert_eq!(check(&p), Some(Halt::OaWriteWithoutSelect { pc: at, high: false }));
+    // A write followed by a word without its select.
+    let mut p = Prog::default();
+    p.oa(true, 0);
+    let at = p.at() as u16;
+    p.op(consumer).stop();
+    assert_eq!(check(&p), Some(Halt::OaWriteWithoutSelect { pc: at, high: true }));
+    // One register written, the other selected.
+    let mut p = Prog::default();
+    p.oa(false, 0);
+    let at = p.at() as u16;
+    p.op(consumer | SH).stop();
+    assert_eq!(check(&p), Some(Halt::OaWriteWithoutSelect { pc: at, high: false }));
+    // A taken jump with N: its slot's write is nopped.
+    for (select, want) in [(0, None), (SL, Some(()))] {
+        let mut p = Prog::default();
+        let t = p.at() + 3;
+        p.op(JUMP | ALWAYS | target(t) | N);
+        p.oa(false, 0);
+        p.fill(1);
+        p.op(consumer | select).stop();
+        let got = check(&p);
+        assert_eq!(got.is_some(), want.is_some(), "a nopped write, select {select:o}: {got:?}");
+        if let Some(h) = got {
+            assert_eq!(h, Halt::OaSelectWithoutWrite { pc: t as u16, high: false });
+        }
+    }
+    // The console's NOP11 nops the word after a write, which drops IMOD's
+    // pending flag and the shadow with it: the next word runs unchecked,
+    // and a select there has no write before it.
+    for (select, clean) in [(0, true), (SL, false)] {
+        let mut p = Prog::default();
+        let writer = p.at() as u16;
+        p.oa(false, 0o5 << 14);
+        p.op(consumer | SL);
+        let at = p.at() as u16;
+        p.op(consumer | m_dest(0o20) | select).stop();
+        let mut u = Micro::new(machine(&p, REV15, &|_| {}));
+        u.boot();
+        while u.executed() != Some(writer) {
+            u.step().unwrap();
+        }
+        u.machine_mut().clock_control.nop11 = true;
+        u.step().unwrap();
+        u.machine_mut().clock_control.nop11 = false;
+        let got = (0..16).find_map(|_| u.step().err());
+        assert_eq!(got.is_none(), clean, "after a nopped word: {got:?}");
+        if !clean {
+            assert_eq!(got, Some(Halt::OaSelectWithoutWrite { pc: at, high: false }));
+        }
+    }
+    // A conditional jump with N, not taken: the write in its slot runs,
+    // followed by the fall-through.
+    for (select, clean) in [(SL, true), (0, false)] {
+        let mut p = Prog::default();
+        p.op(jcond(3) | m_src(M_ONE) | a_src(ZERO) | target(0o700) | N);
+        p.oa(false, 0o5 << 14);
+        let at = p.at() as u16;
+        p.op(consumer | select).stop();
+        let got = check(&p);
+        assert_eq!(got.is_none(), clean, "a write followed by the fall-through: {got:?}");
+        if !clean {
+            assert_eq!(got, Some(Halt::OaWriteWithoutSelect { pc: at, high: false }));
+        }
+    }
+    // A jump with N clear: the write in its slot, followed by the target.
+    for (select, clean) in [(SL, true), (0, false)] {
+        let mut p = Prog::default();
+        let t = p.at() + 4;
+        p.op(JUMP | ALWAYS | target(t));
+        p.oa(false, 0o5 << 14);
+        p.op(consumer | m_dest(0o20)).fill(1);
+        p.op(consumer | select).stop();
+        let got = check(&p);
+        assert_eq!(got.is_none(), clean, "a write followed by the target: {got:?}");
+        if !clean {
+            assert_eq!(got, Some(Halt::OaWriteWithoutSelect { pc: t as u16, high: false }));
+        }
+    }
+}
+
+// --- D, the dispatch from the fetched word (A15b.9) -----------------------------------
+
+/// The main loop, at an address with `<1:0>` clear, made as microcode
+/// 2001's `QMLP` is (`uc-macrocode.lisp:9-13`): the condition-6 call,
+/// `M-INST-BUFFER <- MD`, the dispatch on the halfword's `<13:9>` with the
+/// push of the main loop's return in its slot.
+const QMLP: u64 = 0o100;
+/// Condition 6's call: counts in M 10.
+const COND_6: u64 = 0o110;
+/// The opcode table in dispatch memory.
+const OPDTB: u64 = 0o2300;
+/// The main loop's return, `<14>` and its address.
+const MAIN: u32 = 1 << 14 | QMLP as u32;
+/// Opcode 1's handler, counting in M 1; opcode 6's, whose entry has P and
+/// N, counting in M 6; opcode 7's, a jump to itself; opcode 10's, which
+/// pushes M 31 and PDL-INDEX as its first two microinstructions find them.
+const OP_1: u64 = 0o204;
+const OP_6: u64 = 0o120;
+const OP_7: u64 = 0o177;
+const OP_10: u64 = 0o230;
+/// Where the register names `A-LOCALP` and `M-AP`, and what they hold.
+const LOCALP_AT: u64 = 0o432;
+const AP_AT: u64 = 0o21;
+const LOCALP: Word = 0o1000;
+/// PDL-INDEX at the start, where no operand address is loaded.
+const SENTINEL: u16 = 0o3777;
+/// The macroinstructions, in the physical memory window: word 400.
+const CODE: Word = 0o36000000400;
+/// A paged address with no page table, where a fetch faults: the walk
+/// finds no directory (A14.3), and the translation, no entry, is in main
+/// memory's frame 0 without access.
+const UNMAPPED: Word = 0o1000;
+
+/// A halfword: `<13:9>` the opcode, `<8:6>` the register, `<5:0>` delta.
+const fn hw(op: u32, reg: u32, delta: u32) -> u32 {
+    op << 9 | reg << 6 | delta
+}
+
+/// The main loop's machine, of `geometry`, running the halfwords
+/// `program` from `code`, with the MACRO-DISPATCH register `register` and
+/// INTERRUPT-CONTROL `<34>`, the sequence break, as `sequence_break`
+/// says. Opcode 10's entries have the operand bit. Condition 6's call
+/// returns, or with `fault_stops` jumps to opcode 7's stop.
+fn d_machine(
+    geometry: Geometry,
+    register: u32,
+    program: &[u32],
+    code: Word,
+    sequence_break: bool,
+    fault_stops: bool,
+) -> Machine {
+    let mut words = vec![filler().raw(); 1024];
+    let mut put = |at: u64, w: u64| words[at as usize] = w;
+    let fd = |c: u64| c << 19 | 0o37 << 14;
+    let inc = |m: u64| ALU | M_PLUS_C | CARRY_IN | m_src(m) | m_dest(m);
+    // A read of main memory first, which takes down the `-VMAOK` the boot
+    // leaves, so that condition 6 is false at the first return.
+    put(0, ALU | SETA | a_src(0o55) | START_READ);
+    put(1, ALU | SETA | a_src(0o51) | fd(5));
+    put(2, ALU | SETA | a_src(0o52) | fd(1));
+    put(3, ALU | SETA | a_src(0o53) | fd(2));
+    put(4, ALU | SETA | a_src(0o50) | fd(0o15));
+    put(5, ALU | SETA | a_src(LOCALP_AT) | a_dest(LOCALP_AT));
+    put(6, ALU | SETM | m_src(AP_AT) | m_dest(AP_AT) | POPJ);
+    put(QMLP, JUMP | target(COND_6) | P | 1 << 5 | 6);
+    put(QMLP + 1, ALU | SETM | SRC_MD | m_dest(0o31));
+    put(QMLP + 2, DISPATCH | m_src(0o31) | 3 << 10 | 31 | 5 << 5 | OPDTB << 12);
+    put(QMLP + 3, ALU | SETA | a_src(0o50) | fd(0o15));
+    if fault_stops {
+        put(COND_6, inc(0o10));
+        put(COND_6 + 1, JUMP | target(OP_7) | ALWAYS | N);
+    } else {
+        put(COND_6, inc(0o10) | POPJ);
+    }
+    put(OP_1, inc(1));
+    put(OP_1 + 1, filler().raw() | POPJ);
+    // The microcycle after its return pushes M 31 as it finds it.
+    put(OP_1 + 2, ALU | SETM | m_src(0o31) | fd(0o11));
+    put(OP_6, ALU | SETM | src(0o14) | m_dest(0o20));
+    put(OP_6 + 1, inc(6));
+    put(OP_6 + 2, ALU | SETA | a_src(0o50) | fd(0o15));
+    put(OP_6 + 4, filler().raw() | POPJ);
+    put(OP_7, JUMP | target(OP_7) | ALWAYS | N);
+    put(OP_10, ALU | SETM | m_src(0o31) | fd(0o11));
+    put(OP_10 + 1, ALU | SETM | src(3) | fd(0o11));
+    put(OP_10 + 2, ALU | SETA | a_src(0o54) | fd(0o13) | POPJ);
+    let mut m = Machine::new();
+    m.geometry = geometry;
+    m.load_prom(&words.iter().map(|&w| Insn::extended(w)).collect::<Vec<_>>());
+    support::prom_program_in_ram(&mut m);
+    for (op, at) in [(1, OP_1), (6, 1 << 15 | 1 << 14 | OP_6), (7, OP_7), (0o10, OP_10)] {
+        m.dmem[OPDTB as usize + op] = at as u32;
+    }
+    for (k, e) in m.macro_dispatch.entries.iter_mut().enumerate() {
+        *e = m.dmem[OPDTB as usize + (k >> 3 & 0o37)];
+        if k >> 3 & 0o37 == 0o10 {
+            *e |= muir::machine::macro_dispatch::OPERAND;
+        }
+    }
+    m.amem[0o50] = u64::from(MAIN);
+    m.amem[0o51] = u64::from(register);
+    m.amem[0o52] = code * 4;
+    m.amem[0o53] = if sequence_break { 1 << 34 } else { 0 };
+    m.amem[0o54] = u64::from(SENTINEL);
+    m.amem[0o55] = 0o36000000000;
+    m.amem[LOCALP_AT as usize] = LOCALP;
+    m.pdl_index = SENTINEL;
+    let base = (code & 0o1777777777) as usize;
+    for (k, pair) in program.chunks(2).enumerate().filter(|_| code == CODE) {
+        m.main[base + k] = u64::from(pair[0] | pair.get(1).copied().unwrap_or(0) << 16);
+    }
+    m
+}
+
+/// The register's word: the main loop at `QMLP`, the bases, enabled, and
+/// D's enable as `d` says.
+fn d_register(d: bool) -> u32 {
+    let d = if d { muir::machine::macro_dispatch::D_ENABLE } else { 0 };
+    muir::machine::macro_dispatch::word(QMLP as u16, LOCALP_AT as u16, AP_AT as u8) | d
+}
+
+/// Runs to opcode 7's stop: the machine, the addresses executed in order,
+/// and how many times the main loop's first word ran.
+fn d_run(m: Machine) -> (Machine, Vec<u16>, usize) {
+    let mut u = Micro::new(m);
+    u.boot();
+    let mut trace = Vec::new();
+    for _ in 0..20_000 {
+        if u.machine().opc == OP_7 as u16 {
+            u.run(8);
+            let qmlp = trace.iter().filter(|&&pc| pc == QMLP as u16).count();
+            return (u.machine().clone(), trace, qmlp);
+        }
+        u.step().unwrap();
+        trace.extend(u.executed());
+    }
+    panic!("the program never reached its stop");
+}
+
+/// Opcode 1 eleven times, then 7: five returns need a fetch, into each
+/// word's first halfword but the first.
+const ONES: [u32; 12] = [
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(1, 0, 0),
+    hw(7, 0, 0),
+];
+
+/// The state the two paths must agree on: M and A memory but M and A 37,
+/// where every functional destination here writes, and A 51, the
+/// register's word; the micro stack, the location counter, the PDL's
+/// registers and its first words, where opcode 1's microcycle after its
+/// return pushes M 31 as it finds it, `MD`.
+fn d_state(m: &Machine) -> impl PartialEq + std::fmt::Debug {
+    let (mut mmem, mut amem) = (m.mmem, m.amem);
+    (mmem[0o37], amem[0o37], amem[0o51]) = (0, 0, 0);
+    let pdl = m.pdl[..0o40].to_vec();
+    (mmem, amem.to_vec(), m.spc, m.spcptr, m.lc, m.pdl_pointer, m.pdl_index, m.md, pdl)
+}
+
+/// **D dispatches a return that needs a fetch** (A15b.9, A15.2's checks):
+/// with the register's `<31>` and `<30>` set, every return needing a fetch
+/// goes to its entry's handler, and the state at the end is the main
+/// loop's, M 31 the last word fetched and the old word in the microcycle
+/// after each return; the main loop runs not once. With
+/// `<30>` clear the main loop runs for each of them. **Fails** a revision 15
+/// without D, a D that leaves M 31 or the stack as the main loop would
+/// not, and one that loads M 31 a microcycle early.
+#[test]
+fn d_dispatches_a_return_that_needs_a_fetch() {
+    let run = |d: bool| d_run(d_machine(REV15, d_register(d), &ONES, CODE, false, false));
+    let (with, _, qmlp_with) = run(true);
+    let (without, _, qmlp_without) = run(false);
+    assert_eq!(qmlp_with, 0, "D: the main loop runs not once");
+    assert_eq!(qmlp_without, 6, "without D: the first return and the five");
+    expect(&with, &[(1, 11, "opcode 1 eleven times")]);
+    assert_eq!(with.mmem[0o31], with.main[0o405], "M 31: the last word fetched");
+    assert_eq!(d_state(&with), d_state(&without), "the main loop's state");
+}
+
+/// **D's enable clear is revision 14, microcycle for microcycle** (A15.2's
+/// checks): the same program executes the same addresses in the same order
+/// on revision 15 with `<30>` clear and on revision 14, which keeps no
+/// `<30>`, written or not. **Fails** a D that acts on `<31>` alone.
+#[test]
+fn d_s_enable_clear_is_revision_14_microcycle_for_microcycle() {
+    let (_, r15, _) = d_run(d_machine(REV15, d_register(false), &ONES, CODE, false, false));
+    let (_, r14, _) =
+        d_run(d_machine(Geometry::QUUX_14, d_register(true), &ONES, CODE, false, false));
+    assert_eq!(r15, r14);
+}
+
+/// **Condition 6 true, a fetch that faults, and an entry with P go to the
+/// main loop** (A15b.9, A15.2's checks): with a sequence break standing,
+/// the main loop runs for every return that needs a fetch and calls
+/// condition 6's handler; a fetch from an unmapped page, which faults,
+/// goes to the main loop, which takes the fault; and a halfword whose entry
+/// has P is the main loop's to dispatch, once, while the others' are D's.
+/// **Fails** a D that does not test condition 6, the fetch's fault, or the
+/// entry's P.
+#[test]
+fn condition_6_a_faulting_fetch_and_p_go_to_the_main_loop() {
+    let (m, _, qmlp) = d_run(d_machine(REV15, d_register(true), &ONES, CODE, true, false));
+    assert_eq!(qmlp, 6, "a sequence break: the main loop");
+    expect(&m, &[(0o10, 6, "condition 6's calls"), (1, 11, "opcode 1")]);
+    let (m, _, qmlp) = d_run(d_machine(REV15, d_register(true), &ONES, UNMAPPED, false, true));
+    assert_eq!(qmlp, 1, "a faulting fetch: the main loop");
+    expect(&m, &[(0o10, 1, "the fault taken"), (1, 0, "nothing dispatched")]);
+    let mut program = ONES;
+    program[4] = hw(6, 0, 0);
+    let (m, _, qmlp) = d_run(d_machine(REV15, d_register(true), &program, CODE, false, false));
+    assert_eq!(qmlp, 1, "an entry with P: the main loop, once");
+    expect(&m, &[(6, 1, "opcode 6"), (1, 10, "opcode 1")]);
+}
+
+/// **M 31 and the operand address after D's dispatch are a fused
+/// return's** (A15b.9, A15.2): opcode 10, whose entry has the operand bit,
+/// in a word's first halfword with LOCAL and delta 5: its handler's first
+/// microinstruction finds M 31 the fetched word, as the main loop leaves
+/// it, and PDL-INDEX `A-LOCALP` + 5, which the main loop's path, with no
+/// operand microcode here, leaves at the start's. **Fails** a D that does
+/// not arm M 31 or the operand address.
+#[test]
+fn m31_and_the_operand_address_after_d_are_a_fused_return_s() {
+    let program = [hw(1, 0, 0), hw(1, 0, 0), hw(0o10, 5, 5), hw(7, 0, 0)];
+    let run = |d: bool| d_run(d_machine(REV15, d_register(d), &program, CODE, false, false)).0;
+    let (with, without) = (run(true), run(false));
+    let word = with.main[0o401];
+    // After opcode 1's two pushes, from the microcycles after its returns.
+    assert_eq!(with.pdl[3..5], [word, LOCALP + 5], "D: M 31 and the operand address");
+    assert_eq!(without.pdl[3..5], [word, u64::from(SENTINEL)], "the main loop's");
+}
+
+// --- CMD_PROD (A15b.5) -----------------------------------------------------------------
+
+/// **CMD_PROD moves once every earlier write is answered** (A15b.5,
+/// amendment 6): a program writes a command entry's word 0 to main memory
+/// and the producer index, register-page word 164, in its next memory
+/// cycle; when the device takes the index, the word is in main memory, and
+/// the command it runs is the one written, its tag and opcode echoed.
+/// `micro` posts no writes: a write goes out by the end of the microcycle
+/// after its start, and a start right after it waits for it, so the rule
+/// holds here as it stands, and the check that discriminates, a command
+/// still queued when 164 is written, needs a queue that posts writes,
+/// which is `rtl`'s to model. **Fails** an engine that loses the word's
+/// write or lets the index's pass it.
+#[test]
+fn cmd_prod_is_taken_after_every_earlier_write() {
+    use muir::file_device::op;
+    const RING: u32 = 0o100000;
+    const RESP: u32 = 0o110000;
+    const TAG: u32 = 0o4321;
+    let page = muir::tlb::REGISTER_PAGE_BUS;
+    let mut p = Prog::default();
+    let entry = Word::from(TAG | op::READ << 16);
+    let (word, slot) = (p.k(entry), p.k(0o36000000000 | Word::from(RING)));
+    let (prod, cmd_prod) = (p.k(1), p.k(REGISTER_PAGE | 0o164));
+    // The word the write carries is `MD` of the microcycle after its start,
+    // so the index's `MD` waits a microcycle.
+    p.op(ALU | SETA | a_src(word) | MD);
+    p.op(ALU | SETA | a_src(slot) | START_WRITE);
+    p.fill(1);
+    p.op(ALU | SETA | a_src(prod) | MD);
+    p.op(ALU | SETA | a_src(cmd_prod) | START_WRITE);
+    p.fill(2).stop();
+    let mut u = Micro::new(machine(&p, REV15, &|_| {}));
+    u.boot();
+    let m = u.machine_mut();
+    for (k, v) in [(0o162, RING), (0o163, 2), (0o166, RESP), (0o167, 2), (0o160, 1)] {
+        m.bus_write(page | k, Word::from(v));
+    }
+    m.register_log = Some(Vec::new());
+    let mut seen = false;
+    for _ in 0..20_000 {
+        u.step().unwrap();
+        let m = u.machine();
+        let taken = m.register_log.as_ref().unwrap().iter().any(|&(at, _, _)| at == page | 0o164);
+        if taken && !seen {
+            seen = true;
+            assert_eq!(m.main[RING as usize], entry, "word 0 is in");
+        }
+        if m.file_device.response_producer() == 1 {
+            let r = m.main[RESP as usize] as u32;
+            assert_eq!((r & 0xffff, r >> 24 & 0xff), (TAG, op::READ), "the command run");
+            return;
+        }
+    }
+    panic!("no response (the index taken: {seen})");
+}
+
+/// **The symbol area lies in main memory** (A15b.7): a start or an extent
+/// past the largest main memory, 64MW, is refused by the reader, and one
+/// past a machine's own by `Mcr::check_main_memory`; the area that ends at
+/// the last word is taken (the controls). **Fails** a reader that bounds
+/// the area by the physical space alone.
+#[test]
+fn the_symbol_area_lies_in_main_memory() {
+    const MAX: u32 = muir::machine::MAX_MAIN_WORDS_13 as u32;
+    let with_area =
+        |start: u32, n: usize| planted(|s| s[3] = section(3, start, 40, 64, &vec![FIX | 1; n]));
+    for (start, n) in [(MAX, 1), (MAX - 1, 2), (0o37777777777, 1)] {
+        let e = mcr::parse_quux_microcode(&with_area(start, n), REV15).unwrap_err();
+        assert!(e.contains("past main memory's 400000000"), "{start:o}+{n}: {e}");
+    }
+    let m = mcr::parse_quux_microcode(&with_area(MAX - 2, 2), REV15).unwrap();
+    assert_eq!(m.check_main_memory(MAX as usize), Ok(()));
+    let small = 32 << 20;
+    assert_eq!(m.check_main_memory(small).map_err(|e| e.contains("past main memory's")), Err(true));
+    let m = mcr::parse_quux_microcode(&with_area(small as u32 - 1, 1), REV15).unwrap();
+    assert_eq!(m.check_main_memory(small), Ok(()), "the last word");
+    let m = mcr::parse_quux_microcode(&with_area(small as u32 - 1, 2), REV15).unwrap();
+    let e = m.check_main_memory(small).unwrap_err();
+    assert!(e.contains("past main memory's"), "an extent past the last word: {e}");
 }
