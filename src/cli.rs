@@ -2644,8 +2644,17 @@ fn machine(
 /// A file muir cannot read stops the run before it starts. It is the
 /// program the machine is about to execute, so there is nothing to fall
 /// back on: 512 zero words are not a boot PROM.
-fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry) -> Vec<Insn> {
+fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry, resuming: bool) -> Vec<Insn> {
     let Some(path) = file else {
+        // PROM 2001 is MIT's sections, which revision 15 does not read
+        // (A15b.1), and no PROM of revision 15's is built in; a resume
+        // takes the checkpoint's.
+        if geometry.extended() && resuming {
+            return vec![Insn::extended(0); crate::machine::PROM_WORDS];
+        }
+        if geometry.extended() {
+            usage("QUUX revision 15 has no built-in boot PROM: --prom <file>, a revision-15 .mcr");
+        }
         return if geometry == crate::machine::Geometry::CADR {
             crate::prom::boot_prom()
         } else {
@@ -2673,12 +2682,19 @@ fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry) -> Vec<Ins
 /// many words apart.
 fn prom_shown(file: Option<&Path>, prom: &[Insn], geometry: crate::machine::Geometry) -> String {
     let Some(path) = file else {
+        if geometry.extended() {
+            return "the checkpoint's".to_string();
+        }
         return if geometry == crate::machine::Geometry::CADR {
             "built in, System 100's own sys/ubin/promh.mcr, version 9".to_string()
         } else {
             "built in, QUUX's data/quux-promh.mcr, version 2001, at 36000".to_string()
         };
     };
+    // Revision 15's PROM has no built-in one to be measured against.
+    if geometry.extended() {
+        return format!("{}, a revision-15 .mcr", shown(path));
+    }
     let (theirs, whose) = if geometry == crate::machine::Geometry::CADR {
         (crate::prom::boot_prom(), "MIT's own")
     } else {
@@ -4333,9 +4349,9 @@ fn refuse_other_executable((path, c): &(PathBuf, Checkpoint), exe: &str) {
 }
 
 /// **Which revision `quux` runs** (contract G3 revision 14): `geometry`
-/// as it is, revision 13, unless `MUIR_QUUX_REVISION` says 14. Unset or
-/// `13` is revision 13, the released machine; any other value is refused
-/// at the start, naming the two. `cadr` does not read it. The switch is
+/// as it is, revision 13, unless `MUIR_QUUX_REVISION` says 14 or 15. Unset
+/// or `13` is revision 13, the released machine; any other value is refused
+/// at the start, naming the three. `cadr` does not read it. The switch is
 /// not a documented flag: a bitstream, which muir-fpga builds for one
 /// revision, could not carry it.
 fn quux_revision(geometry: crate::machine::Geometry) -> crate::machine::Geometry {
@@ -4347,9 +4363,10 @@ fn quux_revision(geometry: crate::machine::Geometry) -> crate::machine::Geometry
         None => geometry,
         Some(v) if v == "13" => geometry,
         Some(v) if v == "14" => Geometry::QUUX_14,
+        Some(v) if v == "15" => Geometry::QUUX_15,
         Some(v) => {
             eprintln!(
-                "{}: MUIR_QUUX_REVISION={:?}: revision 13 or 14",
+                "{}: MUIR_QUUX_REVISION={:?}: revision 13, 14 or 15",
                 executable(),
                 v.to_string_lossy()
             );
@@ -4372,7 +4389,7 @@ fn refuse_other_revision((path, c): &(PathBuf, Checkpoint), geometry: crate::mac
     };
     // A retired revision, 11 or 12, is refused by what it is when the
     // checkpoint is read.
-    if let (Some(theirs @ (13 | 14)), Some(ours)) = (saved.revision(), geometry.revision())
+    if let (Some(theirs @ (13..=15)), Some(ours)) = (saved.revision(), geometry.revision())
         && theirs != ours
     {
         let p = path.display();
@@ -5989,6 +6006,11 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             if which == Which::Micro { "micro" } else { "chip" }
         ));
     }
+    // Revision 15 runs on `micro` alone: `rtl`'s model of it is the
+    // pipeline's, which it does not have.
+    if geometry.extended() && which != Which::Micro {
+        usage("QUUX revision 15 runs on --micro alone");
+    }
     // The TLB is revision 14's.
     if tlb.is_some() && !geometry.paged() {
         usage("--tlb is QUUX revision 14's: MUIR_QUUX_REVISION=14");
@@ -6471,7 +6493,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     };
 
     // The boot PROM, before the setup: the setup says which one it is.
-    let prom = boot_prom(prom_file.as_deref(), geometry);
+    let prom = boot_prom(prom_file.as_deref(), geometry, resume.is_some());
     // What a viewer's keysyms mean on the Lisp Machine keyboard, which is
     // the one part of it that is muir's own and so the user's to change.
     let (keyboard_map, keyboard_said) = keyboard_mapping(keyboard_file.as_deref());
@@ -6576,6 +6598,13 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 s,
                 "cache: {} words, lines of {}, {}-way, a hit in {} ns",
                 c.words, c.line_words, c.ways, c.hit_ns
+            )
+            .unwrap();
+        }
+        if geometry.revision() == Some(15) {
+            writeln!(
+                s,
+                "machine: quux, revision 15: revision 14 with a 64-bit microinstruction, MIT's 48 bits and an extension, and its own .mcr; on micro alone"
             )
             .unwrap();
         }

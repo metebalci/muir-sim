@@ -8,8 +8,9 @@ is the CADR as MIT built it; muir-fpga and muir-sys choose it with
 This page says where QUUX, revision 13, differs from the CADR. Everything
 it does not mention is the CADR's. Its word is 40 bits, the tag `<39:32>`
 over the field `<31:0>` (contract G2). Revision 13 is what `quux` runs by
-default; [revision 14](#revision-14-a-page-table-behind-a-tlb), at the
-end, is what it runs when `MUIR_QUUX_REVISION` is `14`.
+default; [revision 14](#revision-14-a-page-table-behind-a-tlb) and
+[revision 15](#revision-15-the-64-bit-microinstruction), at the end, are
+what it runs when `MUIR_QUUX_REVISION` is `14` or `15`.
 
 QUUX's software is numbered in the 2000s and the CADR's in the 1000s: QUUX
 runs muir-sys's System 2001 on microcode 2001 and boots on PROM 2001.
@@ -1797,6 +1798,86 @@ PROM 2002 refuses such a partition. `quux --prom` holds a boot PROM to the
 same rules, except that a PROM without section 6 is still taken on
 revision 14 (`Mcr::check_revision` in `src/mcr.rs`;
 `tests/revision_14.rs`).
+
+## Revision 15: the 64-bit microinstruction
+
+muir has QUUX revision 15 beside revisions 13 and 14 (contract G3 revision
+15 and its appendix A15b): `Geometry::QUUX_15` in the library, which `quux`
+runs when `MUIR_QUUX_REVISION` is `15`. It runs on `micro` alone: revision
+15 is a pipelined machine, which `rtl` does not model, and `quux` refuses
+`--rtl` on it. No boot PROM for it is built in, PROM 2001 being MIT's
+sections, which revision 15 does not read, so a run names one with
+`--prom`; a resume takes the checkpoint's. It is revision 14's machine with
+what follows; everything it does not mention is revision 14's. What holds
+it is `tests/revision_15.rs`, on hand-built programs and files.
+
+**The microinstruction is 64 bits**: MIT's 48 in `IR<47:0>`, meaning what
+they mean on every other machine, and the extension in `IR<63:48>`, read by
+the class `IR<44:43>`. On a JUMP `<48>` is the hint bit; on a DISPATCH
+`<61:48>` the predicted target's address and `<62>`, `<63>` its P and R
+inverted; on an ALU or BYTE word `<48>` says a PDL address field is
+present, `<50:49>` its base (`M-AP`, `A-LOCALP`, the PDL pointer,
+PDL-INDEX) and `<58:51>` its signed displacement. An all-zero extension is
+the 48-bit word. The hint and the predicted target are predictions for a
+pipeline and change no result; `micro` executes `IR<47:0>` alone
+(`the_extension_changes_no_result`). The PDL address field says that the
+word writes PDL-INDEX with its base, as the word finds it, plus the
+displacement, AND 37777: `micro` forms that index before the word, `M-AP`
+and `A-LOCALP` from the machine's copies of them ([the fused
+return](#the-fused-return)), and after the word holds PDL-INDEX to it; a
+mismatch halts the run at PDL-FIELD-MISMATCH, `Halt::PdlFieldMismatch`,
+the word committed (`a_wrong_pdl_field_halts_at_pdl_field_mismatch`). The
+control store and the PROM hold 64-bit words.
+
+**`WRITE-I-MEM`** writes `IWR<63:32>` from `A<31:0>` and `IWR<31:0>` from
+`M<31:0>`: a word with `<63:48>` set is written whole, and a tag left in
+`A<39:32>` reaches no bit of it, where revisions 13 and 14 take `A<15:0>`
+(`write_i_mem_writes_64_bits_and_no_tag`).
+
+**The feature page** says revision 15 in word 0, `0x515500f4`, and in word
+25 the microcycle, the clock's period, in units of 0.5 ns: 80 at `micro`'s
+40 ns. Register-page word 225 counts the posted writes answered with an
+error; a write clears it, and so does `-RESET`, as word 224. `micro` posts
+no writes, so it reads 0 there unless a count is planted
+(`feature_words_0_and_25_say_revision_15_and_its_period`,
+`word_225_reads_the_errors_and_a_write_clears_it`).
+
+**Its `.mcr`** is self-describing (A15b.7): little-endian 32-bit words, the
+format word `0x51550001` (MACHINE-ID's signature over the format number 1)
+and the number of sections; each section an 8-word header --- the type,
+the number of items, the actual width in bits, the storage width in bits,
+the start address, and three parameters --- and then exactly its items, an
+item least significant word first; then zeros to a whole number of
+1,024-byte blocks. The types, in this order: 6 the hardware revision,
+first, one 32-bit item at 0; 1 the control store, 64 bits; 2 the dispatch
+memory, 18 bits, `<17>` odd parity; 3 the microcode symbol area, 40 bits
+at the physical address of its first word; and 4 A memory, 40 bits, last.
+`mcr::parse_15` reads it, and the PROM's own file, whose control store
+section starts at 36000. It refuses a format word other than `0x51550001`;
+a first section other than type 6, or of another shape; an unknown type
+(0, 5 and every type above 6), a type twice, the order broken; an actual
+width other than the machine's for the type; a storage width not a
+multiple of 32 or below the actual width; a padding bit set in an item; a
+non-zero parameter word, none being used; a section past its memory, a
+microcode's control store at or past 36000, a PROM's not starting at 36000
+or past its 2000 words; sections running past the file's end, a non-zero
+word after the last section, and a length that is not a whole number of
+blocks (`every_mcr_refusal_on_a_planted_file`, against
+`a_revision_15_mcr_reads_whole`). **The format names the revision**: a
+revision-15 file is refused on revisions 13 and 14, and MIT's sections on
+revision 15, the refusal naming the format and the revision the file is
+for (`each_format_is_refused_on_the_other_s_revisions`); a revision-15
+file whose section 6 says another revision is refused as on revision 14.
+The symbol area's start is bounded only by the 32-bit physical space.
+
+**The checkpoint** of revision 15 is version 50, as revision 14's. It says
+its revision in the byte where revision 13 keeps its level-1 entry's width
+and revision 14 a 0: `0o217`, 15 with `<7>` set, a value no width takes.
+It keeps the control store's 64 bits and word 225 after revision 14's
+fields (`a_checkpoint_records_revision_15_and_keeps_64_bits`). `quux`
+refuses a checkpoint of revision 13 or 14 on revision 15 and the reverse,
+naming the revision that wrote it
+(`revision_15_and_the_others_refuse_each_other_s_checkpoints`).
 
 ## Not modeled
 

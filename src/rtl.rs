@@ -745,6 +745,9 @@ fn field(v: u64, hi: u32, lo: u32) -> u32 {
 
 impl Rtl {
     pub fn new(m: Machine) -> Self {
+        // Revision 15's model is `micro`'s alone: this engine is the
+        // single-edge machine, and revision 15's is pipelined.
+        assert!(!m.geometry.extended(), "rtl does not run QUUX revision 15");
         let on_quux = m.geometry.machine_id.is_some();
         let lvmo_at_power_on = m.geometry.lvmo_at_power_on();
         let m_bus = Bus::for_machine(&m, TimingModel::Cadr);

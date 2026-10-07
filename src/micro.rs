@@ -587,6 +587,21 @@ impl Micro {
         }
     }
 
+    /// **Revision 15's PDL address field** (A15b.2): the index the field
+    /// `(base, displacement)` forms, (B + D) AND 37777, B as the word finds
+    /// it --- `M-AP` and `A-LOCALP` from the machine's copies of them
+    /// (`crate::machine::macro_dispatch`), the PDL pointer and PDL-INDEX
+    /// themselves --- for the word to be held to the index it writes.
+    fn pdl_field_index(&self, (base, displacement): (u8, i8)) -> u16 {
+        let b = match base {
+            0 => self.m.macro_dispatch.ap,
+            1 => self.m.macro_dispatch.localp,
+            2 => u32::from(self.m.pdl_pointer),
+            _ => u32::from(self.m.pdl_index),
+        };
+        (b.wrapping_add(displacement as i32 as u32) & 0o37777) as u16
+    }
+
     /// A pop with `<14>` up: to the handler the MACRO DISPATCH MEMORY names
     /// if the return is fused (`crate::machine::macro_dispatch`), and
     /// otherwise as [`Micro::pop_asks_for_a_fetch`] says. `advance` is a
@@ -1745,7 +1760,7 @@ impl Micro {
         // them, so the cycles are charged to the clock instead and the
         // pipeline is left alone.
         if p && r {
-            self.m.write_imem(target, Insn::new(self.iwr));
+            self.m.write_imem(target, Insn::extended(self.iwr));
             if !invert && self.jump_condition() {
                 let ret = if n { self.npc.wrapping_sub(1) } else { self.npc } & 0o37777;
                 self.push_spc(ret as u32);
@@ -2163,9 +2178,11 @@ impl Engine for Micro {
 
     fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()> {
         self.m.load(r)?;
-        self.p0 = Insn::new(r.u64()?);
+        // All 64 bits: revision 15's word in the pipeline keeps its
+        // extension; every other machine's never had one.
+        self.p0 = Insn::extended(r.u64()?);
         self.p0_pc = r.u16()?;
-        self.p1 = Insn::new(r.u64()?);
+        self.p1 = Insn::extended(r.u64()?);
         self.p1_pc = r.u16()?;
         self.npc = r.u16()?;
         self.inhibit = r.bool()?;
@@ -2231,6 +2248,8 @@ impl Engine for Micro {
 
     fn step(&mut self) -> Result<(), Halt> {
         self.executed = None;
+        // The period feature word 25 reads on revision 15 (A15b.1).
+        self.m.microcycle_ns = self.sync_cycle_ns;
         // `MACHRUN`, less the statistics halt this engine cannot raise, and
         // with the one `ERR` it can: no parity check, but `HALTED` under
         // `ERRSTOP`.  Halted, a step is one master clock cycle and no
@@ -2330,6 +2349,18 @@ impl Engine for Micro {
 
         self.executed = Some(self.p0_pc);
 
+        // Revision 15's extension (A15b.2) is read here and executes as
+        // nothing: the word's fields are its `IR<47:0>`. What the extension
+        // asks of this engine is the PDL address field's check, below.
+        let mut pdl_field = None;
+        if self.m.geometry.extended() {
+            let word = self.p0;
+            self.p0 = word.low_48();
+            if matches!(word.op(), Op::Alu | Op::Byte) {
+                pdl_field = word.pdl_field().map(|f| self.pdl_field_index(f));
+            }
+        }
+
         // The OA registers modify the instruction as it is executed.
         if self.oal {
             self.oal = false;
@@ -2354,8 +2385,11 @@ impl Engine for Micro {
         };
         self.adata = self.m.amem[self.aaddr as usize];
         self.land_writes();
-        // `IWR<47:32>` from `A<15:0>` and `IWR<31:0>` from `M<31:0>`.
-        self.iwr = ((self.adata & 0o177777) << 32) | (self.mdata & LOW);
+        // `IWR<47:32>` from `A<15:0>` and `IWR<31:0>` from `M<31:0>`; on
+        // revision 15 `IWR<63:32>` from `A<31:0>`, the field, so that no
+        // tag left in A reaches the extension (A15b.4).
+        let high = if self.m.geometry.extended() { LOW } else { 0o177777 };
+        self.iwr = ((self.adata & high) << 32) | (self.mdata & LOW);
 
         match self.p0.op() {
             Op::Alu => self.alu()?,
@@ -2381,9 +2415,17 @@ impl Engine for Micro {
         if let Some((code, data)) = self.macro_write.take() {
             self.m.macro_dispatch.write(code, data);
         }
+        // The PDL address field's index against the index written (A15b.2),
+        // before the edge, whose operand-address load is a fused return's.
+        let mismatch = pdl_field.filter(|&formed| formed != self.m.pdl_index).map(|formed| {
+            Halt::PdlFieldMismatch { pc: self.p0_pc, formed, written: self.m.pdl_index }
+        });
         self.fetch_and_clock();
         self.m.cycles += 1;
-        Ok(())
+        match mismatch {
+            Some(h) => Err(h),
+            None => Ok(()),
+        }
     }
 
     fn pc(&self) -> u16 {

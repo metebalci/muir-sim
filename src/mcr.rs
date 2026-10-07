@@ -44,6 +44,19 @@
 //! opens with section 6, microcode and boot PROM alike: code 6, start 0,
 //! count 1, then one 32-bit word, the hardware revision, 14.
 //! [`Mcr::check_revision`] holds a file to the machine it is loaded on.
+//!
+//! **QUUX revision 15's `.mcr`** (contract G3 revision 15, appendix
+//! A15b.7) is self-describing: little-endian 32-bit words, a file header
+//! of two words, the format word [`FORMAT_WORD`] and the number of
+//! sections, then each section an 8-word header --- the type, the number of
+//! items, the actual width in bits, the storage width in bits (a multiple of
+//! 32), the start address, and three parameters, 0 where unused --- and
+//! exactly items × storage width bits, an item least significant word first
+//! with zeros from its actual width up; then zeros to a whole number of
+//! 1,024-byte blocks. The types, in this order, 6 first and 4 last:
+//! 6 the hardware revision, 1 the control store at 64 bits, 2 the dispatch
+//! memory at 18, 3 the microcode symbol area at 40, 4 A memory at 40.
+//! [`parse_15`] reads it and refuses everything A15b.7 lists.
 
 use crate::isa::Insn;
 
@@ -93,6 +106,179 @@ pub struct Mcr {
     /// Section 6's word, the hardware revision the file is for, where the
     /// file has one (contract G3 revision 14, appendix A14.13).
     pub hardware_revision: Option<u32>,
+    /// The format number under the format word, for revision 15's format
+    /// ([`parse_15`]); `None` for MIT's sections.
+    pub format: Option<u32>,
+    /// Revision 15's section 3, the microcode symbol area (A15b.7): the
+    /// physical address of its first word, and its 40-bit words.
+    pub symbol_area: Option<(u32, Vec<crate::machine::Word>)>,
+}
+
+/// **Revision 15's format word** (A15b.7): MACHINE-ID's signature `0x5155`
+/// in `<31:16>` over the format number 1 in `<15:0>`. Every earlier loader
+/// reads it as an unknown section type.
+pub const FORMAT_WORD: u32 = 0x5155_0001;
+
+/// Revision 15's `.mcr` is a whole number of these (A15b.7).
+pub const BLOCK_BYTES: usize = 1024;
+
+/// What a revision-15 `.mcr` holds, which bounds its control store
+/// section (A15b.7): microcode below the PROM's 36000, or the boot PROM's
+/// own words, from 36000, at most 2000.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Holds {
+    Microcode,
+    Prom,
+}
+
+/// Revision 15's section types in their order (A15b.7), each with the
+/// machine's actual width for it in bits: 6 the hardware revision, 1 the
+/// control store, 2 the dispatch memory, 3 the symbol area, 4 A memory.
+const SECTIONS_15: [(u32, u32); 5] = [(6, 32), (1, 64), (2, 18), (3, 40), (4, 40)];
+
+/// Whether `bytes` opens with revision 15's format word, little-endian.
+pub fn has_format_word(bytes: &[u8]) -> bool {
+    bytes.get(..4) == Some(&FORMAT_WORD.to_le_bytes()[..])
+}
+
+/// **Reads a revision-15 `.mcr`** (A15b.7), refusing: a length that is
+/// not a whole number of 1,024-byte blocks; a format word other than
+/// [`FORMAT_WORD`]; a first section other than type 6, or one of another
+/// shape than one 32-bit item at 0; an unknown type (5, 0, and every type
+/// above 6), a type twice, or the order broken; an actual width other than
+/// the machine's for the type, or a storage width not a multiple of 32 or
+/// below the actual width; a non-zero unused header word or padding bit; a
+/// start plus items past the memory, or for [`Holds::Microcode`] a control
+/// store section at or past the PROM's 36000, for [`Holds::Prom`] one that
+/// does not start there or runs past its 2000 words; sections that run
+/// past the file's end; and a non-zero word after the last section. The
+/// hardware revision is read and not judged: [`Mcr::check_revision`] holds
+/// it to the machine.
+pub fn parse_15(bytes: &[u8], holds: Holds) -> Result<Mcr, String> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(BLOCK_BYTES) {
+        return Err(format!(
+            "{} bytes, not a whole number of {BLOCK_BYTES}-byte blocks",
+            bytes.len()
+        ));
+    }
+    let words: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect();
+    if words[0] != FORMAT_WORD {
+        return Err(format!("format word {:08x}, not {FORMAT_WORD:08x}", words[0]));
+    }
+    let count = words[1] as usize;
+    let mut at = 2usize;
+    let mut mcr = Mcr { format: Some(FORMAT_WORD & 0xffff), ..Mcr::default() };
+    let mut rank = None;
+    for k in 0..count {
+        let header = words
+            .get(at..at + 8)
+            .ok_or_else(|| format!("section {k}'s header runs past the file's end"))?;
+        let (kind, items, actual, storage, start) =
+            (header[0], header[1], header[2], header[3], header[4]);
+        let here = at * 4;
+        let Some(r) = SECTIONS_15.iter().position(|&(t, _)| t == kind) else {
+            return Err(format!("section {k} at offset {here}: unknown type {kind}"));
+        };
+        if k == 0 && kind != 6 {
+            return Err(format!(
+                "the first section is type {kind}: type 6, the hardware revision, is first"
+            ));
+        }
+        if rank.is_some_and(|last| r <= last) {
+            return Err(format!(
+                "section {k} at offset {here}: type {kind} after type {}, twice or out of the order 6, 1, 2, 3, 4",
+                SECTIONS_15[rank.unwrap_or(0)].0
+            ));
+        }
+        rank = Some(r);
+        let width = SECTIONS_15[r].1;
+        if actual != width {
+            return Err(format!(
+                "section type {kind}: actual width {actual} bits, and the machine's is {width}"
+            ));
+        }
+        if storage == 0 || !storage.is_multiple_of(32) || storage < actual {
+            return Err(format!(
+                "section type {kind}: storage width {storage} bits, not a multiple of 32 at least {actual}"
+            ));
+        }
+        if let Some(p) = header[5..8].iter().position(|&w| w != 0) {
+            return Err(format!(
+                "section type {kind}: header word {} is {:o}, unused and not zero",
+                5 + p,
+                header[5 + p]
+            ));
+        }
+        let end = u64::from(start) + u64::from(items);
+        let past = |size: u64, what: &str| {
+            (end > size).then(|| {
+                format!(
+                    "section type {kind} runs from {start:o} for {items:o} items, past {what}'s {size:o}"
+                )
+            })
+        };
+        let prom = crate::machine::QUUX_PROM_BASE as u64;
+        let refused = match (kind, holds) {
+            (6, _) if start != 0 || items != 1 => Some(format!(
+                "section 6 starts at {start:o} for {items:o} items: it is one item, the hardware revision, at 0"
+            )),
+            (1, Holds::Microcode) => past(prom, "the PROM"),
+            (1, Holds::Prom) if u64::from(start) != prom => Some(format!(
+                "the control store section starts at {start:o}: the PROM's own file starts at {prom:o}"
+            )),
+            (1, Holds::Prom) => past(prom + crate::machine::PROM_WORDS as u64, "the PROM"),
+            (2, _) => past(crate::machine::DMEM_WORDS as u64, "the dispatch memory"),
+            (3, _) => past(1 << 32, "the physical space"),
+            (4, _) => past(1024, "A memory"),
+            _ => None,
+        };
+        if let Some(e) = refused {
+            return Err(e);
+        }
+        at += 8;
+        let per = (storage / 32) as usize;
+        let mut item = |n: usize| -> Result<u64, String> {
+            let w = words.get(at..at + per).ok_or_else(|| {
+                format!("section type {kind}'s item {n:o} runs past the file's end")
+            })?;
+            at += per;
+            let low =
+                w.iter().take(2).enumerate().fold(0u64, |v, (i, &x)| v | u64::from(x) << (32 * i));
+            let mask = if actual >= 64 { u64::MAX } else { (1u64 << actual) - 1 };
+            if low & !mask != 0 || w.iter().skip(2).any(|&x| x != 0) {
+                return Err(format!(
+                    "section type {kind}'s item {n:o}: a padding bit above bit {} set",
+                    actual - 1
+                ));
+            }
+            Ok(low)
+        };
+        let n = items as usize;
+        match kind {
+            6 => mcr.hardware_revision = Some(item(0)? as u32),
+            1 => {
+                mcr.imem_start = start;
+                mcr.imem = (0..n).map(|i| item(i).map(Insn::extended)).collect::<Result<_, _>>()?;
+            }
+            2 => {
+                mcr.dmem_start = start;
+                mcr.dmem = (0..n).map(|i| item(i).map(|v| v as u32)).collect::<Result<_, _>>()?;
+            }
+            3 => mcr.symbol_area = Some((start, (0..n).map(&mut item).collect::<Result<_, _>>()?)),
+            _ => {
+                mcr.amem_start = start;
+                mcr.amem_wide = true;
+                mcr.amem = (0..n).map(&mut item).collect::<Result<_, _>>()?;
+            }
+        }
+    }
+    if let Some(p) = words[at..].iter().position(|&w| w != 0) {
+        return Err(format!(
+            "a non-zero word at offset {} after the last of {count} sections",
+            (at + p) * 4
+        ));
+    }
+    Ok(mcr)
 }
 
 impl Mcr {
@@ -121,6 +307,30 @@ impl Mcr {
         geometry: crate::machine::Geometry,
         microcode: bool,
     ) -> Result<(), String> {
+        // Revision 15's format and MIT's sections are each one machine's
+        // (A15b.1): the format named with the revision.
+        match (self.format, geometry.extended()) {
+            (Some(_), false) => {
+                return Err(format!(
+                    "a revision-15 .mcr, format word {FORMAT_WORD:08x}, for hardware revision {}, and this is {}, which reads MIT's sections",
+                    self.hardware_revision.unwrap_or(0),
+                    match geometry.revision() {
+                        Some(r) => format!("revision {r}"),
+                        None => "the CADR".to_string(),
+                    }
+                ));
+            }
+            (None, true) => {
+                return Err(format!(
+                    "MIT's sections, a file for {}, and this is revision 15, which reads the format word {FORMAT_WORD:08x}'s",
+                    match self.hardware_revision {
+                        Some(r) => format!("hardware revision {r}"),
+                        None => "revision 13 or below".to_string(),
+                    }
+                ));
+            }
+            _ => {}
+        }
         match (self.hardware_revision, geometry.revision()) {
             (Some(r), None) => Err(format!(
                 "section 6 says hardware revision {r}, and the CADR reads no section 6"
@@ -293,14 +503,41 @@ pub fn parse(bytes: &[u8]) -> Result<Mcr, String> {
     Ok(mcr)
 }
 
-/// A QUUX microcode file in partition order, refused unless it is for a
-/// machine of `geometry`'s revision ([`Mcr::check_revision`]).
+/// A QUUX microcode file, in partition order or revision 15's format
+/// ([`parse_quux`]), refused unless it is for a machine of `geometry`'s
+/// revision ([`Mcr::check_revision`]).
 pub fn parse_quux_microcode(
     bytes: &[u8],
     geometry: crate::machine::Geometry,
 ) -> Result<Mcr, String> {
-    let mcr = parse_partition_order(bytes)?;
-    mcr.check_revision(geometry, true)?;
+    parse_for(bytes, geometry, Holds::Microcode)
+}
+
+/// A QUUX `.mcr` of either format, as its first word says: revision 15's
+/// ([`parse_15`]) when it opens with the format word, MIT's sections in
+/// partition order ([`parse_partition_order`]) otherwise. Which machine it
+/// is for is [`Mcr::check_revision`]'s to judge.
+pub fn parse_quux(bytes: &[u8], holds: Holds) -> Result<Mcr, String> {
+    if has_format_word(bytes) { parse_15(bytes, holds) } else { parse_partition_order(bytes) }
+}
+
+/// A QUUX `.mcr` for a machine of `geometry`, in the format its revision
+/// reads, with [`Mcr::check_revision`]'s judgement: on revision 15 a file
+/// that is not MIT's sections is read as revision 15's, so a damaged format
+/// word is refused as that; a file of MIT's sections is refused by its
+/// revision, as a revision-15 file is below revision 15.
+pub fn parse_for(
+    bytes: &[u8],
+    geometry: crate::machine::Geometry,
+    holds: Holds,
+) -> Result<Mcr, String> {
+    let mcr = match parse_quux(bytes, holds) {
+        Err(e) if geometry.extended() && !has_format_word(bytes) => {
+            return Err(parse_15(bytes, holds).err().unwrap_or(e));
+        }
+        r => r?,
+    };
+    mcr.check_revision(geometry, holds == Holds::Microcode)?;
     Ok(mcr)
 }
 

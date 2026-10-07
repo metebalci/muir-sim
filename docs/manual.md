@@ -192,7 +192,10 @@ microcode that knows it. [QUUX](quux.md) has the whole of the difference.
 
 With `MUIR_QUUX_REVISION=14` in its environment `quux` runs revision 14
 instead, a page table walked by hardware behind a TLB ([revision
-14](quux.md#revision-14-a-page-table-behind-a-tlb)). Unset or `13`, it
+14](quux.md#revision-14-a-page-table-behind-a-tlb)), and with `15`
+revision 15, a 64-bit microinstruction, on `micro` alone and with a boot
+PROM given by `--prom` ([revision
+15](quux.md#revision-15-the-64-bit-microinstruction)). Unset or `13`, it
 runs revision 13; any other value is refused at the start. `cadr` does not
 read it.
 

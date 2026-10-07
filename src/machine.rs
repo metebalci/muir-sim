@@ -288,10 +288,24 @@ impl Geometry {
     pub const QUUX_14: Geometry =
         Geometry { l1_bits: 0, machine_id: Some((0x5155 << 16) | (14 << 4) | 4), ..Geometry::QUUX };
 
+    /// **QUUX's, revision 15** (contract G3 revision 15, appendix A15b), on
+    /// `micro`: revision 14's machine with a 64-bit microinstruction, MIT's
+    /// 48 bits and an extension (A15b.2); its own `.mcr` (A15b.7); feature
+    /// word 25 and register-page word 225 (A15b.1). All of it keyed on
+    /// [`Geometry::extended`]. `rtl` does not run it.
+    pub const QUUX_15: Geometry =
+        Geometry { machine_id: Some((0x5155 << 16) | (15 << 4) | 4), ..Geometry::QUUX_14 };
+
     /// Whether the machine translates through the TLB, revision 14's
     /// ([`Geometry::QUUX_14`]), rather than through two map levels.
     pub fn paged(self) -> bool {
         self.revision().is_some_and(|r| r >= 14)
+    }
+
+    /// Whether the microinstruction is 64 bits, revision 15's
+    /// ([`Geometry::QUUX_15`]).
+    pub fn extended(self) -> bool {
+        self.revision().is_some_and(|r| r >= 15)
     }
 
     /// The level-1 entry a CADR's map store writes: `VMA<31:27>`
@@ -1068,6 +1082,11 @@ pub const L1_MAP_WORDS: usize = 8192;
 /// 13 (contract G2 §2.4, A1.4); [`Geometry::dmem_words`].
 pub const DMEM_WORDS: usize = 4096;
 
+/// What revision 15's checkpoint writes in the level-1 entry's byte, which
+/// revision 14's leaves 0 (A15b.13): its revision with `<7>` set, a value
+/// no level-1 entry's width takes.
+pub const REVISION_15_MARK: u8 = 0o200 | 15;
+
 /// Why a microcycle could not complete.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Halt {
@@ -1075,6 +1094,11 @@ pub enum Halt {
     /// raises it now: every code decodes as page SOURCE decodes it, the
     /// unassigned ones included.
     UnknownDest { pc: u16, dest: u16 },
+    /// **PDL-FIELD-MISMATCH** (revision 15, A15b.2): the word at `pc`
+    /// carries a PDL address field whose index, `formed`, (B + D) AND
+    /// 37777 of its base as the word found it, is not the index it wrote,
+    /// `written`. Only a wrong assembly makes one; the word has committed.
+    PdlFieldMismatch { pc: u16, formed: u16, written: u16 },
 }
 
 /// The location counter itself, `LC<25:0>`: the 74S169 counters on page LC
@@ -1286,6 +1310,15 @@ pub struct Machine {
     /// reads memory once the processor's writes are out of the buffer). Not
     /// kept in a checkpoint: it is set afresh before it is read.
     pub write_buffer_empty_at: u64,
+    /// The microcycle, the clock's period, in ns, as the engine running
+    /// the machine keeps it: what revision 15's feature word 25 says
+    /// (A15b.1). The engine sets it; not kept in a checkpoint.
+    pub microcycle_ns: u64,
+    /// Revision 15's register-page word 225 (A15b.1, A15b.5): posted
+    /// writes answered with an error, a count, read, and cleared by a
+    /// write. `micro` has no posted writes and answers none so; kept in a
+    /// checkpoint of revision 15.
+    pub posted_write_errors: u32,
     /// The physical address of every word of main memory a bus cycle
     /// stores, in order, when a test or a trace asks for the record by
     /// setting it to `Some`. A disk transfer's words are not in it: the
@@ -1367,6 +1400,8 @@ impl Machine {
             block_disk: None,
             file_device: crate::file_device::FileDevice::new(),
             write_buffer_empty_at: 0,
+            microcycle_ns: 0,
+            posted_write_errors: 0,
             store_log: None,
             register_log: None,
             board_name: {
@@ -1776,6 +1811,8 @@ impl Machine {
         if self.geometry.paged() {
             self.sweep_tlb(now);
             self.memory_words = crate::tlb::Words::default();
+            // Revision 15's word 225 with them, as word 224 (A15b.1).
+            self.posted_write_errors = 0;
         }
     }
 
@@ -2343,6 +2380,10 @@ impl Machine {
                 // system's words.
                 0o2 if paged => self.tlb.len() as u32,
                 0o13 if paged => crate::tlb::DEVICE_WINDOW,
+                // Revision 15 (A15b.1): word 25 the microcycle in units of
+                // 0.5 ns, word 225 the posted writes answered with an error.
+                0o25 if self.geometry.extended() => (self.microcycle_ns * 2) as u32,
+                0o225 if self.geometry.extended() => self.posted_write_errors,
                 k @ 0o220..=0o227 if paged => self.memory_words.read(k).unwrap_or(0),
                 0o11 => (width as u32) << 16 | height as u32,
                 0o12 => 1 << 16 | words_per_line as u32,
@@ -2529,6 +2570,8 @@ impl Machine {
                 0o210 if self.tv.board() == tv::Board::Video => {
                     self.tv.write_control(0, value, self.ns);
                 }
+                // Revision 15's word 225: a write clears it (A15b.1).
+                0o225 if self.geometry.extended() => self.posted_write_errors = 0,
                 // Revision 14's memory system's words (A14.9).
                 k @ 0o220..=0o227 if self.geometry.paged() => {
                     self.memory_words.write(k, value);
@@ -2733,6 +2776,8 @@ impl Machine {
             block_disk,
             file_device,
             write_buffer_empty_at: _,
+            microcycle_ns: _,
+            posted_write_errors,
             store_log: _,
             register_log: _,
             board_name: _,
@@ -2788,7 +2833,10 @@ impl Machine {
         w.u32(*interrupt_control);
         w.u16(*dispatch_constant);
         w.u32s(if wide { &l1_map[..] } else { &l1_map[..2048] });
-        w.u8(geometry.l1_bits as u8);
+        // The level-1 entry's bits, 0 on revision 14, which has no level-1
+        // map; revision 15, which has none either, writes its revision
+        // with `<7>` set, [`REVISION_15_MARK`] (A15b.13).
+        w.u8(if geometry.extended() { REVISION_15_MARK } else { geometry.l1_bits as u8 });
         w.u8(geometry.pdl_bits as u8);
         w.bool(geometry.muldiv);
         w.bool(geometry.tick);
@@ -2838,6 +2886,11 @@ impl Machine {
             w.u32(pdl_copies.base);
             w.u16(pdl_copies.head);
         }
+        // Revision 15's own (A15b.13), after revision 14's: word 225. The
+        // control store's 64 bits are in its words above.
+        if geometry.extended() {
+            w.u32(*posted_write_errors);
+        }
     }
 
     /// The first part of [`Machine::load`]: everything a checkpoint holds
@@ -2848,8 +2901,10 @@ impl Machine {
         fn insns(r: &mut crate::checkpoint::Reader, into: &mut [Insn]) -> std::io::Result<()> {
             let mut raw = vec![0u64; into.len()];
             r.u64s_into(&mut raw)?;
+            // All 64 bits, revision 15's extension among them; a machine
+            // of 48-bit words drops the rest once its geometry is read.
             for (i, w) in into.iter_mut().zip(raw) {
-                *i = Insn::new(w);
+                *i = Insn::extended(w);
             }
             Ok(())
         }
@@ -2924,10 +2979,14 @@ impl Machine {
             (40, 7, 10..=14, true, true, true) => Geometry { pdl_bits, ..Geometry::QUUX },
             // Revision 14 (A14.14): no level-1 map, its entry 0 bits.
             (40, 0, 10..=14, true, true, true) => Geometry { pdl_bits, ..Geometry::QUUX_14 },
+            // Revision 15 (A15b.13): its mark in the level-1 entry's place.
+            (40, l1, 10..=14, true, true, true) if l1 == u32::from(REVISION_15_MARK) => {
+                Geometry { pdl_bits, ..Geometry::QUUX_15 }
+            }
             (32, 6, 10..=14, true, true, fused) => {
                 let revision = if fused { 12 } else { 11 };
                 return Err(crate::checkpoint::bad(format!(
-                    "a checkpoint of QUUX revision {revision}, which this build no longer runs: it runs the CADR and QUUX revisions 13 and 14, and a revision-{revision} checkpoint resumes only on an earlier muir-sim"
+                    "a checkpoint of QUUX revision {revision}, which this build no longer runs: it runs the CADR and QUUX revisions 13 to 15, and a revision-{revision} checkpoint resumes only on an earlier muir-sim"
                 )));
             }
             _ => {
@@ -2936,6 +2995,11 @@ impl Machine {
                 )));
             }
         };
+        if !self.geometry.extended() {
+            for w in self.prom.iter_mut().chain(self.imem.iter_mut()) {
+                *w = w.low_48();
+            }
+        }
         for (what, v) in [("PDL pointer", pdl_pointer), ("PDL index", pdl_index)] {
             if v > self.geometry.pdl_mask() {
                 return Err(crate::checkpoint::bad(format!(
@@ -3037,6 +3101,9 @@ impl Machine {
                 crate::tlb::PdlCopies { base: r.u32()?, head: r.u16()? & crate::tlb::PDL_INDEX };
             // The TLB is not kept: the resume starts with it swept.
             self.tlb = self.tlb.swept_copy();
+        }
+        if self.geometry.extended() {
+            self.posted_write_errors = r.u32()?;
         }
         Ok(())
     }

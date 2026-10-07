@@ -7,7 +7,9 @@
 //! diagram taken from the MIT CADR design files, and each was checked against
 //! the drawing that decodes it.
 
-/// A microinstruction.  Only the low 48 bits are significant.
+/// A microinstruction.  Only the low 48 bits are significant, except on
+/// QUUX revision 15, whose word is 64 bits: MIT's 48 in `IR<47:0>` and the
+/// extension in `IR<63:48>` ([`Insn::extended`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Insn(u64);
 
@@ -26,8 +28,66 @@ impl Insn {
         Insn(raw & 0xffff_ffff_ffff)
     }
 
+    /// **QUUX revision 15's 64-bit word** (contract G3 revision 15, appendix
+    /// A15b.2), all 64 bits kept: MIT's 48 in `IR<47:0>`, meaning what they
+    /// mean on every other machine, and the extension in `IR<63:48>`, read
+    /// by the class `IR<44:43>`. An all-zero extension is the 48-bit word.
+    pub fn extended(raw: u64) -> Self {
+        Insn(raw)
+    }
+
+    /// The word without its extension, `IR<47:0>`: what every class's
+    /// fields below are read from.
+    pub fn low_48(self) -> Self {
+        Insn::new(self.0)
+    }
+
     pub fn raw(self) -> u64 {
         self.0
+    }
+
+    /// `IR<63:48>` --- revision 15's extension (A15b.2); 0 on every other
+    /// machine, whose words are 48 bits.
+    pub fn extension(self) -> u16 {
+        self.field(48, 16) as u16
+    }
+
+    /// `IR<60>` --- revision 15's `oa-low-select`, SL (A15b.2, A15b.15): on
+    /// an ALU, BYTE or JUMP word, and on a dispatch-memory write, the word
+    /// reads OA-REG-LOW into its fields.
+    pub fn oa_low_select(self) -> bool {
+        self.field(60, 1) != 0
+    }
+
+    /// `IR<61>` --- revision 15's `oa-high-select`, SH (A15b.2, A15b.15): on
+    /// an ALU, BYTE or JUMP word, the word reads OA-REG-HIGH into its A and
+    /// M source.
+    pub fn oa_high_select(self) -> bool {
+        self.field(61, 1) != 0
+    }
+
+    /// `IR<48>` on a JUMP --- revision 15's hint bit, H (A15b.2): 1 predicts
+    /// that a conditional jump transfers. A prediction only; no result
+    /// depends on it.
+    pub fn hint(self) -> bool {
+        self.field(48, 1) != 0
+    }
+
+    /// `IR<61:48>`, `IR<62>` and `IR<63>` on a DISPATCH --- revision 15's
+    /// predicted target (A15b.2): the predicted entry's address, and its P
+    /// and R stored inverted, all zeros being a drop-through. A prediction
+    /// only; no result depends on it.
+    pub fn predicted_target(self) -> (u16, bool, bool) {
+        (self.field(48, 14) as u16, self.field(62, 1) == 0, self.field(63, 1) == 0)
+    }
+
+    /// `IR<58:48>` on an ALU or BYTE word --- revision 15's PDL address
+    /// field (A15b.2), if `IR<48>`, E, says it is present: the base B,
+    /// `IR<50:49>` (0 `M-AP`, 1 `A-LOCALP`, 2 the PDL pointer, 3
+    /// PDL-INDEX), and the displacement D, `IR<58:51>`, signed. The word
+    /// writes PDL-INDEX with B + D.
+    pub fn pdl_field(self) -> Option<(u8, i8)> {
+        (self.field(48, 1) != 0).then(|| (self.field(49, 2) as u8, self.field(51, 8) as u8 as i8))
     }
 
     fn field(self, pos: u32, len: u32) -> u32 {
@@ -438,6 +498,26 @@ pub mod asm {
     /// address.
     pub fn d_len(n: u64) -> u64 {
         n << 5
+    }
+
+    /// `IR<60>` --- revision 15's `oa-low-select` (A15b.2).
+    pub const OA_LOW_SELECT: u64 = 1 << 60;
+    /// `IR<61>` --- revision 15's `oa-high-select` (A15b.2).
+    pub const OA_HIGH_SELECT: u64 = 1 << 61;
+    /// `IR<48>` on a JUMP --- revision 15's hint bit (A15b.2).
+    pub const HINT: u64 = 1 << 48;
+
+    /// `IR<58:48>` on an ALU or BYTE word --- revision 15's PDL address
+    /// field (A15b.2): E `IR<48>`, the base `IR<50:49>`, the displacement
+    /// `IR<58:51>`.
+    pub fn pdl_field(base: u64, displacement: i8) -> u64 {
+        1 << 48 | (base & 3) << 49 | (displacement as u8 as u64) << 51
+    }
+
+    /// `IR<61:48>`, `IR<62>`, `IR<63>` on a DISPATCH --- revision 15's
+    /// predicted target (A15b.2): the address, and P and R stored inverted.
+    pub fn predicted(addr: u64, p: bool, r: bool) -> u64 {
+        (addr & 0o37777) << 48 | (!p as u64) << 62 | (!r as u64) << 63
     }
 
     /// `((A-MEM 100) SETA A-MEM-3)`: puts A memory 3 on the A bus and the

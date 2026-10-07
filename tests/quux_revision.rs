@@ -188,9 +188,9 @@ fn the_switch_at_13_runs_revision_13() {
 /// retired with System 2000 and refused as any other value.
 #[test]
 fn another_revision_is_refused() {
-    for v in ["12", "15", "11", "", "13 ", "thirteen"] {
+    for v in ["12", "16", "11", "", "13 ", "thirteen"] {
         let out = quux().env(SWITCH, v).args(["--micro", "--stop-after", "1"]).run();
-        refused(&out, &format!("quux: {SWITCH}={v:?}: revision 13 or 14"));
+        refused(&out, &format!("quux: {SWITCH}={v:?}: revision 13, 14 or 15"));
     }
 }
 

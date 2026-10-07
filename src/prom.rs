@@ -84,15 +84,37 @@ pub fn quux_boot_prom() -> Vec<Insn> {
 /// it, or past the top of the control store, is refused; so is a word
 /// setting `IR<46>`, as for the CADR's, a file in MIT's order, and a file
 /// whose section 6 is not `geometry`'s revision
-/// ([`crate::mcr::Mcr::check_revision`]).
+/// ([`crate::mcr::Mcr::check_revision`]). Revision 15's PROM is its own
+/// format's file, the control store section from 36000
+/// ([`crate::mcr::parse_15`]).
 pub fn parse_quux_mcr(
     bytes: &[u8],
     geometry: crate::machine::Geometry,
 ) -> Result<Vec<Insn>, String> {
     let base = crate::machine::QUUX_PROM_BASE as usize;
-    let mcr = crate::mcr::parse_partition_order(bytes)
-        .map_err(|e| format!("not QUUX's MCR microcode file, as promh.mcr is: {e}"))?;
-    mcr.check_revision(geometry, false)?;
+    let mcr = crate::mcr::parse_for(bytes, geometry, crate::mcr::Holds::Prom).map_err(|e| {
+        if crate::mcr::parse_quux(bytes, crate::mcr::Holds::Prom).is_ok() {
+            e
+        } else {
+            format!("not QUUX's MCR microcode file, as promh.mcr is: {e}")
+        }
+    })?;
+    // Revision 15's file holds the PROM's own words from 36000, which its
+    // reader has bounded (A15b.7).
+    if mcr.format.is_some() {
+        let mut v = mcr.imem;
+        if v.is_empty() {
+            return Err(format!("nothing at {base:o}: QUUX's PROM starts there"));
+        }
+        if let Some(at) = v.iter().position(|w| w.raw() >> 46 & 1 != 0) {
+            return Err(format!(
+                "word {:o} sets the statistics bit IR<46>, which a burned word has nowhere to hold",
+                base + at
+            ));
+        }
+        v.resize(PROM_WORDS, Insn::extended(0));
+        return Ok(v);
+    }
     if mcr.imem_start != 0 {
         return Err(format!("the control store section starts at {:o}, not 0", mcr.imem_start));
     }
