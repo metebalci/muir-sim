@@ -192,3 +192,35 @@ fn micro_under_neutral_time_charges_no_memory_time() {
     assert_eq!(microcycle_ns, in_all, "all of it the microcycles': {line}");
     assert!(line.contains("neutral time, no memory charged"), "{line}");
 }
+
+/// **The pipeline's line names its clock's period in ns** on both revisions
+/// it runs: revision 14's, a measurement aid whose period counts whole ns,
+/// at 9 ns (`muir::pipeline::PERIOD_14`), and revision 15's, in units of
+/// 0.5 ns, at 8.5. The line's time in all is clocks times that period. A
+/// line that reads revision 14's period as half-ns units says 4.5.
+#[test]
+fn the_pipeline_s_line_names_its_period_in_ns() {
+    use muir::pipeline::Pipeline;
+    for (geometry, text, ns_tenths) in
+        [(Geometry::QUUX_14, "clocks of 9 ns", 90), (Geometry::QUUX_15, "clocks of 8.5 ns", 85)]
+    {
+        let mut m = Machine::with_geometry(geometry, 1);
+        let mut words = vec![filler(); 1024];
+        words[0] = Insn::new(JUMP | target(0) | ALWAYS | N);
+        m.load_prom(&words);
+        support::prom_program_in_ram(&mut m);
+        let mut e = Pipeline::new(m);
+        e.boot();
+        e.skip_sweep();
+        let start = Span::of_pipeline(&e);
+        for _ in 0..1000 {
+            e.step().unwrap();
+        }
+        let span = Span::of_pipeline(&e).since(start);
+        let line = span.line();
+        eprintln!("{line}");
+        assert!(line.contains(text), "{geometry:?}: {line}");
+        let clocks = before(&line, "clocks of");
+        assert_eq!(before(&line, " ns in all"), clocks * ns_tenths / 10, "{line}");
+    }
+}

@@ -101,7 +101,9 @@ impl Span {
             memory_ns: ns - e.machine().cycles.min(e.clock()) * period / per_ns,
             halted_ns: 0,
             ns,
-            memory: Memory::Clocks { period, clocks: e.clock() },
+            // The period in units of 0.5 ns, whatever the machine's time
+            // counts: revision 14's pipeline counts whole ns.
+            memory: Memory::Clocks { period: period * 2 / per_ns, clocks: e.clock() },
         }
     }
 
