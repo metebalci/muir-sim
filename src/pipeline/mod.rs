@@ -152,6 +152,9 @@ pub(crate) struct Slot {
     pub trap: bool,
     /// The late squash held it its clock (A15b.3).
     pub late_held: bool,
+    /// Its port-B walk has filled the TLB, which the word uses a clock
+    /// later (P1, MP4 timing review §4).
+    pub b_walked: bool,
     /// A map write landed at its head, and a start in it waits a clock.
     pub map_held: bool,
     /// What WB writes.
@@ -189,6 +192,7 @@ impl Slot {
             ex_entered: 0,
             trap: false,
             late_held: false,
+            b_walked: false,
             map_held: false,
             am: Vec::new(),
             pdl_w: None,
@@ -273,6 +277,21 @@ pub struct Meters {
     pub rd_disagreements: u64,
     /// Fused returns, and D's.
     pub fused: u64,
+    /// Clocks a word waited for its port-B walk's fill a clock later (P1,
+    /// the MP4 timing review §4), and clocks a delay slot waited in RD after
+    /// a redirect (P2).
+    pub p1_holds: u64,
+    pub p2_holds: u64,
+    /// Fetches delayed a clock by a wrong prediction's second bubble
+    /// ([`Pipeline::bubbles`] 2).
+    pub second_bubbles: u64,
+    /// Restores of RD's copies without a redirect, of them those that
+    /// changed a copy's value (the MP4 timing review's M-3), and of those
+    /// the ones where RD plans a word from the changed copies in that clock:
+    /// a word N does not nop.
+    pub restores_without_redirect: u64,
+    pub restores_changed: u64,
+    pub restores_changed_planned: u64,
 }
 
 /// **The pipeline**: `rtl` on revision 15.
@@ -349,6 +368,17 @@ pub struct Pipeline {
     last_counted: Option<u16>,
     /// Test aids: a mutation planted by a test.
     pub mutation: Mutation,
+    /// **The bubbles a wrong prediction costs**: 1, the contract's (EX's
+    /// decision drives the next fetch's address in the same clock), or 2,
+    /// A15b.14's fallback, the redirect a clock later, so that the target
+    /// is fetched a clock later; the delay slot then does not wait in RD
+    /// (P2 is moot). `MUIR_BUBBLES=2` in the profile. A measurement switch
+    /// until muir-fpga's fit decides (the MP4 timing review §4).
+    pub bubbles: u8,
+    /// Panic when a restore of RD's copies without a redirect changes a
+    /// copy's value (the MP4 timing review's M-3); the meters count them
+    /// either way.
+    pub assert_restore: bool,
     /// Every microcycle committed, in order, when a test asks for the record
     /// by setting it to `Some`: its address, `None` for a nopped one.
     pub trace: Option<Vec<Option<u16>>>,
@@ -452,6 +482,11 @@ pub enum Mutation {
     /// A check samples the interrupt in RD, the clock before it entered
     /// EX, and not in its last EX clock (MP2b ruling Q13).
     InterruptSampledInRd,
+    /// Port B uses its walk's fill in the clock it lands (P1 undone).
+    PortBFillSameClock,
+    /// After a redirect the delay slot in RD plans and moves in the same
+    /// clock (P2 undone).
+    SlotPlansAtRedirect,
 }
 
 impl Pipeline {
@@ -499,6 +534,8 @@ impl Pipeline {
             boundary_mc: None,
             last_counted: None,
             mutation: Mutation::None,
+            bubbles: 1,
+            assert_restore: false,
             trace: None,
             operands: None,
             registers: None,

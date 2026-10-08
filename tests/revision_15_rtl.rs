@@ -927,6 +927,11 @@ fn random_programs_end_as_on_micro() {
         total.wb_hold += m.wb_hold;
         total.map_hold += m.map_hold;
         total.rd_disagreements += m.rd_disagreements;
+        total.restores_without_redirect += m.restores_without_redirect;
+        total.restores_changed += m.restores_changed;
+        total.restores_changed_planned += m.restores_changed_planned;
+        total.p1_holds += m.p1_holds;
+        total.p2_holds += m.p2_holds;
     };
     for seed in 1..=3000 {
         add(compare(&random_program(seed, 0), seed));
@@ -936,6 +941,13 @@ fn random_programs_end_as_on_micro() {
     }
     eprintln!("{total:?}");
     assert_eq!(total.rd_disagreements, 0, "RD resolved a transfer otherwise than micro");
+    // M-3 (the MP4 timing review §5): a restore of RD's copies without a
+    // redirect leaves their values as they stand.
+    eprintln!(
+        "restores without a redirect: {}, changed: {}, under a word RD plans: {}",
+        total.restores_without_redirect, total.restores_changed, total.restores_changed_planned
+    );
+    assert_eq!(total.restores_changed_planned, 0, "a restore changed the copies RD plans from");
     for (what, n) in [
         ("mispredicted jumps", total.mispredicted[0]),
         ("mispredicted dispatches", total.mispredicted[1]),
@@ -1915,6 +1927,7 @@ fn ends(p: &Prog, mutation: Mutation) -> (Micro, Result<Pipeline, Halt>) {
 fn the_speculation_matrix_ends_as_on_micro() {
     let cases = matrix();
     let mut caught = 0;
+    let (mut restores, mut changed, mut planned) = (0, 0, 0);
     for (what, p) in &cases {
         if std::env::var("MATRIX").is_ok() {
             eprintln!("{what}");
@@ -1926,12 +1939,28 @@ fn the_speculation_matrix_ends_as_on_micro() {
             diff_state(ms, us, 0);
         }
         assert_eq!(e.meters.rd_disagreements, 0, "{what}");
+        restores += e.meters.restores_without_redirect;
+        changed += e.meters.restores_changed;
+        planned += e.meters.restores_changed_planned;
         let (u, e) = ends(p, Mutation::NoSpcRestore);
         if e.map_or(true, |e| state(e.machine()) != state(u.machine())) {
             caught += 1;
         }
     }
     assert!(caught > 0, "a stack copy not restored is never caught in {} cases", cases.len());
+    // M-3 (the MP4 timing review §5): a restore of RD's copies without a
+    // redirect leaves the values RD plans from in that clock as they stand.
+    // A dispatch call whose entry sets N changes the stack's top, the pushed
+    // return being the word after the dispatch rather than after its slot;
+    // RD's word in that clock is the slot, which N nops, and plans from no
+    // copy's value.
+    eprintln!(
+        "{} cases: restores without a redirect {restores}, changed {changed}, of them under a word RD plans {planned}",
+        cases.len()
+    );
+    assert!(restores > 0, "the matrix never restores without a redirect");
+    assert!(changed > 0, "the matrix never changes a copy by a restore");
+    assert_eq!(planned, 0, "a restore without a redirect changed the copies RD plans from");
 }
 
 // --- The late squash, faulting starts, the mutations named by §13 ------------
@@ -2002,8 +2031,11 @@ fn the_late_squash_costs_two_bubbles() {
         ev.iter().find(|(_, x)| *x == Event::Commit(Some(pc as u16))).map(|e| e.0).unwrap()
     };
     let (start, handler, slot) = (commit(0), commit(SUBS[0]), commit(2));
-    // In sequence the word after the slot would commit at start + 3.
-    assert_eq!(slot, start + 3, "the check held a clock, its slot after it");
+    // In sequence the word after the slot would commit at start + 3. The
+    // slot waits a clock in RD after the redirect (P2, the MP4 timing
+    // review §4), so the bubble lies before it.
+    eprintln!("start {start} slot {slot} handler {handler}");
+    assert_eq!(slot, start + 4, "the check held a clock, its slot a clock after the redirect");
     assert_eq!(handler, start + 5, "two bubbles past the word in sequence");
 }
 
@@ -4669,4 +4701,203 @@ fn a_dispatch_memory_write_loads_the_dispatch_constant_on_revision_15() {
     let e = same(&p);
     assert_eq!(e.machine().mmem[0o26], 0o525, "the write's IR<41:32>");
     assert_eq!(micro(&p).machine().mmem[0o26], 0o525, "micro");
+}
+
+// --- The MP4 timing review's model changes (P1-P3, two bubbles) ----------------
+
+/// The pipeline on `p` with `set` applied, its events recorded, run to the
+/// stop and settled; and the clock each address first commits at.
+fn commits(p: &Prog, set: &dyn Fn(&mut Pipeline)) -> (Pipeline, Vec<(u64, muir::pipeline::Event)>) {
+    let mut e = Pipeline::new(machine(p, REV15));
+    set(&mut e);
+    e.events = Some(Vec::new());
+    let e = match run_engine(e).and_then(settled) {
+        Ok(e) => e,
+        Err((h, _)) => panic!("the pipeline halted: {h:?}"),
+    };
+    let mut e = e;
+    let ev = e.events.take().unwrap();
+    (e, ev)
+}
+
+fn commit_at(ev: &[(u64, muir::pipeline::Event)], pc: u64) -> u64 {
+    ev.iter()
+        .find(|(_, x)| *x == muir::pipeline::Event::Commit(Some(pc as u16)))
+        .map(|e| e.0)
+        .unwrap_or_else(|| panic!("{pc:o} never committed"))
+}
+
+/// **P1: port B uses its walk's fill a clock later** (the MP4 timing review
+/// §4; the MP4 rulings' Q2 fallback). `MAP(MD)` of a page not in the TLB,
+/// its directory and page entries already in the cache: the word commits a
+/// clock later than with the fill used in the clock it lands, the word
+/// before it at the same clock, and the run ends as on `micro`. The fill
+/// used at once is caught by the clock.
+#[test]
+fn p1_port_b_uses_its_walk_s_fill_a_clock_later() {
+    let x: Word = 0o4000;
+    let mut p = Prog::default();
+    walkable(&mut p, x, 3);
+    p.main.push(((3 << 10), 0o777));
+    set_directory(&mut p);
+    // The tables' lines into the cache.
+    p.read(PHYS | (8 << 10), 0o31);
+    p.read(PHYS | ((9 << 10) + 2), 0o31);
+    let xa = p.k(x);
+    p.op(ALU | SETA | a_src(xa) | MD);
+    p.fill(2);
+    let before = p.at();
+    p.fill(1);
+    let map = p.at();
+    p.op(ALU | SETM | src(0o11) | m_dest(0o25));
+    p.stop();
+    same(&p);
+    let (e, ev) = commits(&p, &|_| {});
+    let (o, ov) = commits(&p, &|e| e.mutation = Mutation::PortBFillSameClock);
+    assert_eq!(e.meters.p1_holds, 1, "one walk on port B");
+    assert_eq!(commit_at(&ev, before), commit_at(&ov, before), "the word before at the same clock");
+    assert_eq!(commit_at(&ev, map), commit_at(&ov, map) + 1, "the map word a clock later");
+    assert_eq!(o.meters.p1_holds, 0);
+}
+
+/// A conditional jump hinted taken and not taken, its slot and the word
+/// after it each counting in M 26-30, so that a squashed word shows.
+fn mispredicted_jump(n: u64) -> (Prog, u64, u64, u64) {
+    use muir::isa::asm::{ADD, HINT};
+    let mut p = Prog::default();
+    let inc = |m: u64| ALU | ADD | a_src(ONE) | m_src(m) | m_dest(m);
+    p.fill(3);
+    let jump = p.at();
+    let t = jump + 0o10;
+    // Hinted taken; M 1 is not A 0, so not taken.
+    p.op(jcond(3) | m_src(M_ONE) | a_src(ZERO) | target(t) | HINT | n);
+    let slot = p.at();
+    p.op(inc(0o26));
+    let after = p.at();
+    p.op(inc(0o27));
+    p.fill(2);
+    p.stop();
+    while p.at() < t {
+        p.fill(1);
+    }
+    p.op(inc(0o30));
+    p.stop();
+    (p, jump, slot, after)
+}
+
+/// **P2: after a wrong prediction the delay slot waits a clock in RD** (the
+/// MP4 timing review §4): a jump hinted taken and not taken, N clear: the
+/// slot commits a clock later than when RD plans it in the redirect's
+/// clock, and the word after it at the same clock: the bubble moves ahead
+/// of the slot and none is added. The run ends as on `micro`. The slot
+/// planned at once is caught by the clock.
+#[test]
+fn p2_the_slot_waits_a_clock_in_rd_after_a_wrong_prediction() {
+    let (p, jump, slot, after) = mispredicted_jump(0);
+    let e = same(&p);
+    assert_eq!(e.machine().mmem[0o26..=0o30], [1, 1, 0], "the slot and the word after ran");
+    assert_eq!(e.meters.mispredicted[0], 1);
+    let (e, ev) = commits(&p, &|_| {});
+    let (o, ov) = commits(&p, &|e| e.mutation = Mutation::SlotPlansAtRedirect);
+    assert_eq!(e.meters.p2_holds, 1);
+    assert_eq!(o.meters.p2_holds, 0);
+    assert_eq!(commit_at(&ev, jump), commit_at(&ov, jump));
+    assert_eq!(commit_at(&ev, slot), commit_at(&ev, jump) + 2, "a clock in RD, then EX");
+    assert_eq!(commit_at(&ov, slot), commit_at(&ov, jump) + 1, "planted: at once");
+    assert_eq!(commit_at(&ev, after), commit_at(&ov, after), "the word after at the same clock");
+}
+
+/// **Two bubbles, A15b.14's fallback** (`Pipeline::bubbles`): the same
+/// wrong prediction fetches the word after the slot a clock later, and the
+/// slot does not wait in RD (P2 is moot); with N set too. The speculation
+/// matrix and the random programs end as on `micro` with two bubbles.
+#[test]
+fn two_bubbles_fetch_the_target_a_clock_later() {
+    for n in [0, N] {
+        let (p, jump, slot, after) = mispredicted_jump(n);
+        let one = commits(&p, &|_| {});
+        let two = commits(&p, &|e| e.bubbles = 2);
+        let (e1, ev1) = (&one.0, &one.1);
+        let (e2, ev2) = (&two.0, &two.1);
+        assert_eq!(state(e2.machine()), state(e1.machine()), "N {n}: the same end");
+        assert_eq!(e2.meters.second_bubbles, 1, "N {n}");
+        assert_eq!(e2.meters.p2_holds, 0, "N {n}: no wait in RD");
+        assert_eq!(commit_at(ev2, jump), commit_at(ev1, jump));
+        if n == 0 {
+            assert_eq!(commit_at(ev2, slot), commit_at(ev2, jump) + 1, "the slot at once");
+        }
+        assert_eq!(commit_at(ev2, after), commit_at(ev1, after) + 1, "N {n}: a clock later");
+    }
+    for (what, p) in &matrix() {
+        let u = micro_unchecked(p);
+        let mut e = Pipeline::new(machine(p, REV15));
+        e.bubbles = 2;
+        let e = match run_engine(e).and_then(settled) {
+            Ok(e) => e,
+            Err((h, _)) => panic!("{what}: halted {h:?}"),
+        };
+        if state(e.machine()) != state(u.machine()) {
+            diff_state(e.machine(), u.machine(), 0);
+        }
+    }
+    for seed in 1..=300 {
+        let p = random_program(seed, ALL);
+        let u = micro(&p);
+        let e = pipeline_with(&p, |e| e.bubbles = 2);
+        if state(e.machine()) != state(u.machine()) {
+            diff_state(e.machine(), u.machine(), seed);
+        }
+    }
+}
+
+/// **P3: writes are answered in order, at most one a clock** (one AXI ID
+/// for every write: A15b.5; the MP4 timing review §6), under the model that
+/// answers each write 1 to 50 clocks late: over forty seeds, the in-flight
+/// list never loses two writes in one clock, and each lands no earlier than
+/// its model's draw. Writes answered as drawn, out of order, are caught: some
+/// clock lands two.
+#[test]
+fn p3_writes_are_answered_in_order_one_a_clock() {
+    let run = |seed: u64, in_order: bool| {
+        let mut m = machine(&Prog::default(), REV15);
+        let mut port = port(130);
+        port.model = Some(late(seed));
+        // The default answers in order; the planted run turns it off.
+        if !in_order {
+            port.writes_in_order = false;
+        }
+        let mut most = 0;
+        let mut now = 0;
+        let mut k = 0u32;
+        let mut before = port.depths();
+        while k < 24 || port.depths() != (0, 0) {
+            // A write a clock while the queue has room.
+            if k < 24
+                && let Some(tag) = port.write(now, 0o100 + 8 * k)
+            {
+                port.word(tag, k.into());
+                k += 1;
+                before.0 += 1;
+            }
+            now += 1;
+            port.tick(&mut m, now);
+            let after = port.depths();
+            // Accepts add to the list; responses take from it.
+            let accepted = before.0 - after.0;
+            let answered = before.1 + accepted - after.1;
+            most = most.max(answered);
+            before = after;
+            assert!(now < 10_000);
+        }
+        most
+    };
+    let mut caught = 0;
+    for seed in 1..=40 {
+        assert!(run(seed, true) <= 1, "seed {seed}: two answers in one clock");
+        if run(seed, false) > 1 {
+            caught += 1;
+        }
+    }
+    eprintln!("writes answered as drawn: two in a clock at {caught} seeds of 40");
+    assert!(caught > 0, "answers out of order are caught");
 }

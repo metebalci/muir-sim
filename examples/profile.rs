@@ -26,6 +26,8 @@
 //! by default, `MUIR_CACHE` its cache's words, and `MUIR_SYNC_TICKS` is
 //! refused.
 //!
+//! `MUIR_BUBBLES=2` gives the pipeline a wrong prediction's two bubbles,
+//! A15b.14's fallback, in place of the contract's one.
 //! `MUIR_TIME_NEUTRAL=1` is the time-neutral harness (MP2b ruling Q12,
 //! `tests/support/neutral.rs`), for `micro` and the pipeline: both run on
 //! neutral time, `Machine::cycles` times the period; the harness's keys,
@@ -279,6 +281,22 @@ impl Profiled for Pipeline {
                 "write channel: {} writes accepted, {} of two beats; {} accepts delayed by a second beat, {} clocks",
                 w.writes, w.two_beat_writes, w.beat_delays, w.beat_delay_clocks
             ),
+            {
+                let m = &self.meters;
+                format!(
+                    "pipeline: {} bubble(s) a wrong prediction; mispredicted {:?}, squashed {}, late squashes {}; P1 holds {}, P2 holds {}, second bubbles {}; restores without a redirect {}, changed {}, under a planned word {}",
+                    self.bubbles,
+                    m.mispredicted,
+                    m.squashed,
+                    m.late_squashes,
+                    m.p1_holds,
+                    m.p2_holds,
+                    m.second_bubbles,
+                    m.restores_without_redirect,
+                    m.restores_changed,
+                    m.restores_changed_planned
+                )
+            },
         ]
     }
 }
@@ -966,10 +984,18 @@ fn main() {
             let cache = std::env::var("MUIR_CACHE").ok().map_or(muir::pipeline::CACHE_WORDS, |v| {
                 v.parse().unwrap_or_else(|_| panic!("MUIR_CACHE={v}: the cache's words"))
             });
+            // `MUIR_BUBBLES=2`: a wrong prediction's two bubbles, A15b.14's
+            // fallback (`Pipeline::bubbles`); 1, the contract's, by default.
+            let bubbles = std::env::var("MUIR_BUBBLES").ok().map_or(1, |v| match v.as_str() {
+                "1" => 1,
+                "2" => 2,
+                _ => panic!("MUIR_BUBBLES={v}: 1 or 2"),
+            });
             let pipeline = move |m: muir::machine::Machine| {
                 let mut e = Pipeline::new(m);
                 let p = period.unwrap_or(e.period());
                 e.configure(p, timing, cache);
+                e.bubbles = bubbles;
                 e
             };
             if neutral {

@@ -150,6 +150,9 @@ pub(crate) struct ExResult {
     pub pc: u16,
     /// EX redirects the front end to this address.
     pub redirect: Option<u16>,
+    /// The redirect is a wrong prediction's, found by EX's check of RD's
+    /// choices: what a second bubble delays ([`Pipeline::bubbles`]).
+    pub mispredicted: bool,
     /// The delay slot in RD becomes a nopped microcycle: a taken transfer
     /// with N.
     pub kill_rd: bool,
@@ -1212,11 +1215,22 @@ impl Pipeline {
             let va = md_read as u32;
             if crate::tlb::region(va) == crate::tlb::Region::Paged
                 && self.m.tlb.lookup(va).is_none()
-                && self.walk(va, crate::tlb::Port::B).is_none()
+                && !e.b_walked
             {
-                self.meters.wb_hold += 1;
-                self.ex = Some(e);
-                return Ok(res);
+                if self.walk(va, crate::tlb::Port::B).is_none() {
+                    self.meters.wb_hold += 1;
+                    self.ex = Some(e);
+                    return Ok(res);
+                }
+                // P1 (the MP4 timing review §4; the MP4 rulings' Q2
+                // fallback): the walk's fill is used a clock later, so that
+                // no table word reaches EX's operand in the clock it lands.
+                if self.mutation != Mutation::PortBFillSameClock {
+                    e.b_walked = true;
+                    self.meters.p1_holds += 1;
+                    self.ex = Some(e);
+                    return Ok(res);
+                }
             }
         }
         if !e.nop && self.m.geometry.muldiv {
@@ -1363,6 +1377,7 @@ impl Pipeline {
                     || e.pred_pr.is_some_and(|pr| pr != self.x.entry_pr);
                 if actual != predicted || wrong_kind {
                     res.redirect = Some(actual);
+                    res.mispredicted = true;
                     self.meters.mispredicted[kind] += 1;
                 }
             } else if actual != predicted {
@@ -1371,6 +1386,7 @@ impl Pipeline {
             // RD nopped the delay slot on a prediction, and it runs.
             if res.redirect.is_none() && !self.x.inhibit && self.slot_pre_nopped(e.seq + 1) {
                 res.redirect = Some(actual);
+                res.mispredicted = true;
             }
         }
         if self.x.d_fused {
@@ -1531,9 +1547,23 @@ impl Pipeline {
             } else if let Some(pc) = refetch {
                 self.npc = pc;
                 self.npc_after = Some(to);
+                // Two bubbles: the slot RD nopped on the prediction is
+                // fetched again a clock later, as the target would be.
+                if self.bubbles == 2 && ex.mispredicted {
+                    self.cs_wait_until = self.cs_wait_until.max(self.clock + 2);
+                    self.meters.second_bubbles += 1;
+                }
             } else if slot_here {
                 self.npc = to;
                 self.npc_after = None;
+                // A15b.14's fallback: the redirect a clock later, so the
+                // target is fetched a clock later. With the delay slot not
+                // fetched yet there is nothing to delay: it is the next word
+                // in sequence, fetched first in either case.
+                if self.bubbles == 2 && ex.mispredicted {
+                    self.cs_wait_until = self.cs_wait_until.max(self.clock + 2);
+                    self.meters.second_bubbles += 1;
+                }
             } else {
                 // The delay slot not fetched yet: it comes first.
                 self.npc = (ex.pc + 1) & 0o37777;
@@ -1550,7 +1580,18 @@ impl Pipeline {
                 .max()
                 .unwrap_or(ex.seq + if refetch.is_some() || !slot_here { 0 } else { 1 })
                 + 1;
-            if let Some(r) = self.rd.clone()
+            // P2 (the MP4 timing review §4): the delay slot in RD waits there
+            // a clock and plans from the restored copies in the next, so that
+            // its plan never follows EX's outcome in the clock EX decides it.
+            // The bubble moves ahead of the slot; none is added. Moot with
+            // two bubbles, where the target comes a clock later anyway.
+            let slot_waits = self.rd.as_ref().is_some_and(|r| r.seq == slot_seq)
+                && !ex.refetch
+                && self.bubbles != 2
+                && self.mutation != Mutation::SlotPlansAtRedirect;
+            if slot_waits {
+                self.meters.p2_holds += 1;
+            } else if let Some(r) = self.rd.clone()
                 && ex_free
             {
                 let p = self.plan_for(&r, &self.copies.clone());
@@ -1563,7 +1604,31 @@ impl Pipeline {
         } else {
             let mut p = plan;
             if ex.restore && self.mutation != Mutation::NoSpcRestore {
+                // M-3 (the MP4 timing review §5): a restore without a
+                // redirect is to leave the copies' values as they stand, so
+                // that RD's plan need not follow it in the clock.
+                let before = self.copy_values();
                 self.restore_copies();
+                self.meters.restores_without_redirect += 1;
+                let after = self.copy_values();
+                if before != after {
+                    self.meters.restores_changed += 1;
+                    // What matters is a word RD plans in this clock from the
+                    // copies: not one N nops here (a nopped word's plan reads
+                    // no copy's value), and none when RD is empty.
+                    let planned = self
+                        .rd
+                        .as_ref()
+                        .is_some_and(|r| !r.nop && !(ex.kill_rd && r.seq == slot_seq));
+                    if planned {
+                        self.meters.restores_changed_planned += 1;
+                        assert!(
+                            !self.assert_restore,
+                            "a restore without a redirect changed the copies RD plans from at clock {}: {before:?} -> {after:?}",
+                            self.clock
+                        );
+                    }
+                }
                 if let Some(r) = self.rd.clone() {
                     p = self.plan_for(&r, &self.copies.clone());
                 }
@@ -1819,6 +1884,14 @@ impl Pipeline {
 
     /// **A squash's restore** (the contract's §5, Choice 2): RD's copies
     /// from the architectural state, as the word in EX has left it.
+    /// The values of RD's copies a plan reads: the stack's top, the PDL
+    /// pointer and index, LC, NEEDFETCH, the byte mode and the
+    /// next-instruction flag (the MP4 timing review's M-3).
+    fn copy_values(&self) -> (u32, u16, u16, u64, bool, bool, bool) {
+        let c = &self.copies;
+        (self.top(c), c.pdl_ptr, c.pdl_idx, c.lc, c.needfetch, c.byte_mode, c.next_instr)
+    }
+
     pub(crate) fn restore_copies(&mut self) {
         let keep = self.copies;
         let c = &mut self.copies;

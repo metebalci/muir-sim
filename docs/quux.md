@@ -2018,8 +2018,24 @@ over a second at every period
 conditional jump is predicted by its hint and a dispatch by its predicted
 target, P and R, and EX checks the address and the prediction itself. A
 wrong one squashes the words behind the delay slot and restores RD's copies
-from the committed state: one bubble. A delay slot N inhibits is nopped and
-counts once in `Machine::cycles`
+from the committed state: one bubble. The delay slot, when RD holds it, waits
+there a clock and plans from the restored copies in the next, so that its
+plan never follows EX's outcome in the clock EX decides it: the bubble moves
+ahead of the slot and none is added, the word after the slot committing at
+the same clock as when the slot plans at once
+(`p2_the_slot_waits_a_clock_in_rd_after_a_wrong_prediction`). A restore of
+RD's copies without a redirect, after a transfer whose delay slot N nops,
+changes no value a word RD plans from in that clock: it changes the stack's
+top after a dispatch call whose entry sets N, the pushed return being the
+word after the dispatch, while RD's word then is the slot N nops; the
+pipeline counts both, and `Pipeline::assert_restore` stops on the second
+(`the_speculation_matrix_ends_as_on_micro`,
+`random_programs_end_as_on_micro`). `Pipeline::bubbles`, `MUIR_BUBBLES=2` in
+the profile, gives a wrong prediction A15b.14's fallback of two bubbles, the
+redirect a clock later, so that the target, or the slot RD nopped on the
+prediction, is fetched a clock later and the slot does not wait in RD;
+the programs end alike (`two_bubbles_fetch_the_target_a_clock_later`). A
+delay slot N inhibits is nopped and counts once in `Machine::cycles`
 (`conditional_jumps_hinted_each_way_end_as_on_micro`,
 `dispatches_predicted_each_way_end_as_on_micro`,
 `the_speculation_matrix_ends_as_on_micro`,
@@ -2070,11 +2086,16 @@ its walk takes and whenever the read's word lands, and a walk keeps the
 address it began with to its fill: the TLB then holds what `micro`'s holds,
 and no page index is read under another address's directory entry
 (`row_port_b_right_after_a_read_start_walks_the_md_it_reads`,
-`a_walk_keeps_the_address_it_began_with`).
+`a_walk_keeps_the_address_it_began_with`). Port B uses its walk's fill a
+clock after it lands, so that no table word reaches EX's operand in the
+clock it is read (`p1_port_b_uses_its_walk_s_fill_a_clock_later`).
 
 **The memory port** posts writes: a queue of 8 entries, freed when the port
 accepts a write, and 16 accepted writes in flight until their responses;
-main memory takes a write's word at its response. A read whose line has a
+main memory takes a write's word at its response. Writes are answered in
+order, at most one a clock, as one AXI ID for every write answers them: a
+run's are so already, and the test memory that answers a write 1 to 50
+clocks late is held to it (`p3_writes_are_answered_in_order_one_a_clock`). A read whose line has a
 write queued or in flight waits for every such response, and every other
 read goes ahead (`the_read_rule_returns_the_word_written`,
 `the_ninth_write_waits_for_the_first_s_acceptance`,

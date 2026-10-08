@@ -380,6 +380,13 @@ pub struct Port {
     pub write_waits_for_fill: bool,
     /// Every write taken as one data beat: a test's mutation.
     pub one_beat_writes: bool,
+    /// Writes answered in order, at most one a clock: one AXI ID for every
+    /// write (A15b.5; the MP4 timing review §6, P3). A run's answers are so
+    /// already; [`LateModel`]'s draws are held to it. A test's mutation
+    /// turns it off, letting a later write be answered first.
+    pub writes_in_order: bool,
+    /// The last accepted write's response clock, for that order.
+    last_respond_at: u64,
     pub meters: PortMeters,
     /// Errors answered, for register-page word 225, taken by the machine.
     errors: u32,
@@ -410,6 +417,8 @@ impl Port {
             read_rule_waits_for_responses: true,
             write_waits_for_fill: true,
             one_beat_writes: false,
+            writes_in_order: true,
+            last_respond_at: 0,
             meters: PortMeters::default(),
             errors: 0,
             next_tag: 1,
@@ -505,12 +514,14 @@ impl Port {
                 mm.errors = mm.errors.saturating_sub(1);
                 e
             });
-            self.inflight.push_back(InFlight {
-                bus: q.bus,
-                word: Some(word),
-                respond_at: now + self.clocks.write + late,
-                error,
-            });
+            let mut respond_at = now + self.clocks.write + late;
+            if self.writes_in_order {
+                // One ID: no response before the one ahead of it, and one a
+                // clock (P3).
+                respond_at = respond_at.max(self.last_respond_at + 1);
+            }
+            self.last_respond_at = respond_at;
+            self.inflight.push_back(InFlight { bus: q.bus, word: Some(word), respond_at, error });
             // The write channel takes the next accept no sooner than
             // max(occupancy, beats) clocks after this one (MP4 ruling Q1,
             // C1): the accept is the address and the first data beat taken.
