@@ -2045,15 +2045,22 @@ impl Micro {
         // against MIT's own wire list `cadrwd/cadr4.wlr`; no other
         // implementation is cited, and none is needed.
         //
-        // It really costs two microcycles and this engine spends neither in
-        // the pipeline: `IWRITED` drives `N` as well as `POPJ`, so the board
-        // loses one cycle to this instruction's `N` and another to
-        // `IWRITED`'s. Inhibiting two cycles here would kill the two
-        // instructions after the write rather than returning to the first of
-        // them, so the cycles are charged to the clock instead and the
-        // pipeline is left alone.
+        // In MIT's form, with N (`cadsym.lisp`: `JUMP-OP` carries
+        // `INHIBIT-XCT-NEXT-BIT`), it costs two microcycles: N nops the word
+        // fetched during the write, `IR` takes `IWR` and `IWRITED`'s N nops
+        // that, and `IWRITED`'s POPJ returns to the word fetched during the
+        // write, which the store is read for again after the write. So the
+        // word after it in execution order runs, its new word if the write
+        // hit it (WRITE-I-MEM ruling). In CC's form, without N, the word
+        // fetched during the write runs as it was fetched, and only
+        // `IWRITED`'s N costs a microcycle. This engine spends neither in its
+        // pipeline: it fetches that word again under N, and charges the
+        // nopped microcycles to the clock.
         if p && r {
             self.m.write_imem(target, Insn::extended(self.iwr));
+            if n {
+                self.p1 = self.m.fetch(self.p1_pc);
+            }
             if !invert && self.jump_condition() {
                 let ret = if n { self.npc.wrapping_sub(1) } else { self.npc } & 0o37777;
                 self.push_spc(ret as u32);
@@ -2064,12 +2071,12 @@ impl Micro {
                 self.spc_popped = false;
                 self.pop_spc();
             }
-            // The two microcycles the board spends on it, both nopped and
-            // so never long, go on the clock at the next step, where the
-            // board spends them: `micro_keeps_the_machines_periods` parted
-            // from `rtl` by exactly two boot-speed cycles at
-            // `CLEAR-I-MEMORY` without them.
-            self.nopped = 2;
+            // The microcycles the board spends on it, nopped and so never
+            // long, go on the clock at the next step, where the board spends
+            // them: `micro_keeps_the_machines_periods` parted from `rtl` by
+            // exactly two boot-speed cycles at `CLEAR-I-MEMORY` without them;
+            // one without N.
+            self.nopped = if n { 2 } else { 1 };
             return Ok(());
         }
 

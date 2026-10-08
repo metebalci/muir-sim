@@ -1456,3 +1456,132 @@ fn the_trap_cycle_is_long_on_both() {
         assert_eq!(eng.machine().ns - ns, 185, "{name}: the trap cycle");
     }
 }
+
+// --- WRITE-I-MEM of the word after it, and in a delay slot -------------------
+
+/// Where the WRITE-I-MEM programs sit, above the CADR's PROM, and their
+/// stop.
+const WIM_AT: u64 = 0o4000;
+const WIM_STOP: u64 = WIM_AT + 0o1000;
+
+/// `micro` and `rtl` on `geometry`, the control store holding `words` at
+/// [`WIM_AT`] and fillers behind, the PROM jumping there; A 41 is 1 and A
+/// 100 and 101 the word a write writes, `w`. Each run to the stop, and its
+/// M 21, 22 and 23, its SPC pointer, and the machine's time less `rtl`'s
+/// stalls.
+fn wim_both(geometry: muir::machine::Geometry, words: &[u64], w: u64) -> [([u64; 3], u8, u64); 2] {
+    let make = || {
+        let mut m = Machine::with_geometry(geometry, 1);
+        for k in 0..0o2000usize {
+            m.imem[WIM_AT as usize + k] = filler();
+        }
+        for (k, &x) in words.iter().enumerate() {
+            m.imem[WIM_AT as usize + k] = Insn::extended(x);
+        }
+        m.imem[WIM_STOP as usize] = Insn::new(JUMP | target(WIM_STOP) | ALWAYS | N);
+        m.load_prom(&[Insn::new(JUMP | target(WIM_AT) | ALWAYS | N), filler(), filler()]);
+        m.amem[0o41] = 1;
+        m.amem[0o100] = w & 0xffff_ffff;
+        m.amem[0o101] = w >> 32;
+        m
+    };
+    fn run<E: Engine>(mut e: E, stalled: &dyn Fn(&E) -> u64) -> ([u64; 3], u8, u64) {
+        e.boot();
+        let mut k = 0;
+        while e.machine().opc != WIM_STOP as u16 {
+            e.step().unwrap();
+            k += 1;
+            assert!(k < 20_000, "the program never reached its stop");
+        }
+        let m = e.machine();
+        ([m.mmem[0o21], m.mmem[0o22], m.mmem[0o23]], m.spcptr, m.ns - stalled(&e))
+    }
+    [run(Micro::new(make()), &|_| 0), run(Rtl::new(make()), &|r: &Rtl| r.stalled_ns())]
+}
+
+/// The WRITE-I-MEM word: MIT's form, `IR<9:0>` 1647 (`cadsym.lisp`: R, P,
+/// and `JUMP-OP`'s N), or CC's, without N; writing A 101 and M 20 to `at`.
+fn wim(n: bool, at: u64) -> u64 {
+    JUMP | P | R | ALWAYS | target(at) | a_src(0o101) | m_src(0o20) | if n { N } else { 0 }
+}
+
+/// **A WRITE-I-MEM of the word after it** (WRITE-I-MEM ruling): in MIT's
+/// form, with N, the board nops the word it fetched during the write and
+/// `IWRITED`'s POPJ returns to it, fetched again from the store after the
+/// write, so the new word runs; in CC's form, without N, the word fetched
+/// before the write runs as the slot, the old word. On the CADR and on
+/// revision 14, `micro` as `rtl`, the netlist's engine. **Fails** a `micro`
+/// that runs the word it prefetched after MIT's form.
+#[test]
+fn a_write_i_mem_of_the_word_after_it_runs_as_the_board_runs_it() {
+    use muir::isa::asm::ADD;
+    use muir::machine::Geometry;
+    let inc = |m: u64| ALU | ADD | a_src(0o41) | m_src(m) | m_dest(m);
+    let set = ALU | muir::isa::asm::SETA | a_src(0o100) | m_dest(0o20);
+    let stop = JUMP | ALWAYS | N | target(WIM_STOP);
+    let fil = filler().raw();
+    for g in [Geometry::CADR, Geometry::QUUX_14] {
+        for (n, new) in [(true, 1), (false, 0)] {
+            let words = [set, wim(n, WIM_AT + 2), fil, fil, stop, fil];
+            let [u, r] = wim_both(g, &words, inc(0o22));
+            let what = format!("{:?}, N {n}", g.revision());
+            assert_eq!((u.0, u.1), (r.0, r.1), "{what}: micro as rtl");
+            assert_eq!(r.0[1], new, "{what}: the new word runs with N, the old without");
+        }
+    }
+}
+
+/// **A WRITE-I-MEM in a jump's delay slot goes on at the jump's target**
+/// (WRITE-I-MEM ruling): MIT's form pushes the target under N and returns
+/// to it, fetched again after the write; a write of the target runs its new
+/// word. On the CADR and revision 14, `micro` as `rtl`. **Fails** a
+/// `micro` that runs the target's word as it prefetched it.
+#[test]
+fn a_write_i_mem_in_a_delay_slot_goes_on_at_the_jump_s_target() {
+    use muir::isa::asm::ADD;
+    use muir::machine::Geometry;
+    let inc = |m: u64| ALU | ADD | a_src(0o41) | m_src(m) | m_dest(m);
+    let set = ALU | muir::isa::asm::SETA | a_src(0o100) | m_dest(0o20);
+    let stop = JUMP | ALWAYS | N | target(WIM_STOP);
+    let fil = filler().raw();
+    for g in [Geometry::CADR, Geometry::QUUX_14] {
+        // Another word written, then the target itself.
+        for (at, want) in [(WIM_AT + 0o20, [0, 0, 1]), (WIM_AT + 0o10, [0, 1, 0])] {
+            let mut words = vec![
+                set,
+                JUMP | ALWAYS | target(WIM_AT + 0o10),
+                wim(true, at),
+                inc(0o21),
+                stop,
+                fil,
+            ];
+            words.resize(0o10, fil);
+            words.extend([inc(0o23), stop, fil]);
+            let [u, r] = wim_both(g, &words, inc(0o22));
+            let what = format!("{:?}, writing {at:o}", g.revision());
+            assert_eq!((u.0, u.1), (r.0, r.1), "{what}: micro as rtl");
+            assert_eq!(r.0, want, "{what}: M 21, 22, 23");
+        }
+    }
+}
+
+/// **A WRITE-I-MEM costs what it costs on the board** (WRITE-I-MEM ruling,
+/// W5): two nopped microcycles in MIT's form, `IWRITED`'s N after its own,
+/// and one in CC's, without N. Against the same program without the
+/// write, `micro`'s clock moves as `rtl`'s less its stalls, on the CADR and
+/// revision 14.
+#[test]
+fn a_write_i_mem_costs_its_nopped_microcycles_on_micro_as_on_the_board() {
+    use muir::machine::Geometry;
+    let set = ALU | muir::isa::asm::SETA | a_src(0o100) | m_dest(0o20);
+    let stop = JUMP | ALWAYS | N | target(WIM_STOP);
+    let fil = filler().raw();
+    for g in [Geometry::CADR, Geometry::QUUX_14] {
+        let base = wim_both(g, &[set, fil, fil, fil, stop, fil], fil);
+        for n in [true, false] {
+            let with = wim_both(g, &[set, wim(n, WIM_AT + 0o20), fil, fil, stop, fil], fil);
+            let (du, dr) = (with[0].2 - base[0].2, with[1].2 - base[1].2);
+            assert_eq!(du, dr, "{:?}, N {n}: micro +{du} ns, rtl +{dr}", g.revision());
+        }
+    }
+}
