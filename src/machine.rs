@@ -1154,6 +1154,11 @@ pub enum Halt {
     /// OA-REG-HIGH (`high`) or OA-REG-LOW, and the word at `pc` does not
     /// select it, where IMOD would have modified it.
     OaWriteWithoutSelect { pc: u16, high: bool },
+    /// **The WRITE-I-MEM check** (proposed name; revision 15, WRITE-I-MEM
+    /// ruling), under `Micro::oa_select_check`: the word at `pc` is a
+    /// WRITE-I-MEM outside MIT's form, `IR<9:0>` 1647 without POPJ, or run
+    /// as a delay slot (`in_slot`).
+    WriteImemRefused { pc: u16, in_slot: bool },
 }
 
 /// The location counter itself, `LC<25:0>`: the 74S169 counters on page LC

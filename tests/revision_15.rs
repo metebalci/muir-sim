@@ -405,7 +405,7 @@ fn write_i_mem_writes_64_bits_and_no_tag() {
     let (a, m) = (p.k(high), 0o30);
     p.mmem.push((m, low));
     // A JUMP with P and R writes the control store at its target.
-    p.op(JUMP | P | R | ALWAYS | target(0o700) | a_src(a) | m_src(m));
+    p.op(JUMP | P | R | N | ALWAYS | target(0o700) | a_src(a) | m_src(m));
     p.fill(2);
     p.stop();
     let u = run_on(&p, REV15, &|_| {}).ok().unwrap();
@@ -859,7 +859,15 @@ fn each_of_the_nine_fields_is_taken_through_its_select() {
     p.oa(false, 0o123 << 12).op(disp(0) | DMEM_WRITE | a_src(ventry) | SL);
     // WRITE-I-MEM at 0 | 650: A 0, M 0's word.
     p.op(ALU | SETA | a_src(vword) | m_dest(0));
-    p.oa(false, 0o650 << 12).op(JUMP | P | R | ALWAYS | target(0) | a_src(ZERO) | m_src(0) | SL);
+    p.oa(false, 0o650 << 12).op(JUMP
+        | P
+        | R
+        | N
+        | ALWAYS
+        | target(0)
+        | a_src(ZERO)
+        | m_src(0)
+        | SL);
     p.fill(2);
     // The target: 0 | 700, which marks M 26.
     p.oa(false, 0o700 << 12).op(JUMP | ALWAYS | target(0) | N | SL);
@@ -1112,6 +1120,62 @@ fn the_shadow_check_halts_on_each_breach() {
         assert_eq!(got.is_none(), clean, "a write followed by the target: {got:?}");
         if !clean {
             assert_eq!(got, Some(Halt::OaWriteWithoutSelect { pc: t as u16, high: false }));
+        }
+    }
+}
+
+/// **The WRITE-I-MEM check** (proposed name; WRITE-I-MEM ruling), on
+/// `micro` under the OA select check: a WRITE-I-MEM runs only in MIT's
+/// form, `IR<9:0>` 1647 without POPJ, and never as a delay slot. Each
+/// breach halts at the word, with its control: MIT's form clean, after an
+/// ALU word, a jump with N, and another WRITE-I-MEM; without N, inverted,
+/// conditional, with POPJ; and as the slot of a jump with N clear, of a
+/// word with POPJ, of a dispatch. With the check off nothing halts.
+/// **Fails** a check that misses a form or a slot, or halts on MIT's.
+#[test]
+fn the_write_i_mem_check_halts_outside_mit_s_form_and_in_a_slot() {
+    use muir::isa::asm::INVERT;
+    let mit = JUMP | P | R | N | ALWAYS | target(0o700) | a_src(ZERO) | m_src(0);
+    assert_eq!(mit & 0o1777, 0o1647, "MIT's form");
+    let run = |before: Option<u64>, w: u64, check: bool| {
+        let mut p = Prog::default();
+        let t = p.at() + 6;
+        if let Some(b) = before {
+            p.op(b | target(t));
+        }
+        let at = p.at() as u16;
+        p.op(w);
+        p.fill(2).stop();
+        while p.at() < t {
+            p.fill(1);
+        }
+        p.fill(1).stop();
+        let mut u = Micro::new(machine(&p, REV15, &|_| {}));
+        u.oa_select_check = check;
+        u.boot();
+        let halt = (0..2_000).find_map(|_| u.step().err());
+        (at, halt)
+    };
+    let alu = ALU | SETA | a_src(ONE) | m_dest(0o10);
+    for (what, before, w, refused) in [
+        ("MIT's form", None, mit, None),
+        ("after an ALU word", Some(alu & !(0o37777 << 12)), mit, None),
+        ("after a jump with N", Some(JUMP | ALWAYS | N), mit, None),
+        ("after a WRITE-I-MEM", Some(mit & !(0o37777 << 12)), mit, None),
+        ("without N", None, mit & !N, Some(false)),
+        ("inverted", None, mit | INVERT, Some(false)),
+        ("conditional", None, mit & !0o40, Some(false)),
+        ("with POPJ", None, mit | POPJ, Some(false)),
+        ("in a jump's slot", Some(JUMP | ALWAYS), mit, Some(true)),
+        ("after a POPJ word", Some(alu & !(0o37777 << 12) | POPJ), mit, Some(true)),
+        ("after a dispatch", Some(DISPATCH), mit, Some(true)),
+    ] {
+        let (at, got) = run(before, w, true);
+        let want = refused.map(|in_slot| Halt::WriteImemRefused { pc: at, in_slot });
+        assert_eq!(got, want, "{what}");
+        if refused.is_some() {
+            let (_, off) = run(before, w, false);
+            assert!(!matches!(off, Some(Halt::WriteImemRefused { .. })), "{what}: the check off");
         }
     }
 }

@@ -108,6 +108,15 @@ pub struct Micro {
     /// revision-15 checkpoint, so that a resume between a write and its
     /// select checks as the run would have.
     oa_shadow: [bool; 2],
+    /// The word executed in the microcycle before makes this one a delay
+    /// slot, as the WRITE-I-MEM check (proposed name) reads it: a JUMP
+    /// with N clear that is not a WRITE-I-MEM, a word with POPJ, or a
+    /// DISPATCH. Under [`Micro::oa_select_check`], on revision 15, a
+    /// WRITE-I-MEM outside MIT's form or run in a delay slot halts
+    /// (`Halt::WriteImemRefused`; WRITE-I-MEM ruling). Not kept in a
+    /// checkpoint: a resume between a transfer and its slot takes the slot
+    /// as none.
+    slot_next: bool,
 
     new_md: Word,
     new_md_delay: u8,
@@ -294,6 +303,7 @@ impl Micro {
             oa_high: 0,
             oa_select_check: true,
             oa_shadow: [false; 2],
+            slot_next: false,
             new_md: 0,
             new_md_delay: 0,
             new_md2: 0,
@@ -740,6 +750,33 @@ impl Micro {
             ir |= bits;
         }
         Ok(Insn::new(ir))
+    }
+
+    /// **The WRITE-I-MEM check** (proposed name; WRITE-I-MEM ruling), under
+    /// [`Micro::oa_select_check`] on revision 15: the word about to run, a
+    /// WRITE-I-MEM (a JUMP with P and R) in any form but MIT's, `IR<9:0>`
+    /// 1647 without POPJ, or run as a delay slot, halts before it does
+    /// anything. The micro-assembler refuses both in assembled code; this
+    /// catches a word written at run time.
+    fn write_imem_check(&mut self) -> Result<(), Halt> {
+        let ir = self.p0.raw();
+        let in_slot = std::mem::replace(
+            &mut self.slot_next,
+            match self.p0.op() {
+                _ if ir >> 42 & 1 != 0 => true,
+                Op::Jump => ir & 0o1400 != 0o1400 && ir & 0o200 == 0,
+                Op::Dispatch => true,
+                _ => false,
+            },
+        );
+        let wim = self.p0.op() == Op::Jump && ir & 0o1400 == 0o1400;
+        if !self.oa_select_check || !wim {
+            return Ok(());
+        }
+        if ir & 0o1777 != 0o1647 || ir >> 42 & 1 != 0 || in_slot {
+            return Err(Halt::WriteImemRefused { pc: self.p0_pc, in_slot });
+        }
+        Ok(())
     }
 
     /// `-RESET` clears revision 15's OA registers (A15b.15), and the shadow
@@ -2366,6 +2403,7 @@ impl Engine for Micro {
             oa_high,
             // A run setting.
             oa_select_check: _,
+            slot_next: _,
             oa_shadow,
             new_md,
             new_md_delay,
@@ -2696,6 +2734,7 @@ impl Engine for Micro {
             self.oal = false;
             self.oah = false;
             self.oa_shadow = [false; 2];
+            self.slot_next = false;
             // Nopped, the instruction's misc field decodes to nothing.
             self.halted = false;
             self.land_writes();
@@ -2719,6 +2758,7 @@ impl Engine for Micro {
         if self.m.geometry.extended() {
             let word = self.p0;
             self.p0 = self.oa_selected(word)?;
+            self.write_imem_check()?;
             if matches!(word.op(), Op::Alu | Op::Byte) {
                 pdl_field = word.pdl_field().map(|f| self.pdl_field_index(f));
             }
