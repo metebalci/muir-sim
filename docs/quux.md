@@ -2057,10 +2057,13 @@ and a checkpoint taken there, run on to the same end, the state at the halt
 one microcycle each (`a_halt_at_every_clock_resumes_to_the_same_end`,
 `a_halt_mid_burst_loses_no_write`, `a_single_step_runs_one_microcycle`).
 The squashed words are fetched again in order, the first two at the
-addresses committed words chose for them. A D that waits for the stream's
-word keeps waiting over the halt, its delay slot, which makes the fetch,
-fetched again ahead of the wait; on the main loop's programs, D on and off,
-a halt at every clock ends as the run without it
+addresses committed words chose for them: a lone squashed word is followed
+by the address the next fetch would have taken
+(`a_halt_that_squashes_one_word_keeps_the_address_after_it`). A D that
+waits for the stream's word keeps waiting over the halt, its delay slot,
+which makes the fetch, fetched again ahead of the wait
+(`a_halt_keeps_d_s_wait_for_the_stream_s_word`); on the main loop's
+programs, D on and off, a halt at every clock ends as the run without it
 (`a_halt_at_every_clock_of_the_main_loop_machines`).
 A write's word is `MD` as the microcycle after its start leaves it; when a
 halt squashes that microcycle, it is `MD` as it stands. **Unverified**
