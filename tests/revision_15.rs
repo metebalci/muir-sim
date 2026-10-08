@@ -753,6 +753,9 @@ fn revision_15_and_the_others_refuse_each_other_s_checkpoints() {
     for r in ["13", "14", "15"] {
         let out = start(r, true).args(["--stop-after", "100", "--checkpoint"]).arg(chk(r)).run();
         assert!(out.status.success(), "{r}: {}", text(&out));
+        // Revision 15's file is version 51 (MP4 ruling Q3), the others' 50.
+        let version = muir::checkpoint::read(&chk(r)).unwrap().version;
+        assert_eq!(version, if r == "15" { 51 } else { 50 }, "{r}: the version");
     }
     for (ours, theirs) in [("15", "13"), ("15", "14"), ("13", "15"), ("14", "15")] {
         let c = chk(theirs);

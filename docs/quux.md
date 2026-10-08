@@ -1522,8 +1522,8 @@ and the band reaches its listener on it with 2001 in `A-VERSION`
 
 ## The checkpoint
 
-**A checkpoint of QUUX is a 40-bit machine's, version 50**, which says the
-width: every word 5 bytes, `<7:0>` first and the tag last, so that main
+**A checkpoint of QUUX is a 40-bit machine's, version 50**, and revision
+15's version 51, which say the width: every word 5 bytes, `<7:0>` first and the tag last, so that main
 memory in it is packed storage byte for byte (contract G2 appendix A1.13);
 the dispatch memory of 4,096 entries, the map's 8,192 and 4,096 entries,
 the overflow flag, and the rest. A checkpoint of the CADR is version 49,
@@ -1965,16 +1965,31 @@ The symbol area is refused when its start or extent passes the largest
 main memory, 64MW, and `Mcr::check_main_memory` holds it to a machine's own
 (`the_symbol_area_lies_in_main_memory`).
 
-**The checkpoint** of revision 15 is version 50, as revision 14's. It says
-its revision in the byte where revision 13 keeps its level-1 entry's width
-and revision 14 a 0: `0o217`, 15 with `<7>` set, a value no width takes.
-It keeps the control store's 64 bits and the OA registers, in IMOD's
-registers' place, with no pending flag; after revision 14's fields, word
-225 and the check's shadow
-(`a_checkpoint_records_revision_15_and_keeps_64_bits`). `quux`
-refuses a checkpoint of revision 13 or 14 on revision 15 and the reverse,
-naming the revision that wrote it
+**The checkpoint** of revision 15 is version 51, a 40-bit machine's as
+revision 14's version 50. It says its revision in the byte where revision
+13 keeps its level-1 entry's width and revision 14 a 0: `0o217`, 15 with
+`<7>` set, a value no width takes. It keeps the control store's 64 bits
+and the OA registers, in IMOD's registers' place, with no pending flag;
+after revision 14's fields, word 225 and the check's shadow
+(`a_checkpoint_records_revision_15_and_keeps_64_bits`). The pipeline's
+state in it holds no pending OA flag either; a revision-15 file of version
+50, which holds revision 14's two IMOD flags after the OA registers, still
+loads, and is written again as version 51
+(`a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_50_one_loads`).
+`quux` refuses a checkpoint of revision 13 or 14 on revision 15 and the
+reverse, naming the revision that wrote it
 (`revision_15_and_the_others_refuse_each_other_s_checkpoints`).
+
+**The console** reads `IR<63:48>` at spy register 3, `SPY-IR-EXT` (a
+proposed name), after `IR<15:0>`, `<31:16>` and `<47:32>` at 0 to 2, and
+write strobe 6, with its alias 14, loads the debug IR's `<63:48>`,
+`-LDDBIRX` (a proposed name); a console writes all four halves. On the
+CADR and revisions 13 and 14 register 3 reads open and strobe 6 loads
+nothing
+(`spy_register_3_and_write_strobe_6_are_ir_s_extension_on_revision_15`).
+The debug IR's word, all 64 bits, runs in place of the word at PC when a
+step is made with `IDEBUG` up, on `micro` and on the pipeline alike
+(`the_pipeline_runs_the_debug_ir_s_64_bits_as_micro_does`).
 
 ### `rtl` is the pipeline
 

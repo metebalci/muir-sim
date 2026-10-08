@@ -46,6 +46,21 @@ pub const VERSION: u32 = 49;
 /// body at 40 bits.
 pub const VERSION_40: u32 = 50;
 
+/// QUUX revision 15's: a 40-bit machine's, as [`VERSION_40`], whose
+/// pipeline's state has no pending OA flag, revision 14's two IMOD flags
+/// left out (A15b.13; MP4 ruling Q3). A revision-15 file of
+/// [`VERSION_40`], which has them, still loads.
+pub const VERSION_15: u32 = 51;
+
+/// The version a checkpoint of a machine of `geometry` is written at.
+pub fn version_for(geometry: &crate::machine::Geometry) -> u32 {
+    match geometry.word_bits {
+        _ if geometry.extended() => VERSION_15,
+        40 => VERSION_40,
+        _ => VERSION,
+    }
+}
+
 /// The shortest run of zero bytes worth a count of its own.
 const MIN_ZERO_RUN: usize = 4;
 
@@ -219,17 +234,26 @@ pub struct Reader<'a> {
     /// whoever reads it knows the width, as a resume knows the memory
     /// boards from the header.
     word_bytes: usize,
+    /// The file's version, when the body came from a file: what a type
+    /// whose fields changed reads an older file by. `None` is this build's
+    /// own.
+    version: Option<u32>,
 }
 
 impl<'a> Reader<'a> {
     /// A body of a 32-bit machine's.
     pub fn new(data: &'a [u8]) -> Reader<'a> {
-        Reader { data, at: 0, word_bytes: WORD_BYTES_32 }
+        Reader { data, at: 0, word_bytes: WORD_BYTES_32, version: None }
     }
 
     /// A body of a machine whose words are `bits` wide, 32 or 40.
     pub fn for_word_bits(data: &'a [u8], bits: u32) -> Reader<'a> {
-        Reader { data, at: 0, word_bytes: word_bytes(bits) }
+        Reader { data, at: 0, word_bytes: word_bytes(bits), version: None }
+    }
+
+    /// The file's version the body is of, if it came from a file.
+    pub fn version(&self) -> Option<u32> {
+        self.version
     }
 
     /// The width this reader takes words at.
@@ -412,7 +436,7 @@ impl io::Read for Reader<'_> {
 /// A checkpoint read back: what its header says, and its body.
 #[derive(Debug)]
 pub struct Checkpoint {
-    /// The format's version: [`VERSION`], or [`VERSION_40`].
+    /// The format's version: [`VERSION`], [`VERSION_40`] or [`VERSION_15`].
     pub version: u32,
     /// The machine's word, as the version says: 32 or 40 bits.
     pub word_bits: u32,
@@ -428,7 +452,7 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// A reader of the body at the machine's width.
     pub fn reader(&self) -> Reader<'_> {
-        Reader::for_word_bits(&self.body, self.word_bits)
+        Reader { version: Some(self.version), ..Reader::for_word_bits(&self.body, self.word_bits) }
     }
 }
 
@@ -447,6 +471,17 @@ pub fn write(
         40 => VERSION_40,
         _ => return Err(bad(format!("{word_bits}-bit words are no machine's"))),
     };
+    write_version(path, engine, memory_boards, version, body)
+}
+
+/// [`write`] at the format's version `version`, which says the width.
+pub fn write_version(
+    path: &Path,
+    engine: &str,
+    memory_boards: usize,
+    version: u32,
+    body: &[u8],
+) -> io::Result<u64> {
     let mut out = Vec::with_capacity(64);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&version.to_le_bytes());
@@ -468,10 +503,10 @@ pub fn read(path: &Path) -> io::Result<Checkpoint> {
     let version = r.u32()?;
     let word_bits = match version {
         VERSION => 32,
-        VERSION_40 => 40,
+        VERSION_40 | VERSION_15 => 40,
         _ => {
             return Err(bad(format!(
-                "format version {version}; this build reads {VERSION} and {VERSION_40}"
+                "format version {version}; this build reads {VERSION}, {VERSION_40} and {VERSION_15}"
             )));
         }
     };

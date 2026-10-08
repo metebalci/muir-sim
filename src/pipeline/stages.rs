@@ -1674,7 +1674,11 @@ impl Pipeline {
         {
             self.d_slot_pending = false;
             let pc = self.npc;
-            let mut s = Slot::new(self.seq, pc, self.m.fetch(pc));
+            // With `IDEBUG` up the debug IR's word is loaded in place of the
+            // store's, as a single step runs it (A15b.13; MP4 ruling Q4).
+            let word =
+                if self.m.clock_control.idebug { self.m.debug_insn() } else { self.m.fetch(pc) };
+            let mut s = Slot::new(self.seq, pc, word);
             self.seq += 1;
             s.nop = std::mem::take(&mut self.b.nop_next);
             s.pre_nop = std::mem::take(&mut self.b.pre_nop_next) && !s.nop;

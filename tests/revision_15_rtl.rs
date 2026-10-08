@@ -4402,3 +4402,194 @@ fn the_harness_acts_between_two_microcycles_on_both_engines() {
     eprintln!("looking at the pipeline as it stands: {caught} of 40 action points see otherwise");
     assert!(caught > 0, "acting without the halt is caught");
 }
+
+// --- The console on revision 15 (A15b.13; MP4 rulings Q3, Q4) ------------------
+
+/// Two jumps in a loop, each with the hint, `IR<48>`: every word to run
+/// has `IR<63:48>` 1.
+fn hinted_loop() -> Prog {
+    use muir::isa::asm::HINT;
+    let mut p = Prog::default();
+    p.op(JUMP | target(1) | ALWAYS | N | HINT);
+    p.op(JUMP | target(0) | ALWAYS | N | HINT);
+    p
+}
+
+/// `micro` on `p` at `geometry`, run a while and halted by the clock
+/// control register.
+fn micro_halted(p: &Prog, geometry: Geometry) -> Micro {
+    let mut u = Micro::new(machine(p, geometry));
+    u.boot();
+    for _ in 0..20 {
+        u.step().unwrap();
+    }
+    u.spy_write(muir::spy::CLK, 0);
+    u.step().unwrap();
+    u
+}
+
+/// The pipeline on `p`, run a while and halted by the clock control
+/// register, drained.
+fn pipeline_halted(p: &Prog) -> Pipeline {
+    let mut e = Pipeline::new(machine(p, REV15));
+    e.boot();
+    e.skip_sweep();
+    for _ in 0..40 {
+        e.tick().unwrap();
+    }
+    e.spy_write(muir::spy::CLK, 0);
+    while !e.is_halted() {
+        e.tick().unwrap();
+    }
+    e
+}
+
+/// **Spy register 3 reads `IR<63:48>` and write strobe 6, with its alias
+/// 14, loads the debug IR's `<63:48>`, on revision 15 only** (MP4 ruling
+/// Q4: `SPY-IR-EXT` and `-LDDBIRX`, proposed). Strobe 7 and 15 load
+/// nothing; on revision 14 and the CADR, 6 and 14 load nothing and
+/// register 3 is open. Read on `micro` and on the pipeline, halted at a
+/// word whose extension is 1.
+#[test]
+fn spy_register_3_and_write_strobe_6_are_ir_s_extension_on_revision_15() {
+    use muir::spy;
+    for (what, mut m, connected) in [
+        ("revision 15", Machine::with_geometry(REV15, 1), true),
+        ("revision 14", Machine::with_geometry(Geometry::QUUX_14, 1), false),
+        ("the CADR", Machine::new(), false),
+    ] {
+        m.debug_ir = 0o1234;
+        m.spy_write(spy::LDDBIRX, 0xabcd);
+        let want = if connected { 0xabcd << 48 | 0o1234 } else { 0o1234 };
+        assert_eq!(m.debug_ir, want, "{what}: strobe 6");
+        m.spy_write(14, 0x1234);
+        let want = if connected { 0x1234 << 48 | 0o1234 } else { 0o1234 };
+        assert_eq!(m.debug_ir, want, "{what}: strobe 14, 6's alias");
+        m.spy_write(7, 0xffff);
+        m.spy_write(15, 0xffff);
+        assert_eq!(m.debug_ir, want, "{what}: 7 and 15 load nothing");
+    }
+    let p = hinted_loop();
+    let u = micro_halted(&p, REV15);
+    assert_eq!(u.spy_read(spy::IR_EXT), 1, "micro: IR<63:48>");
+    let e = pipeline_halted(&p);
+    assert_eq!(e.spy_read(spy::IR_EXT), 1, "the pipeline: IR<63:48>");
+    assert_eq!(e.spy_read(spy::IR_HIGH), u.spy_read(spy::IR_HIGH));
+    let u = micro_halted(&p, Geometry::QUUX_14);
+    assert_eq!(u.spy_read(spy::IR_EXT), spy::OPEN_READ, "revision 14: open");
+}
+
+/// The debug IR loaded through the spy as a console writes it, its four
+/// halves (MP4 ruling Q4), then one step with `IDEBUG` up, as CC's
+/// `CC-EXECUTE` makes it.
+fn execute_debug_ir(e: &mut dyn Engine, ir: u64, tick: &mut dyn FnMut(&mut dyn Engine) -> bool) {
+    use muir::spy;
+    for (eadr, half) in [(spy::IR_LOW, 0), (spy::IR_MED, 1), (spy::IR_HIGH, 2), (spy::LDDBIRX, 3)] {
+        e.spy_write(eadr, (ir >> (16 * half)) as u16);
+    }
+    e.spy_write(spy::CLK, 0o12);
+    let _ = tick(e);
+    e.spy_write(spy::CLK, 0o10);
+    for _ in 0..10_000 {
+        if tick(e) {
+            break;
+        }
+    }
+    e.spy_write(spy::CLK, 0);
+}
+
+/// **The pipeline runs the debug IR** (A15b.13: "the debug IR's word runs
+/// as a single step does"; MP4 ruling Q4), all 64 bits: halted among
+/// fillers, the console runs two words through the debug IR, one step
+/// each with `IDEBUG` up: a write of OA-REG-HIGH, then an ADD whose SH,
+/// `IR<61>`, ORs it into its A and M sources, A 1700 and M 20 becoming A
+/// 1703 and M 24. Each runs in place of the word at PC, as on `micro`: a
+/// microcycle each, M 25 the sum of A 1703 and M 24, the same state, and
+/// the next word to run two after PC. A pipeline that runs the control
+/// store's word, or a debug IR of 48 bits, is caught.
+#[test]
+fn the_pipeline_runs_the_debug_ir_s_64_bits_as_micro_does() {
+    use muir::isa::asm::{ADD, OA_HIGH_SELECT};
+    let mut p = Prog::default();
+    p.set(0o22, 0o24);
+    p.amem.push((0o1703, 0o33));
+    let v = p.k(3 << 6 | 4);
+    let words = [
+        ALU | SETA | a_src(v) | fd(0o17),
+        ALU | ADD | a_src(0o1700) | m_src(0o20) | m_dest(0o25) | OA_HIGH_SELECT,
+    ];
+    let mut u = micro_halted(&p, REV15);
+    let (pc, cycles) = (u.pc(), u.machine().cycles);
+    for ir in words {
+        execute_debug_ir(&mut u, ir, &mut |e| {
+            e.step().unwrap();
+            false
+        });
+    }
+    assert_eq!(u.machine().cycles, cycles + 2, "micro: a microcycle each");
+    assert_eq!(u.pc(), pc + 2, "micro: the words at PC replaced");
+    let mut e = pipeline_halted(&p);
+    let (pc, cycles) = (e.pc(), e.machine().cycles);
+    for ir in words {
+        execute_debug_ir(&mut e, ir, &mut |e| {
+            e.step().unwrap();
+            e.spy_read(muir::spy::FLAG_1) & 0x100 == 0
+        });
+    }
+    let (um, em) = (u.landed(), e.landed());
+    assert_eq!(um.mmem[0o25], 0o55, "micro: A 1703 plus M 24");
+    assert_eq!(em.mmem[0o25], 0o55, "the pipeline: A 1703 plus M 24");
+    assert_eq!(em.cycles, cycles + 2, "the pipeline: a microcycle each");
+    assert_eq!(e.pc(), pc + 2, "the pipeline: the words at PC replaced");
+    diff_state(&em, &um, 0);
+}
+
+/// **A revision-15 checkpoint keeps no pending OA flag** (A15b.13: "no
+/// pending OA flag"; MP4 ruling Q3), and is version 51; one of version 50,
+/// written with revision 14's two IMOD flags after the OA registers, still
+/// loads. Halted among fillers, the pipeline's checkpoint and the same with
+/// two zero flags put back resume alike, run on alike, and the second
+/// written again is the first: 45 bytes follow the flags when no SPC or map
+/// write is pending.
+#[test]
+fn a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_50_one_loads() {
+    use muir::checkpoint::{Checkpoint, VERSION_15, VERSION_40, Writer, version_for};
+    assert_eq!(version_for(&REV15), VERSION_15);
+    assert_eq!(VERSION_15, 51);
+    assert_eq!(version_for(&Geometry::QUUX_14), VERSION_40);
+    let p = Prog::default();
+    let e = pipeline_halted(&p);
+    let saved = |e: &Pipeline| {
+        let mut w = Writer::new();
+        e.save(&mut w);
+        w.finish()
+    };
+    let body = saved(&e);
+    let tail = body.len() - 45;
+    let mut old = body[..tail].to_vec();
+    old.extend([0, 0]);
+    old.extend(&body[tail..]);
+    let resume = |bytes: &[u8], version: u32| {
+        let c = Checkpoint {
+            version,
+            word_bits: 40,
+            engine: "rtl".into(),
+            memory_boards: 1,
+            body: bytes.to_vec(),
+        };
+        let mut f = Pipeline::new(machine(&p, REV15));
+        f.load(&mut c.reader()).expect("it loads");
+        f
+    };
+    let (mut a, mut b) = (resume(&body, VERSION_15), resume(&old, VERSION_40));
+    assert_eq!(saved(&b), body, "version 50's, written again, is version 51's");
+    for f in [&mut a, &mut b] {
+        f.skip_sweep();
+        f.spy_write(muir::spy::CLK, 1);
+        for _ in 0..200 {
+            f.tick().unwrap();
+        }
+    }
+    assert_eq!((a.pc(), a.machine().cycles), (b.pc(), b.machine().cycles));
+    diff_state(a.machine(), b.machine(), 0);
+}

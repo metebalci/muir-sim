@@ -4121,8 +4121,9 @@ fn write_checkpoint<E: Engine>(name: &str, e: &E, path: &Path) {
     }
     let mut w = crate::checkpoint::Writer::new();
     e.save(&mut w);
-    let (boards, bits) = (e.machine().memory_boards(), e.machine().geometry.word_bits);
-    match crate::checkpoint::write(path, name, boards, bits, &w.finish()) {
+    let boards = e.machine().memory_boards();
+    let version = crate::checkpoint::version_for(&e.machine().geometry);
+    match crate::checkpoint::write_version(path, name, boards, version, &w.finish()) {
         Ok(n) => eprintln!(
             "checkpoint: {} at {} microcycles, {n} bytes",
             path.display(),

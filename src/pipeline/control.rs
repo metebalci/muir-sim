@@ -293,6 +293,7 @@ impl Pipeline {
         let half = |v: u64, k: u8| (v >> (16 * k as u32)) as u16;
         match eadr {
             spy::IR_LOW | spy::IR_MED | spy::IR_HIGH => half(next, eadr),
+            spy::IR_EXT if self.m.geometry.extended() => half(next, eadr),
             spy::OPC => self.x.opc[7] & 0x3fff,
             spy::PC => self.pc_15() & 0x3fff,
             spy::FLAG_1 => spy::Flag1 {
@@ -331,8 +332,12 @@ impl Pipeline {
         w.bool(self.d_slot_pending);
         w.u64(self.x.oa_low);
         w.u64(self.x.oa_high);
-        w.bool(self.x.imod[0]);
-        w.bool(self.x.imod[1]);
+        // Revision 14's IMOD flags; revision 15 has no pending OA flag
+        // (A15b.13; MP4 ruling Q3).
+        if !self.m.geometry.extended() {
+            w.bool(self.x.imod[0]);
+            w.bool(self.x.imod[1]);
+        }
         w.bool(self.x.next_instr);
         w.bool(self.x.next_instrd);
         w.u32(self.x.lvmo);
@@ -384,7 +389,14 @@ impl Pipeline {
         self.d_slot_pending = r.bool()?;
         self.x.oa_low = r.u64()?;
         self.x.oa_high = r.u64()?;
-        self.x.imod = [r.bool()?, r.bool()?];
+        // A revision-15 file of version 50 has revision 14's two flags too,
+        // false on revision 15.
+        self.x.imod =
+            if !self.m.geometry.extended() || r.version() == Some(crate::checkpoint::VERSION_40) {
+                [r.bool()?, r.bool()?]
+            } else {
+                [false; 2]
+            };
         self.x.next_instr = r.bool()?;
         self.x.next_instrd = r.bool()?;
         self.x.lvmo = r.u32()?;

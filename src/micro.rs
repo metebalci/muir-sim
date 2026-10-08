@@ -496,7 +496,7 @@ impl Micro {
     fn advance_pipeline(&mut self) {
         // `IR` loads from the debug IR instead of the control store while
         // the console holds `IDEBUG` up.
-        self.p0 = if self.m.clock_control.idebug { Insn::new(self.m.debug_ir) } else { self.p1 };
+        self.p0 = if self.m.clock_control.idebug { self.m.debug_insn() } else { self.p1 };
         self.p0_pc = self.p1_pc;
         self.p1 = self.m.fetch(self.npc);
         self.p1_pc = self.npc;
@@ -1611,7 +1611,8 @@ impl Micro {
     /// when `NEEDFETCH` is up (`IFETCH`, page VCTL1).
     fn next_microcycle_holds_the_write(&self) -> bool {
         let nopped = self.inhibit || self.m.clock_control.nop11;
-        let mut ir = if self.m.clock_control.idebug { self.m.debug_ir } else { self.p1.raw() };
+        let mut ir =
+            if self.m.clock_control.idebug { self.m.debug_insn().raw() } else { self.p1.raw() };
         if self.oal {
             ir |= self.oa_low;
         }
@@ -2803,6 +2804,7 @@ impl Engine for Micro {
         let half = |v: u64, k: u8| (v >> (16 * k as u32)) as u16;
         match eadr {
             spy::IR_LOW | spy::IR_MED | spy::IR_HIGH => half(self.p1.raw(), eadr),
+            spy::IR_EXT if self.m.geometry.extended() => half(self.p1.raw(), eadr),
             spy::OPC => self.opc[7] & 0x3fff,
             spy::PC => self.npc & 0x3fff,
             spy::OB_LOW => self.out as u16,

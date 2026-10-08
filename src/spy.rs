@@ -70,6 +70,11 @@ pub const IR_LOW: u8 = 0;
 pub const IR_MED: u8 = 1;
 /// `-SPY.IRH`, `SPY-IR-HIGH`: `IR<47:32>`, SPY1 3F21 and 3E06.
 pub const IR_HIGH: u8 = 2;
+/// `SPY-IR-EXT` (a proposed name, after CC's `SPY-IR-LOW`, `-MED` and
+/// `-HIGH`): on QUUX revision 15 alone, `IR<63:48>`, the 64-bit word's
+/// extension (MP4 ruling Q4). On the CADR and revisions 13 and 14 nothing
+/// is decoded there and it reads [`OPEN_READ`].
+pub const IR_EXT: u8 = 3;
 /// `-SPY.OPC`, `SPY-OPC`: `OPC<13:0>`, the last stage of the OPCS shift
 /// registers, through SPY4 1E07 and 1E06.  Bits 15 and 14 are grounded.
 pub const OPC: u8 = 4;
@@ -122,9 +127,17 @@ pub const OPC_CONTROL: u8 = 4;
 /// aliasing.
 pub const MODE: u8 = 5;
 
+/// `-LDDBIRX` (a proposed name), `EADR` 6 and its alias 14: on QUUX
+/// revision 15 alone, the debug IR's `<63:48>`, so that a console's word
+/// runs with its extension (MP4 ruling Q4). A console writes all four
+/// halves, the extension's too, so that no stale extension rides along.
+/// On the CADR and revisions 13 and 14, Y6 is not connected.
+pub const LDDBIRX: u8 = 6;
+
 /// Which write strobe a register number fires: `EADR<2:0>`, since the write
 /// decoder's `G1` is `HI1` and not `EADR3`.  Y6 and Y7 are not connected, so
-/// 6, 7, 14 and 15 load nothing.
+/// 6, 7, 14 and 15 load nothing, but on revision 15, whose 6 and 14 are
+/// [`LDDBIRX`].
 pub fn write_strobe(eadr: u8) -> u8 {
     eadr & 7
 }
@@ -300,8 +313,8 @@ impl OpcControl {
     }
 }
 
-/// Loads one 16-bit half of the 48-bit debug IR, as `-LDDBIRL`, `-LDDBIRM`
-/// and `-LDDBIRH` do: `half` is 0, 1 or 2.
+/// Loads one 16-bit half of the debug IR, as `-LDDBIRL`, `-LDDBIRM` and
+/// `-LDDBIRH` do: `half` is 0, 1 or 2; 3 on revision 15, [`LDDBIRX`].
 pub fn write_debug_ir(debug_ir: &mut u64, half: u8, spy: u16) {
     let shift = 16 * half as u32;
     *debug_ir = (*debug_ir & !(0xffffu64 << shift)) | (spy as u64) << shift;

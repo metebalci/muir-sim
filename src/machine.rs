@@ -1615,6 +1615,16 @@ impl Machine {
         self.geometry.file_device.then(|| self.file_device.checkpoint_refusal()).flatten()
     }
 
+    /// The debug IR as the word it runs: its 64 bits on revision 15, 48
+    /// elsewhere.
+    pub fn debug_insn(&self) -> Insn {
+        if self.geometry.extended() {
+            Insn::extended(self.debug_ir)
+        } else {
+            Insn::new(self.debug_ir)
+        }
+    }
+
     /// Fetches from the control store, honoring the PROM overlay on the
     /// CADR and the PROM's own addresses on QUUX.
     pub fn fetch(&self, pc: u16) -> Insn {
@@ -2355,6 +2365,9 @@ impl Machine {
         match spy::write_strobe(eadr) {
             half @ (spy::IR_LOW | spy::IR_MED | spy::IR_HIGH) => {
                 spy::write_debug_ir(&mut self.debug_ir, half, v)
+            }
+            spy::LDDBIRX if self.geometry.extended() => {
+                spy::write_debug_ir(&mut self.debug_ir, 3, v)
             }
             spy::CLK => self.clock_control.write(v),
             spy::OPC_CONTROL => self.opc_control.write(v),

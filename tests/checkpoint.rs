@@ -201,6 +201,7 @@ fn the_file_names_its_engine_and_refuses_other_files() {
 fn the_format_is_version_49_and_another_version_is_refused() {
     assert_eq!(checkpoint::VERSION, 49, "a new version needs its own tests");
     assert_eq!(checkpoint::VERSION_40, 50);
+    assert_eq!(checkpoint::VERSION_15, 51);
     let dir = std::env::temp_dir().join(format!("muir-checkpoint-version-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("a.chk");
@@ -209,13 +210,13 @@ fn the_format_is_version_49_and_another_version_is_refused() {
     // The version is the four bytes after the magic line.
     let at = b"muir checkpoint\n".len();
     assert_eq!(&good[at..at + 4], 49u32.to_le_bytes());
-    for other in (1u32..checkpoint::VERSION).chain([51, u32::MAX]) {
+    for other in (1u32..checkpoint::VERSION).chain([52, u32::MAX]) {
         let mut file = good.clone();
         file[at..at + 4].copy_from_slice(&other.to_le_bytes());
         std::fs::write(&path, &file).unwrap();
         let err = checkpoint::read(&path).unwrap_err().to_string();
         assert!(err.contains(&format!("format version {other}")), "{err}");
-        assert!(err.contains("reads 49 and 50"), "{err}");
+        assert!(err.contains("reads 49, 50 and 51"), "{err}");
     }
     std::fs::remove_dir_all(&dir).ok();
 }
