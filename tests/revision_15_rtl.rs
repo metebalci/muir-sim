@@ -3663,3 +3663,118 @@ fn a_halt_at_every_clock_of_the_main_loop_machines() {
     }
     eprintln!("{halts} halts");
 }
+
+// --- The drain's restart, one squashed word (A15b.13) ---------------------------
+
+/// **A halt with CS's word alone squashed keeps the address after it**
+/// (A15b.13): an OA-REG-HIGH write, an unconditional jump RD resolves,
+/// and in its delay slot a word that selects OA-REG-HIGH, held in CS while
+/// the writer is in EX, so that the jump leaves RD for EX with its slot
+/// behind and RD empty. A halt then squashes the slot alone; the jump's
+/// target, which RD chose for the word after the slot and which no word
+/// in EX checks, must follow it again. At every clock, plain and from a
+/// checkpoint, the run ends as the one without the halt and as `micro`'s
+/// (its select check off: the select is a word after its write's next).
+#[test]
+fn a_halt_that_squashes_one_word_keeps_the_address_after_it() {
+    use muir::isa::asm::{ADD, OA_HIGH_SELECT};
+    let mut p = Prog::default();
+    let zero = p.k(0);
+    let to = 0o40;
+    p.op(ALU | SETA | a_src(zero) | fd(0o17));
+    p.op(JUMP | ALWAYS | target(to));
+    p.op(ALU | ADD | a_src(ONE) | m_src(0o26) | m_dest(0o26) | OA_HIGH_SELECT);
+    // The word after the slot in sequence: the wrong path.
+    p.op(ALU | ADD | a_src(ONE) | m_src(0o27) | m_dest(0o27));
+    p.stop();
+    while p.at() < to {
+        p.fill(1);
+    }
+    p.op(ALU | ADD | a_src(ONE) | m_src(0o25) | m_dest(0o25));
+    p.stop();
+    let fresh = || {
+        let mut u = Micro::new(machine(&p, REV15));
+        u.oa_select_check = false;
+        u.boot();
+        u
+    };
+    let (t0, e0) = halted_run(&p, None, false, &mut fresh());
+    let u = micro_unchecked(&p);
+    assert_eq!(state(e0.machine()), state(u.machine()), "the run against micro");
+    let m = e0.machine();
+    assert_eq!(
+        (m.mmem[0o25], m.mmem[0o26], m.mmem[0o27]),
+        (1, 1, 0),
+        "the slot ran, then the target"
+    );
+    assert!(e0.meters.oa_hold > 0, "the slot was held in CS");
+    for checkpoint in [false, true] {
+        let mut u = fresh();
+        for c in 1..e0.clock() {
+            let (t, e) = halted_run(&p, Some(c), checkpoint, &mut u);
+            assert_eq!(t, t0, "halted at {c}, checkpoint {checkpoint}: the microcycles");
+            assert_eq!(
+                state(e.machine()),
+                state(e0.machine()),
+                "halted at {c}, checkpoint {checkpoint}: the end"
+            );
+        }
+    }
+}
+
+/// **A halt keeps D's wait** (A15b.9, A15b.13): opcode 1's handler
+/// returns by D, its return word writing the PDL pointer and the delay
+/// slot reading the buffer through it, so that the slot waits in CS while
+/// the return is in EX and is still in RD when the return commits. A halt
+/// then squashes the slot, which makes the stream's fetch D waits for; on
+/// the run's resumption the slot is fetched again and the handler only
+/// once D's word is here, as without the halt. At every clock, plain and
+/// from a checkpoint, the run ends as the one without the halt.
+#[test]
+fn a_halt_keeps_d_s_wait_for_the_stream_s_word() {
+    use muir::isa::asm::src;
+    let mut m = d_machine(REV15, d_register(true), &ONES, CODE, false, false);
+    m.amem[0o56] = 0o100;
+    m.pdl[0o100] = 0o4242;
+    m.imem[(OP_1 + 1) as usize] = Insn::extended(ALU | SETA | a_src(0o56) | fd(0o14) | POPJ);
+    m.imem[(OP_1 + 2) as usize] = Insn::extended(ALU | SETM | src(0o25) | m_dest(0o27));
+    let fresh = || {
+        let mut u = Micro::new(m.clone());
+        u.boot();
+        u
+    };
+    let (t0, e0) = ml_halted_run(&m, None, false, &mut fresh());
+    let u = {
+        let mut u = fresh();
+        while u.machine().opc != OP_7 as u16 {
+            u.step().unwrap();
+        }
+        for _ in 0..16 {
+            u.step().unwrap();
+        }
+        u
+    };
+    assert_eq!(state(e0.machine()), state(u.machine()), "the run against micro");
+    assert_eq!(e0.machine().mmem[0o27], 0o4242, "the slot read the buffer");
+    assert!(e0.meters.pdl_wait > 0, "the slot waited in CS");
+    assert!(e0.machine().macro_dispatch.fused > 0, "D fused returns");
+    for checkpoint in [false, true] {
+        let mut u = fresh();
+        for c in 1..e0.clock() {
+            let (t, e) = ml_halted_run(&m, Some(c), checkpoint, &mut u);
+            if let Some(k) = (0..t.len().min(t0.len())).find(|&k| t[k] != t0[k]) {
+                panic!("halted at {c}, checkpoint {checkpoint}: microcycle {k} differs");
+            }
+            assert_eq!(
+                t.len(),
+                t0.len(),
+                "halted at {c}, checkpoint {checkpoint}: the microcycles"
+            );
+            assert_eq!(
+                state(e.machine()),
+                state(e0.machine()),
+                "halted at {c}, checkpoint {checkpoint}: the end"
+            );
+        }
+    }
+}
