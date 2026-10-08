@@ -649,7 +649,7 @@ unchanged.
 | SPC stack, a push | in *n*+1's write pulse, at the pointer the edge ending *n* moved to | the next-address path in *n*+1 (`SPCWPASS` puts the word on the `SPC` bus); an M-source read of the stack in *n*+1 reads the RAM's old word at the new pointer; *n*+2 reads the new |
 | Map, a `WRITE-MAP` store | in *n*+1's write pulse, both levels, addressed by `MAPI` then (`VMA` while `MEMSTART`, else `MD`) | `MAP(MD)` and a dispatch on map bits read the old word in *n*+1 (QUUX's definition; below) and the new from *n*+2. A memory cycle an instruction in *n*+1 starts is translated at the edge ending *n*+2, through the new word: `PHYS-MEM-READ` stores the map and starts a read in the next instruction |
 | Dispatch memory, a dispatch write | in *n*'s own write pulse, at its own `DADR` | the dispatch in *n* reads the old word (QUUX's definition); from *n*+1 the new |
-| Control store, `WRITE-I-MEM` | in *n*+1's write pulse, at the `PC` it moved to | *n*+1's `IR` takes the word from `IWR` directly, not from the RAM; later fetches the RAM |
+| Control store, `WRITE-I-MEM` | in *n*+1's write pulse, at the `PC` it moved to. N nops *n*+1's word; `IR` takes `IWR` at the edge ending *n*+1, and `IWRITED`'s N nops it | `IWRITED`'s POPJ returns to the address the write pushed, the word after it in execution order (the next in sequence, or the target of the transfer whose slot it fills), which is fetched from the RAM after the write: a write of that word runs the new word, on `rtl`, `micro` and the pipeline (`a_write_i_mem_of_the_word_after_it_runs_as_the_board_runs_it`, `a_write_i_mem_in_a_delay_slot_goes_on_at_the_jump_s_target`). That is MIT's form, `IR<9:0>` 1647; CC's form without N runs the word fetched during the write as it was, and costs one nopped microcycle where MIT's costs two (`a_write_i_mem_costs_its_nopped_microcycles_on_micro_as_on_the_board`) |
 | OA registers, `IMOD` | at the edge ending *n* | or'd into `IR` as it loads at that same edge: the instruction executed in *n*+1 |
 | `MD`, from memory | at `-LOADMD`, when the bus says | on the CADR, a microcycle that reads `MD` before `READ IN PROGRESS` falls is held by `-HANG`; on QUUX it waits (below) |
 
@@ -2054,7 +2054,12 @@ while a POPJ right after a push returns to the word pushed; `MAP(MD)` right
 after a map write reads the old entry; a dispatch right after a
 dispatch-memory write takes the new entry, its prediction checked against
 it; a word `WRITE-I-MEM` writes runs as written, the words behind it fetched
-again; a write carries the `MD` of the microcycle after its start, or the
+again from the word after it in execution order, the jump's target when it
+fills a delay slot (`write_i_mem_goes_on_at_the_word_after_it_in_execution_order`);
+under the OA select check `micro` halts on a `WRITE-I-MEM` outside MIT's
+form, `IR<9:0>` 1647 without POPJ, or run as a delay slot, the WRITE-I-MEM
+check (a proposed name;
+`the_write_i_mem_check_halts_outside_mit_s_form_and_in_a_slot`); a write carries the `MD` of the microcycle after its start, or the
 `MD` before a start that is held behind it. The word right after a read
 start reads `MD` as the start found it and waits for nothing, a write of
 `MD` there giving way to the read's word, as the cycle goes out at the edge
