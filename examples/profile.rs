@@ -272,7 +272,14 @@ impl Profiled for Pipeline {
             .flat_map(|a| (0..3).map(move |b| (a, b)))
             .map(|(a, b)| format!("{}->{} {}", kinds[a], kinds[b], c[a][b]))
             .collect();
-        vec![format!("starts right after a start: {}", pairs.join(", "))]
+        let w = &self.port.meters;
+        vec![
+            format!("starts right after a start: {}", pairs.join(", ")),
+            format!(
+                "write channel: {} writes accepted, {} of two beats; {} accepts delayed by a second beat, {} clocks",
+                w.writes, w.two_beat_writes, w.beat_delays, w.beat_delay_clocks
+            ),
+        ]
     }
 }
 

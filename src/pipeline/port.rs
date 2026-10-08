@@ -31,7 +31,10 @@
 //! - **Timing**, in clocks of the period: a line fill [`PortTiming`]'s
 //!   `read_ns`, the whole fill; a write's response `write_ns` after its
 //!   accept; accepts `occupancy_ns` apart, each counted from the last
-//!   (MP2b rulings Q2, Q5-Q7). Reads and writes are separate channels.
+//!   (MP2b rulings Q2, Q5-Q7), or two clocks after a write of two data
+//!   beats when the occupancy is one clock ([`beats`]; MP4 ruling Q1).
+//!   A write is accepted when its address and its first data beat are
+//!   taken. Reads and writes are separate channels.
 //! - **The file device's sweep**: a completion clears every valid bit in
 //!   cache words / 512 clocks, and every lookup waits for it (A15b.6, MP2b
 //!   ruling Q10).
@@ -53,6 +56,17 @@ pub const IN_FLIGHT: usize = 16;
 
 /// Words a line (G1 §4.1; MP2b ruling Q7): 40 bytes in packed storage.
 pub const LINE_WORDS: u32 = 8;
+
+/// **The data beats of a write to the bus address `bus`** (MP4 ruling Q1,
+/// C1): main memory's word `w` is packed in five bytes from byte `5w`, and
+/// the 64-bit master writes it as one beat with five strobes, or two beats
+/// when it runs past its first 8-byte beat, at byte offsets 4 to 7
+/// (muir-fpga `rtl/plumbing/quux_axi_master.sv:27-29`): half of all words,
+/// a word that crosses 4 KiB among them. A word of the frame buffer's
+/// window is four bytes from an aligned address and never crosses.
+pub fn beats(bus: u32) -> u64 {
+    if bus & crate::tlb::DEVICE == 0 && (5 * u64::from(bus)) % 8 >= 4 { 2 } else { 1 }
+}
 
 /// The line a bus address is in, `key<28:3>` (A15b.5).
 pub fn line_of(bus: u32) -> u32 {
@@ -326,6 +340,12 @@ pub struct PortMeters {
     /// The file device's sweeps, and clocks lookups waited on one.
     pub sweeps: u64,
     pub sweep_clocks: u64,
+    /// Writes accepted that were two data beats (MP4 ruling Q1, C1).
+    pub two_beat_writes: u64,
+    /// Accepts a write's second beat delayed past the occupancy, and the
+    /// clocks they waited for it.
+    pub beat_delays: u64,
+    pub beat_delay_clocks: u64,
 }
 
 /// **Revision 15's port**: the cache, the queue, the in-flight list and
@@ -338,8 +358,13 @@ pub struct Port {
     queue: VecDeque<Queued>,
     inflight: VecDeque<InFlight>,
     /// The earliest clock the next write may be accepted at: the last
-    /// accept's plus the occupancy.
+    /// accept's plus the occupancy or its data beats, whichever is later.
     next_accept: u64,
+    /// The last accept's plus the occupancy alone, and whether the write
+    /// at the queue's head has waited past it for a second beat: the
+    /// meter's.
+    occupancy_ends: u64,
+    beat_held: bool,
     fill: Option<Fill>,
     /// The word the last fill read, and when, for its reader.
     filled: Option<(u64, Word)>,
@@ -353,6 +378,8 @@ pub struct Port {
     /// A write whose line has a fill in flight waits for the fill, the
     /// default; a test's mutation lets it go ahead.
     pub write_waits_for_fill: bool,
+    /// Every write taken as one data beat: a test's mutation.
+    pub one_beat_writes: bool,
     pub meters: PortMeters,
     /// Errors answered, for register-page word 225, taken by the machine.
     errors: u32,
@@ -374,12 +401,15 @@ impl Port {
             queue: VecDeque::new(),
             inflight: VecDeque::new(),
             next_accept: 0,
+            occupancy_ends: 0,
+            beat_held: false,
             fill: None,
             filled: None,
             sweep_until: 0,
             model: None,
             read_rule_waits_for_responses: true,
             write_waits_for_fill: true,
+            one_beat_writes: false,
             meters: PortMeters::default(),
             errors: 0,
             next_tag: 1,
@@ -453,12 +483,22 @@ impl Port {
                 self.errors += 1;
             }
         }
+        let ready =
+            self.inflight.len() < IN_FLIGHT && self.queue.front().is_some_and(|q| q.word.is_some());
+        if ready && now < self.next_accept && now >= self.occupancy_ends {
+            // Held by the last write's second beat alone.
+            self.meters.beat_delay_clocks += 1;
+            self.beat_held = true;
+        }
         if now >= self.next_accept
-            && self.inflight.len() < IN_FLIGHT
+            && ready
             && let Some(q) = self.queue.front().copied()
             && let Some(word) = q.word
         {
             self.queue.pop_front();
+            if std::mem::take(&mut self.beat_held) {
+                self.meters.beat_delays += 1;
+            }
             let late = self.model.as_mut().map_or(0, LateModel::next);
             let error = self.model.as_mut().is_some_and(|mm| {
                 let e = mm.errors > 0;
@@ -471,7 +511,13 @@ impl Port {
                 respond_at: now + self.clocks.write + late,
                 error,
             });
-            self.next_accept = now + self.clocks.occupancy;
+            // The write channel takes the next accept no sooner than
+            // max(occupancy, beats) clocks after this one (MP4 ruling Q1,
+            // C1): the accept is the address and the first data beat taken.
+            let beats = if self.one_beat_writes { 1 } else { beats(q.bus) };
+            self.meters.two_beat_writes += u64::from(beats == 2);
+            self.occupancy_ends = now + self.clocks.occupancy;
+            self.next_accept = self.occupancy_ends.max(now + beats);
             self.meters.writes += 1;
         }
         if let Some(mut f) = self.fill {

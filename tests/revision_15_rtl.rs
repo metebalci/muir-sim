@@ -2754,6 +2754,136 @@ fn the_seventeenth_write_is_not_issued() {
     assert!(now >= first, "not before the first's response");
 }
 
+/// A port at the period `period`, in 0.5 ns, and the timing `timing`.
+fn port_at(period: u64, timing: muir::pipeline::PortTiming) -> muir::pipeline::port::Port {
+    let mut e = Pipeline::new(machine(&Prog::default(), REV15));
+    e.configure(period, timing, 65_536);
+    muir::pipeline::port::Port::new(timing, e.time(), 65_536)
+}
+
+/// The clocks from the first write's accept to the second's, both queued
+/// with their words before the first clock, at bus addresses `a` and `b`;
+/// the port after.
+fn accept_gap(
+    period: u64,
+    timing: muir::pipeline::PortTiming,
+    a: u32,
+    b: u32,
+) -> (u64, muir::pipeline::port::Port) {
+    let mut m = machine(&Prog::default(), REV15);
+    let mut port = port_at(period, timing);
+    for (bus, word) in [(a, 0o1111), (b, 0o2222)] {
+        let tag = port.write(0, bus).expect("the queue has room");
+        port.word(tag, word);
+    }
+    let mut accepted = Vec::new();
+    for now in 1..20 {
+        let before = port.meters.writes;
+        port.tick(&mut m, now);
+        if port.meters.writes > before {
+            accepted.push(now);
+        }
+    }
+    assert_eq!(accepted.len(), 2, "both accepted");
+    (accepted[1] - accepted[0], port)
+}
+
+/// **A packed word that crosses an 8-byte boundary is two data beats**
+/// (A15b.5; MP4 ruling Q1, C1): word `w`'s five bytes start at byte `5w`,
+/// and run past their first beat when `5w mod 8` is 4 to 7, a word that
+/// crosses 4 KiB among them. The write channel takes the next accept no
+/// sooner than max(occupancy, beats) clocks after a write's accept: one
+/// clock more behind a two-beat write at the Kria's 10 ns and the Arty's
+/// 20 ns, where the occupancy is a clock, and none at the Kria's 8.5 ns
+/// nor the DE25's 15 ns, where it is two and three. A word of the frame
+/// buffer's window is four bytes and one beat. The meter counts the
+/// accepts the beats delayed and the clocks.
+#[test]
+fn a_two_beat_write_holds_the_next_accept_by_its_second_beat() {
+    use muir::pipeline::PortTiming;
+    let fb = muir::tlb::DEVICE | 1;
+    // (period, timing, the occupancy in clocks).
+    for (period, timing, o) in [
+        (20, PortTiming::KRIA, 1),
+        (40, PortTiming::ARTY, 1),
+        (17, PortTiming::KRIA, 2),
+        (30, PortTiming::DE25, 3),
+    ] {
+        for (first, beats) in
+            [(0o100, 1), (0o101, 2), (0o102, 1), (0o103, 2), (0o104, 2), (819, 2), (fb, 1)]
+        {
+            let what = format!("period {period}, first write at {first:o}");
+            let (gap, port) = accept_gap(period, timing, first, 0o200);
+            assert_eq!(gap, o.max(beats), "{what}: the clocks between the accepts");
+            let delayed = u64::from(beats > o);
+            assert_eq!(port.meters.beat_delays, delayed, "{what}: accepts delayed by beats");
+            assert_eq!(port.meters.beat_delay_clocks, delayed, "{what}: their clocks");
+            assert_eq!(port.meters.two_beat_writes, u64::from(beats == 2), "{what}: two-beat");
+        }
+    }
+}
+
+/// **The response comes `w` after the accept, at its first beat** (MP4
+/// ruling Q1, C1): a two-beat write's main memory word lands as a one-beat
+/// write's does, `⌈w/P⌉` clocks after its accept.
+#[test]
+fn a_two_beat_write_is_answered_from_its_accept() {
+    use muir::pipeline::PortTiming;
+    for first in [0o100, 0o101] {
+        let mut m = machine(&Prog::default(), REV15);
+        let mut port = port_at(20, PortTiming::KRIA);
+        let tag = port.write(0, first).expect("room");
+        port.word(tag, 0o4321);
+        let mut landed = None;
+        for now in 1..40 {
+            port.tick(&mut m, now);
+            if landed.is_none() && m.main[first as usize] == 0o4321 {
+                landed = Some(now);
+            }
+        }
+        assert_eq!(landed, Some(1 + port.clocks().write), "word {first:o}");
+    }
+}
+
+/// **Consecutive words written at 10 ns** (MP4 ruling Q1: slice 3's
+/// goldens on consecutive words): forty writes to consecutive words, half
+/// of them two-beat, against the model that answers each write 1 to 200
+/// clocks late, so that the in-flight list fills and its writes are
+/// released together: they end as on `micro` at every seed, and the meter
+/// counts two-beat writes and the accepts their second beats delayed. At
+/// 8.5 ns, and with every write taken as one beat, none is delayed.
+#[test]
+fn consecutive_words_written_at_10_ns_wait_for_the_second_beats() {
+    use muir::pipeline::PortTiming;
+    let mut p = Prog::default();
+    for k in 0..40 {
+        p.write(0o1000 + k, PHYS | (0o2000 + k));
+    }
+    p.read(PHYS | 0o2047, 0o26);
+    p.stop();
+    let at = |period: u64, one_beat: bool, seed: u64| {
+        same_on(&p, &|_| {}, &|e: &mut Pipeline| {
+            e.configure(period, PortTiming::KRIA, 65_536);
+            e.port.one_beat_writes = one_beat;
+            e.port.model = Some(muir::pipeline::port::LateModel { seed, most: 200, errors: 0 });
+        })
+    };
+    let (mut delays, mut clocks) = (0, 0);
+    for seed in 1..=10 {
+        let e = at(20, false, seed);
+        assert_eq!(e.machine().mmem[0o26], 0o1047, "seed {seed}: the last word read back");
+        let m = e.port.meters;
+        assert_eq!(m.two_beat_writes, 20, "seed {seed}: half of forty consecutive words");
+        delays += m.beat_delays;
+        clocks += m.beat_delay_clocks;
+        assert_eq!(m.beat_delays, m.beat_delay_clocks, "seed {seed}: one clock each at 10 ns");
+        assert_eq!(at(20, true, seed).port.meters.beat_delays, 0, "seed {seed}: one beat each");
+        assert_eq!(at(17, false, seed).port.meters.beat_delays, 0, "seed {seed}: 8.5 ns");
+    }
+    eprintln!("at 10 ns, ten seeds: {delays} accepts delayed by beats, {clocks} clocks");
+    assert!(delays > 0, "two-beat writes with a write behind them");
+}
+
 /// **A write to a line whose fill is in flight lands after the fill**
 /// (A15b.5): a table read's miss fills a line (the processor's own reads
 /// hold every start behind them, so a fill not for `MD` is the case), and

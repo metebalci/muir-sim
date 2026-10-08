@@ -2058,7 +2058,20 @@ main memory takes a write's word at its response. A read whose line has a
 write queued or in flight waits for every such response, and every other
 read goes ahead (`the_read_rule_returns_the_word_written`,
 `the_ninth_write_waits_for_the_first_s_acceptance`,
-`the_seventeenth_write_is_not_issued`). The cache, 64K words by default,
+`the_seventeenth_write_is_not_issued`). A write is accepted when its address
+and its first data beat are taken, and answered the write's time after
+that. A packed word of main memory, five bytes from byte 5w, is two data
+beats when it runs past its first 8-byte beat, at byte offsets 4 to 7: half
+of all words, a word that crosses 4 KiB among them; a word of the frame
+buffer's window is one. The write channel takes the next accept no sooner
+than the occupancy or the last write's beats, in clocks, whichever is
+later: a clock more behind a two-beat write at 10 ns with the `kria`
+timing and at 20 ns with `arty`, where the occupancy is one clock, and
+nothing at 8.5 ns or with `de25` at 15 ns. The profile counts the two-beat
+writes and the accepts their second beats delayed, with the clocks
+(`a_two_beat_write_holds_the_next_accept_by_its_second_beat`,
+`a_two_beat_write_is_answered_from_its_accept`,
+`consecutive_words_written_at_10_ns_wait_for_the_second_beats`). The cache, 64K words by default,
 two ways of 8-word lines that hold the words, answers a hit two clocks
 after the grant and a miss when its fill lands; a write behind its line's
 fill waits for it (`a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_later`,
@@ -2130,7 +2143,8 @@ profile's log opens with the run's configuration: the engine, the machine,
 the band, the PROM, the period, the memory timing, the cache, the prefetch
 (none on the pipeline, whose fused returns use no prefetched word) and the
 harness's switch; and, on the pipeline, closes with the starts made right
-after a start, by the two starts' kinds.
+after a start, by the two starts' kinds, and the write channel's writes,
+two-beat writes and accepts delayed by a second beat.
 
 ## Not modeled
 
