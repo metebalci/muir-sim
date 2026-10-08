@@ -1803,13 +1803,14 @@ revision 14 (`Mcr::check_revision` in `src/mcr.rs`;
 
 muir has QUUX revision 15 beside revisions 13 and 14 (contract G3 revision
 15 and its appendix A15b): `Geometry::QUUX_15` in the library, which `quux`
-runs when `MUIR_QUUX_REVISION` is `15`. It runs on `micro` alone: revision
-15 is a pipelined machine, which `rtl` does not model, and `quux` refuses
-`--rtl` on it. No boot PROM for it is built in, PROM 2001 being MIT's
-sections, which revision 15 does not read, so a run names one with
-`--prom`; a resume takes the checkpoint's. It is revision 14's machine with
-what follows; everything it does not mention is revision 14's. What holds
-it is `tests/revision_15.rs`, on hand-built programs and files.
+runs when `MUIR_QUUX_REVISION` is `15`. It runs on `micro`, the
+specification, and on `rtl`, which on revision 15 is its four-stage
+pipeline ([below](#rtl-is-the-pipeline)). No boot PROM for it is built in,
+PROM 2001 being MIT's sections, which revision 15 does not read, so a run
+names one with `--prom`; a resume takes the checkpoint's. It is revision
+14's machine with what follows; everything it does not mention is revision
+14's. What holds it is `tests/revision_15.rs` and, for `rtl`,
+`tests/revision_15_rtl.rs`, on hand-built programs and files.
 
 **The microinstruction is 64 bits**: MIT's 48 in `IR<47:0>`, meaning what
 they mean on every other machine, and the extension in `IR<63:48>`, read by
@@ -1896,7 +1897,8 @@ for microcycle (`d_dispatches_a_return_that_needs_a_fetch`,
 `micro` posts no writes: a write goes out by the end of the microcycle
 after its start, and a start right after it waits for it, so a command's
 entry written before the producer index is in main memory when the index
-is taken (`cmd_prod_is_taken_after_every_earlier_write`).
+is taken (`cmd_prod_is_taken_after_every_earlier_write`). `rtl` posts its
+writes, and holds the producer index's write until its port is empty.
 
 **`WRITE-I-MEM`** writes `IWR<63:32>` from `A<31:0>` and `IWR<31:0>` from
 `M<31:0>`: a word with `<63:48>` set is written whole, and a tag left in
@@ -1904,12 +1906,14 @@ is taken (`cmd_prod_is_taken_after_every_earlier_write`).
 (`write_i_mem_writes_64_bits_and_no_tag`).
 
 **The feature page** says revision 15 in word 0, `0x515500f4`, and in word
-25 the microcycle, the clock's period, in units of 0.5 ns: 80 at `micro`'s
-40 ns. Register-page word 225 counts the posted writes answered with an
-error; a write clears it, and so does `-RESET`, as word 224. `micro` posts
-no writes, so it reads 0 there unless a count is planted
+25 the microcycle, the clock's period, in units of 0.5 ns: 17 at the
+default 8.5 ns, and what `--microcycle-ns` sets on either engine
 (`feature_words_0_and_25_say_revision_15_and_its_period`,
-`word_225_reads_the_errors_and_a_write_clears_it`).
+`word_25_reads_the_period_on_rtl`). Register-page word 225 counts the
+posted writes answered with an error; a write clears it, and so does
+`-RESET`, as word 224. `micro` posts no writes, so it reads 0 there unless
+a count is planted (`word_225_reads_the_errors_and_a_write_clears_it`);
+`rtl` counts its port's error responses (`word_225_counts_error_responses`).
 
 **Its `.mcr`** is self-describing (A15b.7): little-endian 32-bit words, the
 format word `0x51550001` (MACHINE-ID's signature over the format number 1)
@@ -1951,6 +1955,93 @@ registers' place, with no pending flag; after revision 14's fields, word
 refuses a checkpoint of revision 13 or 14 on revision 15 and the reverse,
 naming the revision that wrote it
 (`revision_15_and_the_others_refuse_each_other_s_checkpoints`).
+
+### `rtl` is the pipeline
+
+On revision 15 `rtl` is `muir::pipeline::Pipeline` (contract G3 revision
+15, §5, §6, §9, §12.1; A15b.2-A15b.6, A15b.13), four stages of one clock
+each. CS reads the control store and, at its end, the word's A memory and
+PDL buffer operands; RD reads M, keeps speculative copies of the micro
+stack's top and pointer, LC, the PDL pointer and index, and chooses the
+next address; EX runs the microcycle as `micro` does and checks RD's
+choices; WB writes A, M and the PDL buffer and grants the word's memory
+starts. Programs at random, the main loop's paths, D and the fused return
+end as on `micro` microcycle for microcycle
+(`random_programs_end_as_on_micro`, `the_main_loop_s_paths_end_as_on_micro`,
+`d_and_the_fused_return_end_as_on_micro`).
+
+**Time** is in units of 0.5 ns on revision 15, `Machine::ns` counting them.
+The period is `--microcycle-ns`, 5 to 40 ns in steps of 0.5, 8.5 by
+default, the Kria KR260's; `--sync-cycle-ticks` is refused. A device's
+duration is turned to clocks once, rounded up, and a timer keeps true time
+over a second at every period
+(`a_command_s_time_is_rounded_to_clocks_once`,
+`a_1_us_timer_rises_at_clock_1649_the_14th_time`,
+`the_accumulators_keep_true_time_over_a_second`).
+
+**Transfers.** Jumps, calls, POPJ and the fused return resolve in RD; a
+conditional jump is predicted by its hint and a dispatch by its predicted
+target, P and R, and EX checks the address and the prediction itself. A
+wrong one squashes the words behind the delay slot and restores RD's copies
+from the committed state: one bubble. A delay slot N inhibits is nopped and
+counts once in `Machine::cycles`
+(`conditional_jumps_hinted_each_way_end_as_on_micro`,
+`dispatches_predicted_each_way_end_as_on_micro`,
+`the_speculation_matrix_ends_as_on_micro`,
+`a_squash_restores_rd_s_lc_and_stack_copies`, `a_nopped_slot_counts_once`).
+
+**Holds.** RD holds a return a clock when a word just before writes what it
+reads (`each_case_of_the_guard_on_planted_pairs`); CS holds a word that
+selects OA-REG-HIGH 2, 1 and 0 clocks behind a writer 1, 2 and 3 words
+before (`the_oa_high_hold_is_2_1_0_clocks`); DIV takes 18 clocks in EX and
+MUL 5 (`div_stays_18_clocks_in_ex_and_mul_5`); a start right after a map
+write waits a clock and translates through the new entry
+(`a_start_after_a_map_write_translates_through_the_new_entry`). A page
+fault check after a start that faults is held a clock and squashes late,
+two bubbles, the delay slot as N says
+(`the_late_squash_after_a_faulting_start`,
+`the_late_squash_costs_two_bubbles`). A check samples the interrupt in its
+last clock in EX: raised at any clock around a check, held on `MD`, behind
+a wrong prediction or after a faulting start, the run ends as `micro`'s
+raised before the matching microcycle
+(`an_interrupt_at_every_clock_around_a_check`). A squashed word makes no
+start and no TLB lookup (`a_squashed_start_is_caught`,
+`a_wrong_path_map_md_evicts_nothing`). The PDL buffer's word written by a
+microcycle is read old by the next and forwarded to the two after, across
+the buffer's wrap (`the_pdl_buffer_across_its_wrap`).
+
+**The memory port** posts writes: a queue of 8 entries, freed when the port
+accepts a write, and 16 accepted writes in flight until their responses;
+main memory takes a write's word at its response. A read whose line has a
+write queued or in flight waits for every such response, and every other
+read goes ahead (`the_read_rule_returns_the_word_written`,
+`the_ninth_write_waits_for_the_first_s_acceptance`,
+`the_seventeenth_write_is_not_issued`). The cache, 64K words by default,
+two ways of 8-word lines that hold the words, answers a hit two clocks
+after the grant and a miss when its fill lands; a write behind its line's
+fill waits for it (`a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_later`,
+`a_write_behind_a_fill_lands_after_it`). `--memory-timing` takes
+`<read>,<write>,<occupancy>` in ns or `kria`, `arty` or `de25`, `kria` by
+default. Block-disk's START lands every posted write first, so a transfer
+reads every word written before it and a read's words are not overwritten
+by an older write (`block_disk_s_start_lands_the_posted_writes`).
+
+**The halt** completes the words in EX and WB, squashes CS and RD, and
+waits for the port to empty. The state is then a single-edge machine's
+between two microcycles: the last microcycle's PDL buffer write lands after
+the next word's read, as `micro`'s does. A halt at every clock of a run,
+and a checkpoint taken there, run on to the same end, the state at the halt
+`micro`'s at the same `Machine::cycles`; so does a microcode single step,
+one microcycle each (`a_halt_at_every_clock_resumes_to_the_same_end`,
+`a_halt_mid_burst_loses_no_write`, `a_single_step_runs_one_microcycle`).
+A write's word is `MD` as the microcycle after its start leaves it; when a
+halt squashes that microcycle, it is `MD` as it stands. **Unverified**
+against `micro` where that microcycle loads `MD`: MIT's microcode never
+loads `MD` in the word after a write start, and a halt between the two
+would write the earlier word. The checkpoint records the period, the
+port's timing and the cache's size, and a resume at another is refused,
+naming the flag that matches it
+(`a_checkpoint_refuses_another_period_timing_or_cache`).
 
 ## Not modeled
 
