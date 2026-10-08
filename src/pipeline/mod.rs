@@ -416,6 +416,9 @@ pub enum Mutation {
     MapSeenNew,
     /// The words behind a `WRITE-I-MEM` not fetched again.
     NoImemRefetch,
+    /// The words behind a `WRITE-I-MEM` fetched again from the write's own
+    /// address + 1, not from the word after it in execution order.
+    ImemRefetchAfterItsAddress,
     /// A write carries `MD` as its start left it, whatever the microcycle
     /// after loads.
     WriteMdAtStart,

@@ -1344,7 +1344,15 @@ impl Pipeline {
             res.kill_rd = self.x.inhibit;
             res.restore = e.ex_resolved && self.x.inhibit;
             if self.x.wrote_imem && self.mutation != Mutation::NoImemRefetch {
-                res.redirect = Some((e.pc + 1) & 0o37777);
+                // The word after the write in execution order, fetched again
+                // after the write: the next in sequence, or the target of the
+                // transfer whose slot it fills, the address it pushes under N
+                // (WRITE-I-MEM ruling).
+                res.redirect = Some(if self.mutation == Mutation::ImemRefetchAfterItsAddress {
+                    (e.pc + 1) & 0o37777
+                } else {
+                    self.x.npc.wrapping_sub(1) & 0o37777
+                });
                 res.refetch = true;
             } else if e.ex_resolved {
                 // Wrong by the address, or by what was predicted of it: a

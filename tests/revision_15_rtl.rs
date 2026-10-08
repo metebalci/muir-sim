@@ -3228,6 +3228,66 @@ fn row_map_md_right_after_a_map_write_reads_the_old_entry() {
     differs(&p, Mutation::MapSeenNew);
 }
 
+/// **`WRITE-I-MEM` goes on at the word after it in execution order**
+/// (WRITE-I-MEM ruling; A15b.3, A15b.4), in MIT's form: a write of the
+/// word right after it runs the new word; in a jump's delay slot, a write
+/// of another word goes on at the jump's target, and a write of the target
+/// runs the target's new word. As on `micro`, whose WRITE-I-MEM check is
+/// off for the slot (it refuses one). A refetch from the write's own
+/// address + 1 is caught by the delay slot.
+#[test]
+fn write_i_mem_goes_on_at_the_word_after_it_in_execution_order() {
+    let inc = |m: u64| ALU | muir::isa::asm::ADD | a_src(ONE) | m_src(m) | m_dest(m);
+    let word = inc(0o22);
+    let wim = |p: &mut Prog, at: u64| {
+        let hi = p.k(word >> 32);
+        p.mmem.push((0o30, word & 0xffff_ffff));
+        p.op(JUMP | P | R | ALWAYS | N | target(at) | a_src(hi) | m_src(0o30));
+    };
+    // The word right after it.
+    let mut p = Prog::default();
+    let at = p.at() + 1;
+    wim(&mut p, at);
+    p.op(inc(0o21));
+    p.fill(1);
+    p.stop();
+    let e = same(&p);
+    assert_eq!((e.machine().mmem[0o21], e.machine().mmem[0o22]), (0, 1), "the new word ran");
+    // In a delay slot: another word, then the target.
+    for (other, want) in [(true, [0, 0, 1]), (false, [0, 1, 0])] {
+        let mut p = Prog::default();
+        let jump = p.at();
+        let t = jump + 0o10;
+        let written = if other { jump + 0o20 } else { t };
+        p.op(JUMP | ALWAYS | target(t));
+        wim(&mut p, written);
+        p.op(inc(0o21));
+        p.stop();
+        while p.at() < t {
+            p.fill(1);
+        }
+        p.op(inc(0o23));
+        p.stop();
+        while p.at() < jump + 0o20 {
+            p.fill(1);
+        }
+        p.fill(2);
+        p.stop();
+        // `micro` with its checks off: the WRITE-I-MEM check refuses a
+        // write in a slot, which only a word written at run time can make.
+        let marks = |m: &Machine| [m.mmem[0o21], m.mmem[0o22], m.mmem[0o23]];
+        let u = micro_unchecked(&p);
+        let e = pipeline(&p);
+        assert_eq!(marks(u.machine()), want, "micro, other word {other}");
+        assert_eq!(marks(e.machine()), want, "the pipeline, other word {other}");
+        diff_state(e.machine(), u.machine(), 0);
+        let x = pipeline_with(&p, |x| x.mutation = Mutation::ImemRefetchAfterItsAddress);
+        if other {
+            assert_ne!(state(x.machine()), state(u.machine()), "the refetch at its address + 1");
+        }
+    }
+}
+
 /// **The dispatch memory, a write** (A15b.3's dispatch row): the dispatch
 /// in the word after a dispatch-memory write reads the new entry, its
 /// predicted target, the old entry's, checked against it in EX.
@@ -3257,10 +3317,10 @@ fn row_a_dispatch_after_a_dispatch_write_takes_the_new_entry() {
     assert_eq!(e.meters.mispredicted[1], 1, "the old entry's prediction checked");
 }
 
-/// **The control store, `WRITE-I-MEM`** (A15b.3's control-store row; A15b.4):
-/// a write of the word two ahead, already fetched: that word runs as
-/// written, the words behind the write fetched again. Not fetched again,
-/// the old word runs: caught.
+/// **The control store, `WRITE-I-MEM`** (A15b.3's control-store row; A15b.4),
+/// in MIT's form, with N: a write of the word two ahead, already fetched:
+/// that word runs as written, the words behind the write fetched again. Not
+/// fetched again, the old word runs: caught.
 #[test]
 fn row_a_word_written_by_write_i_mem_runs_as_written() {
     let mut p = Prog::default();
@@ -3269,7 +3329,7 @@ fn row_a_word_written_by_write_i_mem_runs_as_written() {
     let word = ALU | SETA | a_src(new) | m_dest(0o26);
     let hi = p.k(word >> 32);
     p.mmem.push((0o30, word & 0xffff_ffff));
-    p.op(JUMP | P | R | ALWAYS | target(at) | a_src(hi) | m_src(0o30));
+    p.op(JUMP | P | R | ALWAYS | N | target(at) | a_src(hi) | m_src(0o30));
     p.fill(1);
     assert_eq!(p.at(), at);
     p.op(ALU | SETA | a_src(old) | m_dest(0o26));
