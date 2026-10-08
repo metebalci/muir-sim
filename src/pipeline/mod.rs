@@ -602,6 +602,10 @@ impl Engine for Pipeline {
         self.boundary_mc = Some(mc.max(self.committed + 1));
     }
 
+    fn settle_for_checkpoint(&mut self) -> Result<(), Halt> {
+        self.halt_between_microcycles()
+    }
+
     fn stands_between_microcycles(&self) -> bool {
         self.is_halted() && (self.action_halt || self.boundary_halt)
     }

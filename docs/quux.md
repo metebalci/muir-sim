@@ -2129,7 +2129,15 @@ loads `MD` in the word after a write start, and a halt between the two
 would write the earlier word. The checkpoint records the period, the
 port's timing and the cache's size, and a resume at another is refused,
 naming the flag that matches it
-(`a_checkpoint_refuses_another_period_timing_or_cache`).
+(`a_checkpoint_refuses_another_period_timing_or_cache`). A checkpoint
+written from the command line, at `--stop-after`, `--stop-at`, a quit or
+the prompt's `checkpoint`, is taken as the harness's action point is: the
+pipeline halts after the last word counted, drains and keeps RUN, so that a
+run held at the prompt goes on from there. Stopped where words are in the
+stages and writes queued, in flight or a read on its way, it digests as
+`micro`'s at the same microcycle, and each resumed and run on digests alike
+again (`an_rtl_stop_on_revision_15_drains_before_its_checkpoint`,
+`the_prompt_s_checkpoint_on_revision_15_s_rtl_drains_and_goes_on`).
 
 **The time-neutral harness** compares the pipeline with `micro` on a run
 (`tests/support/neutral.rs`, `examples/profile.rs` under

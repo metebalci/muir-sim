@@ -1438,3 +1438,197 @@ fn the_symbol_area_lies_in_main_memory() {
     let e = m.check_main_memory(small).unwrap_err();
     assert!(e.contains("past main memory's"), "an extent past the last word: {e}");
 }
+
+// --- A checkpoint of the pipeline from the command line (A15b.13) -----------
+
+/// A PROM that writes and reads main memory in a loop through the physical
+/// memory window: M 2 the window's base, `0o36000000000`; M 3 counts; each
+/// turn writes the count to the base plus the count, reads it back into M
+/// 4 and adds it to M 5. So a stop finds writes queued and in flight and a
+/// read on its way, as often as not.
+fn memory_loop_prom(dir: &std::path::Path) -> std::path::PathBuf {
+    use muir::isa::asm::{ADD, BYTE, DPB, HINT, SETO, SETZ};
+    const AT: u64 = 0o36000;
+    let words = [
+        ALU | SETO | m_dest(1),
+        BYTE | DPB | 3 << 6 | 28 | m_src(1) | a_src(ZERO) | m_dest(2),
+        ALU | SETZ | m_dest(3),
+        ALU | SETZ | m_dest(5),
+        // The loop, at AT + 4.
+        ALU | M_PLUS_C | CARRY_IN | m_src(3) | m_dest(3),
+        ALU | SETM | m_src(3) | MD,
+        ALU | ADD | a_src(2) | m_src(3) | START_WRITE,
+        filler().raw(),
+        ALU | ADD | a_src(2) | m_src(3) | START_READ,
+        filler().raw(),
+        ALU | SETM | SRC_MD | m_dest(4),
+        ALU | ADD | a_src(5) | m_src(4) | m_dest(5),
+        JUMP | target(AT + 4) | ALWAYS | N | HINT,
+        filler().raw(),
+    ];
+    let sections = vec![section(6, 0, 32, 32, &[15]), section(1, AT as u32, 64, 64, &words)];
+    let path = dir.join("memory-loop-15.mcr");
+    std::fs::write(&path, file(&sections, None)).unwrap();
+    path
+}
+
+/// The machine a checkpoint `c` loads onto, as `--resume` builds it.
+fn machine_for(c: &muir::checkpoint::Checkpoint) -> Machine {
+    let geometry = Machine::checkpointed_geometry_at(&c.body, c.word_bits).unwrap();
+    let mut m = Machine::with_geometry(geometry, c.memory_boards);
+    m.block_disk = Some(muir::block_disk::BlockDisk::new(muir::block_disk::BLOCK_NS));
+    m
+}
+
+/// The checkpoint at `path`, loaded on its engine: its microcycles and the
+/// time-neutral harness's whole digest of the state between two
+/// microcycles (`tests/support/neutral.rs`).
+fn digest_of(path: &std::path::Path) -> (u64, u64) {
+    use support::neutral::digest;
+    let c = muir::checkpoint::read(path).unwrap();
+    let m = machine_for(&c);
+    match c.engine.as_str() {
+        "rtl" => {
+            let mut e = muir::pipeline::Pipeline::new(m);
+            e.load(&mut c.reader()).unwrap();
+            (e.machine().cycles, digest(e.machine(), e.pending(), e.oa_registers(), true))
+        }
+        "micro" => {
+            let mut e = Micro::new(m);
+            e.load(&mut c.reader()).unwrap();
+            // What its halt would send out, as the harness does.
+            e.send_out_waiting_write();
+            (e.machine().cycles, digest(e.machine(), e.pending(), e.oa_registers(), true))
+        }
+        other => panic!("{other}"),
+    }
+}
+
+/// `quux` on revision 15 with `engine`, its other flags `args`; a fresh
+/// run with 2MW of main memory, which keeps the digests quick.
+fn quux_15(engine: &str, args: &[&std::ffi::OsStr]) -> std::process::Command {
+    let mut c = support::quux();
+    c.env("MUIR_QUUX_REVISION", "15").arg(format!("--{engine}")).args(args);
+    if !args.iter().any(|a| *a == "--resume") {
+        c.args(["--main-memory-size", "2MW"]);
+    }
+    c
+}
+
+/// **`--stop-after` with `--checkpoint` on revision 15's `rtl` drains the
+/// pipeline first**, as the halt and the harness's action point do (A15b.13):
+/// stopped at microcycles that leave words in the stages, writes queued
+/// and in flight and a read on its way, it writes a checkpoint of the
+/// state between two microcycles. `micro`, run to the same microcycle,
+/// writes one that digests the same; each resumed and run on, and
+/// checkpointed again, digests the same again. **Fails** a stop that writes
+/// the pipeline as it stands, which panicked.
+#[test]
+fn an_rtl_stop_on_revision_15_drains_before_its_checkpoint() {
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-rtl-checkpoint");
+    let prom = memory_loop_prom(&dir);
+    let os = |s: &str| std::ffi::OsString::from(s);
+    for stop in [37u64, 41, 46, 52, 59, 700] {
+        let (r, u) = (dir.join(format!("rtl-{stop}.chk")), dir.join(format!("micro-{stop}.chk")));
+        let out = quux_15(
+            "rtl",
+            &[
+                &os("--stop-after"),
+                &os(&stop.to_string()),
+                &os("--prom"),
+                prom.as_os_str(),
+                &os("--checkpoint"),
+                r.as_os_str(),
+            ],
+        )
+        .run();
+        assert!(out.status.success(), "rtl, stop {stop}:\n{}", text(&out));
+        let (cycles, rd) = digest_of(&r);
+        assert!(cycles == stop || cycles == stop + 1, "stop {stop}: at {cycles}");
+        let out = quux_15(
+            "micro",
+            &[
+                &os("--stop-after"),
+                &os(&cycles.to_string()),
+                &os("--prom"),
+                prom.as_os_str(),
+                &os("--checkpoint"),
+                u.as_os_str(),
+            ],
+        )
+        .run();
+        assert!(out.status.success(), "micro, stop {stop}:\n{}", text(&out));
+        assert_eq!(digest_of(&u), (cycles, rd), "stop {stop}: micro's at the same microcycle");
+        // Each resumed, run on and checkpointed again.
+        let (r2, u2) =
+            (dir.join(format!("rtl-{stop}-2.chk")), dir.join(format!("micro-{stop}-2.chk")));
+        let out = quux_15(
+            "rtl",
+            &[
+                &os("--resume"),
+                r.as_os_str(),
+                &os("--stop-after"),
+                &os("23"),
+                &os("--checkpoint"),
+                r2.as_os_str(),
+            ],
+        )
+        .run();
+        assert!(out.status.success(), "rtl resumed, stop {stop}:\n{}", text(&out));
+        let (cycles2, rd2) = digest_of(&r2);
+        assert!(cycles2 >= cycles + 23, "stop {stop}: resumed and ran on to {cycles2}");
+        let on = (cycles2 - cycles).to_string();
+        let out = quux_15(
+            "micro",
+            &[
+                &os("--resume"),
+                u.as_os_str(),
+                &os("--stop-after"),
+                &os(&on),
+                &os("--checkpoint"),
+                u2.as_os_str(),
+            ],
+        )
+        .run();
+        assert!(out.status.success(), "micro resumed, stop {stop}:\n{}", text(&out));
+        assert_eq!(digest_of(&u2), (cycles2, rd2), "stop {stop}: resumed, run on alike");
+    }
+}
+
+/// **The prompt's `checkpoint` on revision 15's `rtl` drains the pipeline
+/// first, and the run goes on**: held, stepped, checkpointed, stepped again
+/// and quit with `--checkpoint`; both files digest as `micro`'s at the
+/// same microcycles. **Fails** a prompt that writes the pipeline as it
+/// stands, which panicked.
+#[test]
+fn the_prompt_s_checkpoint_on_revision_15_s_rtl_drains_and_goes_on() {
+    use std::io::Write;
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-prompt-checkpoint");
+    let prom = memory_loop_prom(&dir);
+    let (held, end) = (dir.join("held.chk"), dir.join("end.chk"));
+    let mut c = quux_15("rtl", &[]);
+    c.args(["--stop-after", "1000000000", "--prom"]).arg(&prom).arg("--checkpoint").arg(&end);
+    c.stdin(std::process::Stdio::piped());
+    let mut child = c.start();
+    let mut stdin = child.stdin();
+    write!(stdin, "hold\nstep 9\ncheckpoint {}\nstep 5\nq\n", held.display()).unwrap();
+    drop(stdin);
+    let out = child.wait();
+    let t = text(&out);
+    assert!(out.status.success(), "rtl:\n{t}");
+    let ((c1, d1), (c2, d2)) = (digest_of(&held), digest_of(&end));
+    assert!(c2 > c1, "the run went on after the checkpoint: {c1}, {c2}");
+    for (cycles, d, name) in [(c1, d1, "held"), (c2, d2, "end")] {
+        let u = dir.join(format!("micro-{name}.chk"));
+        let out = quux_15("micro", &[])
+            .args(["--stop-after", &cycles.to_string(), "--prom"])
+            .arg(&prom)
+            .arg("--checkpoint")
+            .arg(&u)
+            .run();
+        assert!(out.status.success(), "micro:\n{}", text(&out));
+        assert_eq!(digest_of(&u), (cycles, d), "{name}: micro's at the same microcycle");
+    }
+}

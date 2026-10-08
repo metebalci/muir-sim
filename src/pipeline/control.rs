@@ -175,6 +175,29 @@ impl Pipeline {
         self.restore_copies();
     }
 
+    /// **Halts between two microcycles and drains**, as the harness's
+    /// action point does (A15b.13): the words in WB complete, the word in
+    /// EX not yet run and those behind it are squashed and fetched again
+    /// later, and the port empties; RUN stays as it is, so that the run goes
+    /// on at the next clock. A machine halted already, or draining for a
+    /// halt of its own, is left to that. What a checkpoint is taken at.
+    pub fn halt_between_microcycles(&mut self) -> Result<(), Halt> {
+        if self.halted {
+            return Ok(());
+        }
+        if !self.draining {
+            self.action_halt = true;
+            self.begin_drain_from(true);
+        }
+        for _ in 0..super::STALL_BOUND {
+            if self.halted {
+                return Ok(());
+            }
+            self.clock_once()?;
+        }
+        panic!("the drain did not end in {} clocks", super::STALL_BOUND);
+    }
+
     /// Whether the drain is done: nothing in EX or WB, the port drained,
     /// nothing left for a register.
     pub(crate) fn drained_now(&self) -> bool {

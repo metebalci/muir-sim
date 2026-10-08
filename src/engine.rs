@@ -140,6 +140,16 @@ pub trait Engine {
     /// sends out a write still waiting (MP2b rulings 2, Q1).
     fn settle_for_harness(&mut self) {}
 
+    /// **Before a checkpoint**: stand between two microcycles, every write
+    /// of the microcycles before taken, as a checkpoint records the machine.
+    /// An engine that runs one microcycle a step stands there already; the
+    /// pipeline halts after the last word counted and drains, keeping RUN,
+    /// so that a run held at the prompt goes on from there
+    /// (`Pipeline::halt_between_microcycles`).
+    fn settle_for_checkpoint(&mut self) -> Result<(), Halt> {
+        Ok(())
+    }
+
     /// Runs until it halts or `limit` microcycles have passed.  Returns the
     /// number run.
     fn run(&mut self, limit: u64) -> (u64, Option<Halt>) {

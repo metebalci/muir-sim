@@ -3676,7 +3676,7 @@ fn time_engine<S: Stepper>(
         write_color_capture(path, rec);
     }
     if let Some(path) = &checkpoint {
-        write_checkpoint(name, s.engine(), path);
+        write_checkpoint(name, s.engine_mut(), path);
     }
     if !hold.quit {
         let m = s.engine().machine();
@@ -4112,7 +4112,16 @@ fn stdin_is_foreground() -> bool {
 }
 
 /// Writes the engine and its machine to `path` and says how big it came.
-fn write_checkpoint<E: Engine>(name: &str, e: &E, path: &Path) {
+fn write_checkpoint<E: Engine>(name: &str, e: &mut E, path: &Path) {
+    // Between two microcycles, the pipeline drained (A15b.13): its drain
+    // may yet land a command for the file device, so first.
+    if let Err(h) = e.settle_for_checkpoint() {
+        eprintln!(
+            "checkpoint: {} not written: the machine halted on the way: {h:?}",
+            path.display()
+        );
+        return;
+    }
     // QUUX's file device with a handle open or a command queued holds state
     // on the host that no checkpoint carries (contract Q9).
     if let Some(why) = e.machine().checkpoint_refusal() {
