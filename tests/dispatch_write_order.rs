@@ -1814,3 +1814,51 @@ fn sweep_one((kind, speed, pre, n, i, xl): (char, u16, usize, usize, usize, bool
     }
     line
 }
+
+// --- The dispatch constant under a dispatch-memory write ----------------------
+
+/// The A memory address of the dispatch-memory write, in `IR<41:32>`, which
+/// is the dispatch constant's field too.
+const DC_FIELD: u64 = 0o525;
+
+/// A dispatch-memory write (`DISPATCH` with `IR<11:10>` = 2, `DISPWR`),
+/// then `M5` <- functional source 0, `DISPATCH-CONSTANT` (CC's
+/// `CONS-M-SRC-DISP-CONST`, the microcode's `READ-I-ARG`).
+fn dispatch_constant_program() -> Vec<Insn> {
+    let mut p = vec![filler()];
+    p.push(Insn::new(ALU | SETZ | m_dest(5)));
+    p.push(Insn::new(DISPATCH | DMEM_WRITE | a_src(DC_FIELD) | d_addr(D)));
+    p.push(filler());
+    p.push(Insn::new(ALU | SETM | src(0) | a_src(3) | m_dest(5)));
+    let here = p.len();
+    p.push(halt_here(here));
+    p
+}
+
+/// **A dispatch-memory write loads the dispatch constant** (page DSPCTL):
+/// the two 25S07s at 3C14 and 3C15 that hold it take `IR<41:32>` at
+/// `CLK3E` whenever `-IRDISP` is low, and `-IRDISP` is the 74S139 at 3D05's
+/// decode of `IR<44:43>` under `NOP`, for every `DISPATCH`; `DISPWR` is
+/// `NOR(-IRDISP, -FUNCT2)` at 3F14, from the same `-IRDISP`, and gates
+/// nothing of the register (`data/CADR.netlist`). So the word read after
+/// the write is its `IR<41:32>`, on the board, `rtl` and `micro`; and on
+/// QUUX revisions 13 and 14, on `rtl` and `micro`. **Fails** an engine that
+/// loads the constant only on a dispatch that dispatches.
+#[test]
+fn a_dispatch_memory_write_loads_the_dispatch_constant() {
+    let m = program(dispatch_constant_program());
+    let t = run3(&m, &[], 60);
+    for (name, e) in [("chip", &t.chip), ("rtl", &t.rtl), ("micro", &t.micro)] {
+        assert_eq!(e.mmem[5], DC_FIELD as u32, "the CADR, {name}");
+    }
+    let mut r14 = Machine::with_geometry(muir::machine::Geometry::QUUX_14, 1);
+    let mut words = dispatch_constant_program();
+    words.resize(512, filler());
+    r14.load_prom(&words);
+    support::prom_program_in_ram(&mut r14);
+    for (what, m) in [("revision 13", as_quux(&m)), ("revision 14", r14)] {
+        for (name, (e, _)) in [("rtl", rtl(&m, &[], 60)), ("micro", micro(&m, &[], 60))] {
+            assert_eq!(e.mmem[5], DC_FIELD as u32, "{what}, {name}");
+        }
+    }
+}

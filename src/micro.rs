@@ -2173,6 +2173,10 @@ impl Micro {
         }
 
         let entry = self.m.dmem[(addr & dmem_mask) as usize];
+        // The dispatch constant's 25S07s at DSPCTL 3C14 and 3C15 are enabled
+        // by `-IRDISP`, every DISPATCH's, a dispatch-memory write's too:
+        // `DISPWR` gates nothing of them.
+        self.m.dispatch_constant = self.ir(32, 10) as u16;
         if write {
             // The write goes to the address the dispatch would have read:
             // `DADR` takes the field and the M-source bits whatever the
@@ -2195,7 +2199,6 @@ impl Micro {
             }
             return Ok(());
         }
-        self.m.dispatch_constant = self.ir(32, 10) as u16;
 
         let mut target = entry & 0o37777;
         let n = (entry >> 14) & 1 != 0;

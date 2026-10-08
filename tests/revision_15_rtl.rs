@@ -4593,3 +4593,20 @@ fn a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_50_one_loads() {
     assert_eq!((a.pc(), a.machine().cycles), (b.pc(), b.machine().cycles));
     diff_state(a.machine(), b.machine(), 0);
 }
+
+/// **A dispatch-memory write loads the dispatch constant** on revision 15,
+/// as on the CADR's page DSPCTL (`tests/dispatch_write_order.rs`): the
+/// word after it reads functional source 0, `DISPATCH-CONSTANT`, as the
+/// write's `IR<41:32>`, on `micro` and the pipeline alike. **Fails** an
+/// engine that loads the constant only on a dispatch that dispatches.
+#[test]
+fn a_dispatch_memory_write_loads_the_dispatch_constant_on_revision_15() {
+    use muir::isa::asm::DMEM_WRITE;
+    let mut p = Prog::default();
+    p.op(DISPATCH | DMEM_WRITE | a_src(0o525) | 0o40 << 12);
+    p.op(ALU | SETM | src(0) | m_dest(0o26));
+    p.stop();
+    let e = same(&p);
+    assert_eq!(e.machine().mmem[0o26], 0o525, "the write's IR<41:32>");
+    assert_eq!(micro(&p).machine().mmem[0o26], 0o525, "micro");
+}

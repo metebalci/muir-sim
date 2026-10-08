@@ -686,6 +686,9 @@ impl Pipeline {
             addr |= m & mask;
         }
         let entry = self.m.dmem[(addr & dmem_mask) as usize];
+        // Every DISPATCH loads the dispatch constant, a dispatch-memory
+        // write too (page DSPCTL, as `micro`).
+        self.m.dispatch_constant = self.ir(32, 10) as u16;
         if write {
             let new = self.x.adata as u32 & 0o377777;
             self.m.dmem[(addr & dmem_mask) as usize] = new;
@@ -696,7 +699,6 @@ impl Pipeline {
             }
             return;
         }
-        self.m.dispatch_constant = self.ir(32, 10) as u16;
         let mut target = entry & 0o37777;
         let n = (entry >> 14) & 1 != 0;
         let p = (entry >> 15) & 1 != 0;
