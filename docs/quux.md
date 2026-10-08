@@ -679,7 +679,9 @@ Holds and write pulses:
   cycle to end
   (`the_engines_write_the_md_of_the_microcycle_after_the_start` in
   `tests/chip.rs`, `a_write_carries_the_md_of_the_microcycle_after_its_start`
-  in `tests/quux_memory_port.rs`).
+  in `tests/quux_memory_port.rs`). Revision 15 leaves this rule: its write
+  carries `MD` as its start's own microcycle leaves it (below, the
+  pipeline's rows).
 - **QUUX holds a memory start in the microcycle right after a start**, a
   `-WAIT` term of its own, `MEMSTART AND MEMOP`, until the first cycle has
   gone out and ended; both then land as written, a first write with the
@@ -692,7 +694,13 @@ Holds and write pulses:
   `tests/quux_device_registers.rs`,
   `a_start_held_behind_a_write_loads_md_after_the_write` and
   `a_fetch_right_after_a_write_waits_for_it` in
-  `tests/quux_memory_port.rs`). A register write held behind a register
+  `tests/quux_memory_port.rs`). **Not modelled** in revision 14's
+  `micro`: a word right after a read start that starts a cycle and writes
+  or reads `MD`. `rtl` holds it, its `MD` load with it, so that its own
+  `MD` write stands after the read's word, where `micro` lands the read's
+  word in `MD` after it: the two differ in the word written and in `MD`
+  after. No program runs it: microcode 2002 has no such
+  word, and the traces of release 2002 on revision 14 none. A register write held behind a register
   read does not put the read's word off: `MD` has it when the read's own
   `READ IN PROGRESS` falls, 140 ns after its acknowledgement, and the
   write's acknowledgement moves nothing, so a microcycle reading `MD`
@@ -1649,7 +1657,8 @@ pointer, n = (PP − head + 1) AND 37777 and off = (`VA<31:0>` − base) mod
 2^32, unsigned; when off ≤ n, the word one past PP admitted as PGF-R-PDL
 admits it, the reference is inside the buffer: a read's word is the
 buffer's at (head + off) AND 37777, and a write's word, `MD` of the
-microcycle after the start, goes there, with no memory cycle, no
+microcycle after the start (on revision 15 its start's own, below), goes
+there, with no memory cycle, no
 write-back and no setter. Otherwise it goes to memory as if its access
 code were `11`, with its write-backs (`the_redirect_takes_the_buffer_up_to_the_word_past_pp`,
 `the_redirect_across_2_31_words`). The base and the head are copies of A
@@ -1911,7 +1920,8 @@ contract has every cycle go out, so that word's conditions see the
 interrupt as it stood before the write; on revision 15 `micro` sends a
 register write out then, sooner only when a start in that microcycle or a
 halt sends it, and keeps its shortcut, the end of the start's own
-microcycle, for main memory alone. A write of block-disk's command with
+microcycle, for main memory alone. The register takes the start's word
+whenever it goes out (`a_register_write_carries_its_start_s_md`). A write of block-disk's command with
 `<11>`, the disk idle, raises word 100 `<3>`: the page-fault-or-interrupt
 check right after the start does not call, the one after it does; a write
 that lowers the level is still seen up by the check right after it
@@ -2059,7 +2069,10 @@ raised before the matching microcycle
 start and no TLB lookup (`a_squashed_start_is_caught`,
 `a_wrong_path_map_md_evicts_nothing`). The PDL buffer's word written by a
 microcycle is read old by the next and forwarded to the two after, across
-the buffer's wrap (`the_pdl_buffer_across_its_wrap`).
+the buffer's wrap (`the_pdl_buffer_across_its_wrap`). A write redirected
+into the buffer lands at its grant, as it lands on `micro` when its start's
+microcycle ends, and the words behind the start read it, the next among them
+(`a_write_redirected_into_the_pdl_buffer_carries_its_start_s_md`).
 
 **The single-edge contract's rows** hold on the pipeline, each against
 `micro` with its own fault planted (`row_*` in `tests/revision_15_rtl.rs`):
@@ -2075,12 +2088,27 @@ fills a delay slot (`write_i_mem_goes_on_at_the_word_after_it_in_execution_order
 under the OA select check `micro` halts on a `WRITE-I-MEM` outside MIT's
 form, `IR<9:0>` 1647 without POPJ, or run as a delay slot, the WRITE-I-MEM
 check (a proposed name;
-`the_write_i_mem_check_halts_outside_mit_s_form_and_in_a_slot`); a write carries the `MD` of the microcycle after its start, or the
-`MD` before a start that is held behind it. The word right after a read
-start reads `MD` as the start found it and waits for nothing, a write of
-`MD` there giving way to the read's word, as the cycle goes out at the edge
-ending that microcycle; every later word that uses `MD` waits for the word
-read (`row_the_word_after_a_read_start_reads_the_old_md`). Its port-B
+`the_write_i_mem_check_halts_outside_mit_s_form_and_in_a_slot`). **A
+write carries `MD` as its start's own microcycle leaves it**, whatever the
+word after it loads, the single-edge rule's "the `MD` of the microcycle
+after its start" left on revision 15 (the MD-after-write ruling, contract
+amendment 10): the pipeline's start takes its word at EX's commit and
+carries it to the port's queue, the register's write or the PDL buffer, and
+`micro` takes it at the end of that microcycle; a halt anywhere then writes
+what the run without it writes (`row_a_write_carries_its_start_s_md`). The
+word right after a read start reads `MD` as the start found it and waits
+for nothing, a write of `MD` there giving way to the read's word, whether
+or not that word starts a cycle, as the cycle goes out at the edge ending
+that microcycle; a write it starts is held behind the read and carries the
+read's word (rule (A) of the MD-after-read ruling;
+`row_a_write_right_after_a_read_start_writes_the_read_s_word`); every
+later word that uses `MD` waits for the word read
+(`row_the_word_after_a_read_start_reads_the_old_md`). Under the OA select
+check `micro` halts on a word that writes `MD` (destinations 30 to 33, 34 to
+37 decoding as those) in the microcycle right after a memory start or an
+instruction fetch's start, the MD-after-start check, which the
+micro-assembler's refusal of the same words matches
+(`the_md_after_start_check_halts_micro`). Its port-B
 lookup, `MAP(MD)` or a map-bit dispatch, is of that `MD` too, however long
 its walk takes and whenever the read's word lands, and a walk keeps the
 address it began with to its fill: the TLB then holds what `micro`'s holds,
@@ -2151,11 +2179,10 @@ which makes the fetch, fetched again ahead of the wait
 (`a_halt_keeps_d_s_wait_for_the_stream_s_word`); on the main loop's
 programs, D on and off, a halt at every clock ends as the run without it
 (`a_halt_at_every_clock_of_the_main_loop_machines`).
-A write's word is `MD` as the microcycle after its start leaves it; when a
-halt squashes that microcycle, it is `MD` as it stands. **Unverified**
-against `micro` where that microcycle loads `MD`: MIT's microcode never
-loads `MD` in the word after a write start, and a halt between the two
-would write the earlier word. The checkpoint records the period, the
+A write's word is fixed as its start's microcycle ends, so a halt at any
+clock writes the word the run without it writes, on `micro` halted after
+any microcycle as well (`row_a_write_carries_its_start_s_md`,
+`row_a_write_right_after_a_read_start_writes_the_read_s_word`). The checkpoint records the period, the
 port's timing and the cache's size, and a resume at another is refused,
 naming the flag that matches it
 (`a_checkpoint_refuses_another_period_timing_or_cache`). A checkpoint
