@@ -9,8 +9,10 @@
 //!   interrupts' sampling and the devices see it, and nothing else.
 //! - **The harness's own actions**, its keys, screen checks and marker
 //!   polls, are on an absolute schedule of `Machine::cycles`
-//!   ([`run_for`]), and the host's dates are fixed ([`FIXED_UNIX`]), so
-//!   that two runs, on either engine, see the same.
+//!   ([`run_for`]), and the host's dates are fixed ([`FIXED_UNIX`]): the
+//!   file server's, the RTC's start and every date the file device reports
+//!   ([`fix_dates`]), so that two runs, on either engine and started at any
+//!   second, see the same.
 //! - **The digest** ([`digest`]) is taken at every [`EVERY`]th
 //!   macroinstruction boundary, a step of LC (`Machine::lc_steps`):
 //!   `micro` after the microcycle that steps it, the pipeline halted after
@@ -32,6 +34,15 @@ pub const EVERY: u64 = 65_536;
 
 /// The host's date under the harness, 1 September 2026, the one M8d fixed.
 pub const FIXED_UNIX: u64 = super::time::FIXED_UNIX;
+
+/// **The harness's dates** on `m`: the RTC counted from [`FIXED_UNIX`] in
+/// the machine's own time, never the host's, and every date the file
+/// device reports [`FIXED_UNIX`] (`FileDevice::fixed_date`), whenever the
+/// run's files were made.
+pub fn fix_dates(m: &mut Machine) {
+    m.rtc = muir::machine::Rtc::Counted { start: FIXED_UNIX as u32, base_ns: 0 };
+    m.file_device.fixed_date = Some(FIXED_UNIX as u32);
+}
 
 /// Whether the harness is on: `MUIR_TIME_NEUTRAL=1`.
 pub fn on() -> bool {

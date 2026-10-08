@@ -476,13 +476,13 @@ struct Entry {
     mtime: u32,
 }
 
-fn entry_of(name: String, m: &Metadata, ro: bool) -> Entry {
+fn entry_of(name: String, m: &Metadata, ro: bool, date: Option<u32>) -> Entry {
     Entry {
         name,
         dir: m.is_dir(),
         ro,
         len: if m.is_dir() { 0 } else { m.len() },
-        mtime: mtime_of(m),
+        mtime: date.unwrap_or_else(|| mtime_of(m)),
     }
 }
 
@@ -490,7 +490,7 @@ fn entry_of(name: String, m: &Metadata, ro: bool) -> Entry {
 /// bytewise, dot files with them; not `.quux-write-` files, not a name the
 /// rules refuse, not a symlink that leaves `root` or leads nowhere, and not
 /// anything else.
-fn list_folder(dir: &Path, root: &Path, ro: bool) -> io::Result<Vec<Entry>> {
+fn list_folder(dir: &Path, root: &Path, ro: bool, date: Option<u32>) -> io::Result<Vec<Entry>> {
     let mut out = Vec::new();
     for e in fs::read_dir(dir)? {
         let e = e?;
@@ -513,7 +513,7 @@ fn list_folder(dir: &Path, root: &Path, ro: bool) -> io::Result<Vec<Entry>> {
             lm
         };
         if m.is_file() || m.is_dir() {
-            out.push(entry_of(name.to_string(), &m, ro));
+            out.push(entry_of(name.to_string(), &m, ro, date));
         }
     }
     out.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
@@ -614,6 +614,14 @@ pub struct FileDevice {
     /// Every line LOG printed, in order, when a test asks for the record by
     /// setting it to `Some`. Not kept in a checkpoint.
     pub log: Option<Vec<Vec<u8>>>,
+    /// **The date every modification time is reported as**, in Unix
+    /// seconds, when set: a listing's, OPEN's and CLOSE's, in place of the
+    /// host file's. The time-neutral harness sets it to its fixed host date,
+    /// as it fixes the RTC and the file server's dates, so that the words a
+    /// run writes do not depend on when its files were made. `None`, the
+    /// host's, otherwise. The run's say, as the mounts are: not kept in a
+    /// checkpoint.
+    pub fixed_date: Option<u32>,
 }
 
 impl Default for FileDevice {
@@ -641,6 +649,7 @@ impl FileDevice {
             head_due: None,
             handles: vec![None; MAX_HANDLES],
             log: None,
+            fixed_date: None,
         }
     }
 
@@ -1163,7 +1172,7 @@ impl FileDevice {
         if !(meta.is_file() || meta.is_dir()) || (meta.is_file() && meta.len() > u32::MAX as u64) {
             return Err(status::WKF);
         }
-        let info = entry_of(String::new(), &meta, p.ro);
+        let info = entry_of(String::new(), &meta, p.ro, self.fixed_date);
         if mode == 0 {
             if info.dir {
                 return Err(status::IOD);
@@ -1256,7 +1265,7 @@ impl FileDevice {
                 if !abort {
                     let m = file.metadata().map_err(|e| host_status(&e))?;
                     r.len(m.len());
-                    r.mtime(mtime_of(&m));
+                    r.mtime(self.fixed_date.unwrap_or_else(|| mtime_of(&m)));
                 }
             }
             Handle::Write { temp, target, noreplace, .. } => {
@@ -1281,7 +1290,7 @@ impl FileDevice {
                 }
                 let m = fs::metadata(&target).map_err(|e| host_status(&e))?;
                 r.len(m.len());
-                r.mtime(mtime_of(&m));
+                r.mtime(self.fixed_date.unwrap_or_else(|| mtime_of(&m)));
             }
         }
         Ok(())
@@ -1292,13 +1301,14 @@ impl FileDevice {
     fn list(&self, comps: &[String]) -> Result<Vec<Entry>, u32> {
         if comps.is_empty() {
             let mut out = match &self.mounts.default {
-                Some(m) => list_folder(&m.path, &m.path, m.ro).map_err(|e| host_status(&e))?,
+                Some(m) => list_folder(&m.path, &m.path, m.ro, self.fixed_date)
+                    .map_err(|e| host_status(&e))?,
                 None => Vec::new(),
             };
             out.retain(|e| !self.mounts.named.contains_key(&e.name));
             for (n, m) in &self.mounts.named {
                 let meta = fs::metadata(&m.path).map_err(|e| host_status(&e))?;
-                out.push(entry_of(n.clone(), &meta, m.ro));
+                out.push(entry_of(n.clone(), &meta, m.ro, self.fixed_date));
             }
             out.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
             return Ok(out);
@@ -1308,7 +1318,7 @@ impl FileDevice {
         match f.meta {
             None => Err(status::DNF),
             Some(m) if m.is_dir() => {
-                list_folder(&f.path, p.root.as_deref().expect("a folder"), p.ro)
+                list_folder(&f.path, p.root.as_deref().expect("a folder"), p.ro, self.fixed_date)
                     .map_err(|e| host_status(&e))
             }
             Some(_) => Err(status::WKF),

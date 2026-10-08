@@ -781,6 +781,37 @@ fn a_prog_unibus_reset_leaves_the_device_as_it_was() {
 
 // --- commands ---------------------------------------------------------------------
 
+/// **Under the time-neutral harness the words the device writes are the
+/// same in every run** (`support::neutral::fix_dates`): two runs over a
+/// folder whose file and subfolder were made seconds apart, as a run's are
+/// made when it starts, OPEN, CLOSE and list them, and main memory, which a
+/// workload's end digest takes, is the same after both; every date the
+/// device reports is the harness's, `FIXED_UNIX`.
+#[test]
+fn under_the_time_neutral_harness_the_device_reports_the_harness_s_date() {
+    let run = |made: u64| {
+        let f = Folder::new(&format!("neutral-{made}"));
+        let p = f.file("sys/data.bin", b"twelve bytes");
+        set_mtime(&p, made);
+        let dir = std::fs::File::open(f.path().join("sys")).unwrap();
+        dir.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(made + 1)).unwrap();
+        let mut d = Dev::new(default_root(&f));
+        support::neutral::fix_dates(&mut d.m);
+        let o = d.open("/sys/data.bin", READ);
+        assert_eq!(o.status(), 0);
+        let c = d.close(o.handle(), 0, 0);
+        let (r, recs) = d.directory("/", 0, 4096);
+        assert_eq!(r.status(), 0);
+        let dates = (o.mtime(), c.mtime(), recs.iter().map(|r| r.mtime).collect::<Vec<_>>());
+        let pending = muir::machine::Pending { md: None, pdl: None, spc: None };
+        (dates, support::neutral::digest(&d.m, pending, (0, 0), true))
+    };
+    let (a, b) = (run(1_791_491_843), run(1_791_491_940));
+    let fixed = support::neutral::FIXED_UNIX as u32;
+    assert_eq!(a.0, (fixed, fixed, vec![fixed]), "the harness's date, everywhere");
+    assert_eq!(a, b, "two runs made 97 s apart");
+}
+
 /// **OPEN and READ**: the length and mtime; positional reads of any size,
 /// short at the end, 0 at the end, FOR past it; a READ of n bytes writing
 /// `ceil(n/4)` words with the bytes past n zero and no other word; CLOSE

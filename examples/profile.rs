@@ -32,7 +32,8 @@
 //! `tests/support/neutral.rs`), for `micro` and the pipeline: both run on
 //! neutral time, `Machine::cycles` times the period; the harness's keys,
 //! screen checks and marker polls are on an absolute schedule of
-//! `Machine::cycles`; the host's dates and the RTC are fixed; and every
+//! `Machine::cycles`; the host's dates, the RTC and the file device's
+//! dates are fixed (`support::neutral::fix_dates`); and every
 //! 65,536th macroinstruction boundary, a step of LC, prints a `digest`
 //! line, the pipeline halted after that word and drained, with one of the
 //! whole state at each workload's end. Two runs' `digest` lines compare as
@@ -1340,12 +1341,13 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
         support::machine_with_pack(&copy)
     };
     m.geometry = geometry;
+    if support::neutral::on() {
+        // The time-neutral harness's dates: the RTC counted, never the
+        // host's, and the file device's dates its own.
+        support::neutral::fix_dates(&mut m);
+    }
     if let Some(s) = std::env::var("MUIR_RTC").ok().and_then(|v| v.parse().ok()) {
         m.rtc = muir::machine::Rtc::Counted { start: s, base_ns: 0 };
-    } else if support::neutral::on() {
-        // The time-neutral harness counts the RTC, never the host's.
-        m.rtc =
-            muir::machine::Rtc::Counted { start: support::neutral::FIXED_UNIX as u32, base_ns: 0 };
     }
     let mut e = make(m);
     e.boot();
