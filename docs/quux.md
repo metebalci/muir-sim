@@ -2010,6 +2010,22 @@ start and no TLB lookup (`a_squashed_start_is_caught`,
 microcycle is read old by the next and forwarded to the two after, across
 the buffer's wrap (`the_pdl_buffer_across_its_wrap`).
 
+**The single-edge contract's rows** hold on the pipeline, each against
+`micro` with its own fault planted (`row_*` in `tests/revision_15_rtl.rs`):
+a PDL read through a pointer the word before wrote waits a clock for it; a
+write by PDL-INDEX lands at its own word's index; an M read of the SPC
+stack right after a push reads the old word and the next word the new,
+while a POPJ right after a push returns to the word pushed; `MAP(MD)` right
+after a map write reads the old entry; a dispatch right after a
+dispatch-memory write takes the new entry, its prediction checked against
+it; a word `WRITE-I-MEM` writes runs as written, the words behind it fetched
+again; a write carries the `MD` of the microcycle after its start, or the
+`MD` before a start that is held behind it. The word right after a read
+start reads `MD` as the start found it and waits for nothing, a write of
+`MD` there giving way to the read's word, as the cycle goes out at the edge
+ending that microcycle; every later word that uses `MD` waits for the word
+read (`row_the_word_after_a_read_start_reads_the_old_md`).
+
 **The memory port** posts writes: a queue of 8 entries, freed when the port
 accepts a write, and 16 accepted writes in flight until their responses;
 main memory takes a write's word at its response. A read whose line has a
@@ -2024,7 +2040,13 @@ fill waits for it (`a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_l
 `<read>,<write>,<occupancy>` in ns or `kria`, `arty` or `de25`, `kria` by
 default. Block-disk's START lands every posted write first, so a transfer
 reads every word written before it and a read's words are not overwritten
-by an older write (`block_disk_s_start_lands_the_posted_writes`).
+by an older write (`block_disk_s_start_lands_the_posted_writes`); the
+transfer clears the cache's sets of the words it writes and no others
+(`a_block_disk_transfer_clears_the_sets_it_writes_and_no_more`). The file
+device takes CMD_PROD once every earlier write is answered, so a command
+whose entry is still in the posted writes is read whole, and its
+completion's sweep leaves no line of what it wrote in the cache
+(`the_file_device_reads_its_entry_whole_and_the_sweep_shows_its_response`).
 
 **The halt** completes the words in EX and WB, squashes CS and RD, and
 waits for the port to empty. The state is then a single-edge machine's
@@ -2034,6 +2056,12 @@ and a checkpoint taken there, run on to the same end, the state at the halt
 `micro`'s at the same `Machine::cycles`; so does a microcode single step,
 one microcycle each (`a_halt_at_every_clock_resumes_to_the_same_end`,
 `a_halt_mid_burst_loses_no_write`, `a_single_step_runs_one_microcycle`).
+The squashed words are fetched again in order, the first two at the
+addresses committed words chose for them. A D that waits for the stream's
+word keeps waiting over the halt, its delay slot, which makes the fetch,
+fetched again ahead of the wait; on the main loop's programs, D on and off,
+a halt at every clock ends as the run without it
+(`a_halt_at_every_clock_of_the_main_loop_machines`).
 A write's word is `MD` as the microcycle after its start leaves it; when a
 halt squashes that microcycle, it is `MD` as it stands. **Unverified**
 against `micro` where that microcycle loads `MD`: MIT's microcode never
@@ -2042,6 +2070,23 @@ would write the earlier word. The checkpoint records the period, the
 port's timing and the cache's size, and a resume at another is refused,
 naming the flag that matches it
 (`a_checkpoint_refuses_another_period_timing_or_cache`).
+
+**The time-neutral harness** compares the pipeline with `micro` on a run
+(`tests/support/neutral.rs`, `examples/profile.rs` under
+`MUIR_TIME_NEUTRAL=1`). Both run on neutral time, `Machine::cycles` times
+the period: the timers, the RTC, the interrupts' sampling and the devices
+see it and nothing else, and the drain, the sweeps and every memory wait
+take none. The harness acts on an absolute schedule of `Machine::cycles`
+with the host's dates fixed. At every 65,536th step of LC the pipeline
+halts after the word that stepped it, the word in EX not yet run squashed
+with RD's and CS's, and drains (`Pipeline::boundary_at`); a digest of
+`Machine::cycles`, the step count, the registers, A, M, the PDL buffer, the
+SPC stack, the OA registers and the MACRO-DISPATCH state is then `micro`'s
+after that microcycle, and at a workload's end with main memory and the
+dispatch memory. On main-loop programs, D on and off, every boundary
+digests alike, and a missing d3 bypass, a stack copy not restored, a
+squashed start and a nopped slot counted twice each change a digest
+(`the_harness_digests_the_pipeline_as_micro_at_every_boundary`).
 
 ## Not modeled
 
