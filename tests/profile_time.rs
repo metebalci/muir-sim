@@ -148,3 +148,47 @@ fn micro_s_memory_time_is_named_a_charge() {
     assert_eq!(in_all, QUUX_PERIOD_NS * microcycles + charged, "{line}");
     assert!(line.contains("% of the time in all"), "{line}");
 }
+
+/// **Under the time-neutral harness `micro` charges no memory time, and the
+/// line says so** (MP2b ruling Q12: neutral time is `Machine::cycles` times
+/// the period, with no memory charge): revision 14's machine reading main
+/// memory through the physical memory window, at the pipeline's revision-14
+/// period of 9 ns, its clock 9 ns a microcycle and nothing more. The line's
+/// time in all is the clock's, all of it the microcycles', none charged.
+/// It subtracted a charge never made and printed an underflowed time.
+#[test]
+fn micro_under_neutral_time_charges_no_memory_time() {
+    const PHYS: u64 = 0o36000000000;
+    let prom = [
+        Insn::new(ALU | muir::isa::asm::SETA | muir::isa::asm::a_src(0o100) | START_READ),
+        filler(),
+        Insn::new(ALU | SETM | SRC_MD | a_dest(0o200)),
+        Insn::new(JUMP | target(0) | ALWAYS | N),
+        filler(),
+    ];
+    let mut m = Machine::with_geometry(Geometry::QUUX_14, 1);
+    let mut words = vec![filler(); 1024];
+    words[..prom.len()].copy_from_slice(&prom);
+    m.load_prom(&words);
+    support::prom_program_in_ram(&mut m);
+    m.amem[0o100] = PHYS | 0o4000;
+    let mut e = Micro::new(m);
+    e.neutral = true;
+    e.period = muir::pipeline::PERIOD_14;
+    e.boot();
+    run(&mut e, 100);
+    let start = Span::of_micro(&e);
+    let (ns0, mc0) = (e.machine().ns, e.memory_cycles());
+    run(&mut e, 2000);
+    let span = Span::of_micro(&e).since(start);
+    let line = span.line();
+    eprintln!("{line}");
+    assert!(e.memory_cycles() > mc0, "the loop reads");
+    let microcycles = after(&line, "time:");
+    let microcycle_ns = after(&line, " microcycles in");
+    let in_all = before(&line, " ns in all");
+    assert_eq!(in_all, e.machine().ns - ns0, "the line's time in all is the clock's: {line}");
+    assert_eq!(in_all, muir::pipeline::PERIOD_14 * microcycles, "{line}");
+    assert_eq!(microcycle_ns, in_all, "all of it the microcycles': {line}");
+    assert!(line.contains("neutral time, no memory charged"), "{line}");
+}

@@ -2173,7 +2173,9 @@ again (`an_rtl_stop_on_revision_15_drains_before_its_checkpoint`,
 `MUIR_TIME_NEUTRAL=1`). Both run on neutral time, `Machine::cycles` times
 the period: the timers, the RTC, the interrupts' sampling and the devices
 see it and nothing else, and the drain, the sweeps and every memory wait
-take none. The harness acts on an absolute schedule of `Machine::cycles`
+take none; `micro`'s profile line then gives its time as neutral time with
+no memory charged (`micro_under_neutral_time_charges_no_memory_time` in
+`tests/profile_time.rs`). The harness acts on an absolute schedule of `Machine::cycles`
 with the host's dates fixed, and between two microcycles on both engines:
 the pipeline halts after the schedule's microcycle and drains, its posted
 writes landed, before the harness looks at the screen or presses a key, and

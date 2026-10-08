@@ -27,6 +27,10 @@ pub enum Memory {
     Stalled,
     /// `micro`'s fixed charge of `each_ns` a memory cycle.
     Charged { each_ns: u64 },
+    /// `micro` under neutral time (MP2b ruling Q12) on revisions 14 and 15:
+    /// its clock is its microcycles times the period, and it charges no
+    /// memory time.
+    Neutral,
     /// Revision 15's pipeline: clocks of one period, in units of 0.5 ns,
     /// a microcycle counted in some and none in the rest (bubbles, holds,
     /// memory waits).
@@ -66,11 +70,24 @@ impl Span {
     /// 0.5 ns.
     pub fn of_micro(e: &Micro) -> Span {
         let each_ns = e.memory_cycle_ns;
+        let ns = e.machine().ns / e.machine().time_base().per_ns;
+        // Neutral time drops the charge (`Micro::neutral`, on a paged
+        // machine): a memory cycle adds nothing to the clock, and a span
+        // that counted one would subtract time never charged.
+        if e.neutral && e.machine().geometry.paged() {
+            return Span {
+                microcycles: e.machine().cycles,
+                memory_ns: 0,
+                halted_ns: 0,
+                ns,
+                memory: Memory::Neutral,
+            };
+        }
         Span {
             microcycles: e.machine().cycles,
             memory_ns: e.memory_cycles() * each_ns,
             halted_ns: 0,
-            ns: e.machine().ns / e.machine().time_base().per_ns,
+            ns,
             memory: Memory::Charged { each_ns },
         }
     }
@@ -152,6 +169,12 @@ impl Span {
                 clocks as f64 / self.microcycles.max(1) as f64,
                 self.ns,
                 self.memory_ns
+            ),
+            Memory::Neutral => format!(
+                "time: {} microcycles in {} ns of neutral time, no memory charged{halted} = {} ns in all",
+                self.microcycles,
+                self.microcycle_ns(),
+                self.ns
             ),
             Memory::Charged { each_ns } => format!(
                 "time: {} microcycles in {} ns + memory charged {} ns ({} ns a memory cycle, fixed; micro does not stall){halted} = {} ns in all; memory charged {share:.2}% of the time in all",
