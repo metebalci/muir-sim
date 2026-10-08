@@ -2095,7 +2095,10 @@ accepts a write, and 16 accepted writes in flight until their responses;
 main memory takes a write's word at its response. Writes are answered in
 order, at most one a clock, as one AXI ID for every write answers them: a
 run's are so already, and the test memory that answers a write 1 to 50
-clocks late is held to it (`p3_writes_are_answered_in_order_one_a_clock`). A read whose line has a
+clocks late is held to it (`p3_writes_are_answered_in_order_one_a_clock`).
+A write to a word of the frame buffer's window whose line the cache holds
+leaves in the line what the window will hold, the field with tag 005, as a
+fill reads it (`row_a_cached_frame_buffer_word_written_reads_back_as_the_window_holds_it`). A read whose line has a
 write queued or in flight waits for every such response, and every other
 read goes ahead (`the_read_rule_returns_the_word_written`,
 `the_ninth_write_waits_for_the_first_s_acceptance`,

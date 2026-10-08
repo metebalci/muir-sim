@@ -4901,3 +4901,26 @@ fn p3_writes_are_answered_in_order_one_a_clock() {
     eprintln!("writes answered as drawn: two in a clock at {caught} seeds of 40");
     assert!(caught > 0, "answers out of order are caught");
 }
+
+/// **A frame-buffer word written while its line is cached reads back as the
+/// frame buffer holds it** (G1 §4.2: the window stores the field and drops
+/// the tag; a read comes back tagged 005): a word of the window read, so
+/// that its line is in the cache, then written with a list pointer's tag,
+/// then read again, a hit. On `micro` and the pipeline alike, the field
+/// with tag 005.
+#[test]
+fn row_a_cached_frame_buffer_word_written_reads_back_as_the_window_holds_it() {
+    let window = muir::tlb::DEVICE_WINDOW as Word;
+    let list: Word = 0o016 << 32;
+    let mut p = Prog::default();
+    p.read(window | 0o12, 0o25);
+    p.write(list | 0o1234, window | 0o12);
+    p.read(window | 0o12, 0o26);
+    p.read(window | 0o13, 0o27);
+    p.stop();
+    let u = micro(&p);
+    assert_eq!(u.machine().mmem[0o26], muir::machine::UNBOXED_TAG | 0o1234, "micro");
+    let e = pipeline(&p);
+    assert_eq!(e.machine().mmem[0o26], muir::machine::UNBOXED_TAG | 0o1234, "the pipeline's hit");
+    same(&p);
+}

@@ -544,6 +544,7 @@ impl Pipeline {
         };
         p.m.period = if p.m.geometry.extended() { period } else { 0 };
         p.x.lvmo = p.m.geometry.lvmo_at_power_on();
+        p.port.window_words = p.m.tv.buffer_words();
         p
     }
 
@@ -568,6 +569,7 @@ impl Pipeline {
             self.m.period = period;
         }
         self.port = Port::new(timing, self.time(), cache_words);
+        self.port.window_words = self.m.tv.buffer_words();
     }
 
     pub fn period(&self) -> u64 {

@@ -387,6 +387,9 @@ pub struct Port {
     pub writes_in_order: bool,
     /// The last accepted write's response clock, for that order.
     last_respond_at: u64,
+    /// The frame buffer's words, its window's first `window_words` words of
+    /// the device window: the pipeline sets it from the machine's TV board.
+    pub window_words: u32,
     pub meters: PortMeters,
     /// Errors answered, for register-page word 225, taken by the machine.
     errors: u32,
@@ -419,6 +422,7 @@ impl Port {
             one_beat_writes: false,
             writes_in_order: true,
             last_respond_at: 0,
+            window_words: u32::MAX,
             meters: PortMeters::default(),
             errors: 0,
             next_tag: 1,
@@ -634,7 +638,8 @@ impl Port {
             self.meters.queue_full_clocks += 1;
             return false;
         }
-        self.cache.write(bus, word);
+        let held = self.as_held(bus, word);
+        self.cache.write(bus, held);
         let tag = self.next_tag;
         self.next_tag += 1;
         self.queue.push_back(Queued { bus, word: Some(word), tag });
@@ -642,12 +647,27 @@ impl Port {
     }
 
     /// The word of the queued write `tag`, fixed: the cache's line, if it
-    /// holds the word, takes it with it.
+    /// holds the word, takes it with it, as the memory will hold it.
     pub fn word(&mut self, tag: u64, word: Word) {
         if let Some(q) = self.queue.iter_mut().find(|q| q.tag == tag) {
             q.word = Some(word);
             let bus = q.bus;
-            self.cache.write(bus, word);
+            let held = self.as_held(bus, word);
+            self.cache.write(bus, held);
+        }
+    }
+
+    /// The word at `bus` once `word` is written there, as a fill would read
+    /// it back ([`peek`]): main memory's whole word; in the frame buffer's
+    /// window the field, tagged 005, the window storing the field and
+    /// dropping the tag (G1 §4.2); nothing past the frame buffer.
+    fn as_held(&self, bus: u32, word: Word) -> Word {
+        if bus & crate::tlb::DEVICE == 0 {
+            word
+        } else if bus & !crate::tlb::DEVICE < self.window_words {
+            crate::machine::UNBOXED_TAG | (word & 0xffff_ffff)
+        } else {
+            0
         }
     }
 
