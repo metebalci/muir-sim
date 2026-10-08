@@ -50,6 +50,10 @@ pub(crate) struct Back {
     pub table_word: Option<(u64, Word)>,
     pub table_fill: bool,
     pub walk: WalkStep,
+    /// The virtual address the walk in progress walks, kept from its first
+    /// read to its fill: a lookup that asks for another address meanwhile
+    /// waits for it to end.
+    pub walk_va: u32,
     pub write_back: WalkStep,
     pub write_back_bits: u32,
     pub write_back_page: u32,
@@ -939,9 +943,18 @@ impl Pipeline {
     /// **A walk** for `va` through `port` (A14.6): the directory entry and
     /// the page entry read through the cache, each a hit or a fill with the
     /// read rule; what it finds loaded. `None` while it reads.
+    ///
+    /// The walk keeps the address it began with to its fill (MP4 ruling
+    /// Q2, M2): asked for another address while it reads, it finishes its
+    /// own and answers `None`, and the caller looks its address up again.
     pub(crate) fn walk(&mut self, va: u32, port: crate::tlb::Port) -> Option<()> {
         let base = self.m.memory_words.directory;
         let frames = (self.m.main.len() >> 10) as u32;
+        if self.b.walk == WalkStep::Idle {
+            self.b.walk_va = va;
+        }
+        let ours = self.b.walk_va == va;
+        let va = self.b.walk_va;
         loop {
             match self.b.walk {
                 WalkStep::Idle => {
@@ -958,7 +971,7 @@ impl Pipeline {
                     if crate::tlb::status(dir) != 4 || frame >= frames {
                         self.b.walk = WalkStep::Idle;
                         self.m.tlb.walks += 1;
-                        return Some(());
+                        return ours.then_some(());
                     }
                     self.b.walk = WalkStep::Page;
                     self.table_read_start(frame << 10 | (va >> 10 & 0o1777));
@@ -976,7 +989,7 @@ impl Pipeline {
                     if let Some(e) = entry {
                         self.m.tlb.fill(va, e, port);
                     }
-                    return Some(());
+                    return ours.then_some(());
                 }
             }
         }
@@ -1184,12 +1197,19 @@ impl Pipeline {
             self.ex = Some(e);
             return Ok(res);
         }
-        if !e.nop && self.reads_port_b(ir) {
+        // Port B looks up the `MD` the word reads: the word right after a
+        // read start reads `MD` as the start found it, whenever the read's
+        // word lands (MP4 ruling Q2, M2).
+        let md_read = match self.b.md_old {
+            Some((_, old)) if successor => old,
+            _ => self.m.md,
+        };
+        if !e.nop && reads_port_b(ir, md_read, &self.m) {
             if self.tlb_sweep_until > now {
                 self.ex = Some(e);
                 return Ok(res);
             }
-            let va = self.m.md as u32;
+            let va = md_read as u32;
             if crate::tlb::region(va) == crate::tlb::Region::Paged
                 && self.m.tlb.lookup(va).is_none()
                 && self.walk(va, crate::tlb::Port::B).is_none()
@@ -1375,11 +1395,6 @@ impl Pipeline {
         }
     }
 
-    /// Whether the word looks port B up (A14.5).
-    fn reads_port_b(&self, ir: u64) -> bool {
-        reads_port_b(ir, &self.m)
-    }
-
     /// The register write granted last clock, taken now.
     fn register_write_now(&mut self) {
         let Some(r) = self.b.register_write else { return };
@@ -1481,7 +1496,7 @@ impl Pipeline {
                         }
                         if self.mutation == Mutation::SquashedLookup
                             && !w.nop
-                            && reads_port_b(ir, &self.m)
+                            && reads_port_b(ir, self.m.md, &self.m)
                         {
                             // Planted: the squashed word's port-B lookup made,
                             // a miss walked and filled.
@@ -1868,14 +1883,14 @@ impl Pipeline {
     }
 }
 
-/// Whether `ir` makes a port-B lookup of `MD`'s address: `MAP(MD)`, or a
-/// map-bit dispatch on a pointer.
-fn reads_port_b(ir: u64, m: &crate::machine::Machine) -> bool {
+/// Whether `ir` makes a port-B lookup of `md`, the `MD` it reads:
+/// `MAP(MD)`, or a map-bit dispatch on a pointer.
+fn reads_port_b(ir: u64, md: Word, m: &crate::machine::Machine) -> bool {
     let map_source = source(ir).is_some_and(|s| s & 0o17 == 0o11);
     let map_dispatch = class(ir) == Op::Dispatch
         && field(ir, 8, 2) != 0
         && field(ir, 10, 2) != 2
-        && m.memory_words.pointer_type(m.md);
+        && m.memory_words.pointer_type(md);
     map_source || map_dispatch
 }
 
@@ -1979,4 +1994,51 @@ pub fn registers_of(m: &crate::machine::Machine) -> [u64; 8] {
         m.lc,
         m.interrupt_control.into(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Pipeline;
+    use crate::machine::{Geometry, Machine, Word};
+    use crate::tlb::Port;
+
+    /// **A walk keeps the address it began with** (MP4 ruling Q2, M2): a
+    /// walk for X, its directory read a miss, is asked meanwhile for Y,
+    /// whose directory entry is in another region and whose page index
+    /// holds a decoy under X's table. X's walk ends with X's entry and
+    /// answers `None`; Y's own walk follows and loads Y's. A walker that
+    /// takes the address it is called with loads the decoy for Y.
+    #[test]
+    fn a_walk_keeps_the_address_it_began_with() {
+        let entry = |frame: u32| 0b11 << 28 | 0o1460 << 18 | frame;
+        let mut p = Pipeline::new(Machine::with_geometry(Geometry::QUUX_15, 1));
+        let (x, y): (u32, u32) = (0o4000, 1 << 20 | 5 << 10);
+        let page = |va: u32| (va >> 10 & 0o1777) as usize;
+        p.m.memory_words.directory = 8;
+        for (at, frame) in [
+            ((8 << 10) + (x >> 20) as usize, 9),
+            ((8 << 10) + (y >> 20) as usize, 10),
+            ((9 << 10) + page(x), 3),
+            ((10 << 10) + page(y), 4),
+            ((9 << 10) + page(y), 6),
+        ] {
+            p.m.main[at] = Word::from(entry(frame));
+        }
+        assert_eq!(p.walk(x, Port::B), None, "X's directory read is a miss");
+        let mut answered = None;
+        for _ in 0..1_000 {
+            p.clock += 1;
+            let now = p.clock;
+            p.port.tick(&mut p.m, now);
+            p.port_events(now);
+            if p.walk(y, Port::B).is_some() {
+                answered = Some(now);
+                break;
+            }
+        }
+        assert!(answered.is_some(), "Y's walk ends");
+        assert_eq!(p.m.tlb.lookup(x), Some(entry(3)), "X's walk loaded X's entry");
+        assert_eq!(p.m.tlb.lookup(y), Some(entry(4)), "Y's own entry, not the decoy");
+        assert_eq!(p.m.tlb.walks, 2, "two walks");
+    }
 }

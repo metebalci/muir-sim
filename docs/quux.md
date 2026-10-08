@@ -2044,7 +2044,13 @@ again; a write carries the `MD` of the microcycle after its start, or the
 start reads `MD` as the start found it and waits for nothing, a write of
 `MD` there giving way to the read's word, as the cycle goes out at the edge
 ending that microcycle; every later word that uses `MD` waits for the word
-read (`row_the_word_after_a_read_start_reads_the_old_md`).
+read (`row_the_word_after_a_read_start_reads_the_old_md`). Its port-B
+lookup, `MAP(MD)` or a map-bit dispatch, is of that `MD` too, however long
+its walk takes and whenever the read's word lands, and a walk keeps the
+address it began with to its fill: the TLB then holds what `micro`'s holds,
+and no page index is read under another address's directory entry
+(`row_port_b_right_after_a_read_start_walks_the_md_it_reads`,
+`a_walk_keeps_the_address_it_began_with`).
 
 **The memory port** posts writes: a queue of 8 entries, freed when the port
 accepts a write, and 16 accepted writes in flight until their responses;

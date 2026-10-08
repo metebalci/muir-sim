@@ -3255,6 +3255,105 @@ fn row_the_word_after_a_read_start_reads_the_old_md() {
     assert!(caught > 0, "caught");
 }
 
+/// **Port B right after a read start looks up the `MD` its word reads, and
+/// a walk keeps its address** (A15b.3's `MD` row; A14.5, A14.6). `MD` holds
+/// a list pointer to X; a read start of a word holding a list pointer to Y;
+/// in the word right after it, `MAP(MD)` or a map-bit dispatch on `MD`,
+/// with X's page not in the TLB. X, Y and Z have their directory entries
+/// in different regions, and X's page table holds decoy entries at Y's and
+/// Z's page indexes. The read is a hit or a miss, and Y's page is in the
+/// TLB already or not. Then Y's word, or not, and Z's and X's words are
+/// read. On `micro` the word looks X up; `rtl` must too, the walk
+/// finishing for X while the read's word lands mid-walk: the same words
+/// read, and the TLB holds what `micro`'s does for X, Y and Z. A lookup of
+/// the `MD` that lands loads Y, or Y's decoy; a walk that takes Y's page
+/// index under X's directory entry loads the decoy, and one left half
+/// done gives Z its decoy.
+#[test]
+fn row_port_b_right_after_a_read_start_walks_the_md_it_reads() {
+    const LIST: Word = 0o016 << 32;
+    let x: Word = 0o4000;
+    let y: Word = 1 << 20 | 5 << 10;
+    let z: Word = 2 << 20 | 7 << 10;
+    let page = |va: Word| ((va >> 10) & 0o1777) as usize;
+    let mut failed = Vec::new();
+    let mut cases = 0;
+    for (hit, dispatch, y_held, y_read) in
+        (0..16).map(|k| (k & 8 != 0, k & 4 != 0, k & 2 != 0, k & 1 != 0))
+    {
+        let what = format!("hit {hit}, dispatch {dispatch}, Y held {y_held}, Y read {y_read}");
+        cases += 1;
+        let mut p = Prog::default();
+        // The directory at frame 8: X under the page table at frame 9, Y at
+        // 10, Z at 11.
+        for (va, table) in [(x, 9), (y, 10), (z, 11)] {
+            p.main.push(((8 << 10) + (va >> 20) as usize, rw_entry(table)));
+        }
+        p.main.push(((9 << 10) + page(x), rw_entry(3)));
+        p.main.push(((10 << 10) + page(y), rw_entry(4)));
+        p.main.push(((11 << 10) + page(z), rw_entry(5)));
+        // The decoys: Y's and Z's page indexes under X's table.
+        p.main.push(((9 << 10) + page(y), rw_entry(6)));
+        p.main.push(((9 << 10) + page(z), rw_entry(7)));
+        for frame in 3..8 {
+            p.main.push((frame << 10, 0o1000 + frame as Word));
+        }
+        p.main.push((0o40, LIST | y));
+        set_directory(&mut p);
+        // DTP-LIST a pointer type (word 222).
+        p.write(1 << 0o16, REGISTER_PAGE | 0o222);
+        if hit {
+            p.read(PHYS | 0o40, 0o31);
+        }
+        if y_held {
+            p.read(y, 0o31);
+        }
+        let (xa, at) = (p.k(LIST | x), p.k(PHYS | 0o40));
+        p.op(ALU | SETA | a_src(xa) | MD);
+        p.op(ALU | SETA | a_src(at) | START_READ);
+        if dispatch {
+            // Map bit 2, the entry's <23>, at IR<0>: both entries go on.
+            const T: u64 = 0o40;
+            let next = p.at() + 2;
+            p.dmem.push((T as usize, next as u32));
+            p.dmem.push((T as usize | 1, next as u32));
+            p.op(disp(T) | 2 << 8 | SRC_MD | muir::isa::asm::predicted(next, false, false));
+            p.fill(1);
+        } else {
+            p.op(ALU | SETM | src(0o11) | m_dest(0o25));
+        }
+        p.op(ALU | SETM | SRC_MD | m_dest(0o32));
+        if y_read {
+            p.read(y, 0o26);
+        }
+        p.read(z, 0o27);
+        p.read(x, 0o30);
+        p.stop();
+        let u = micro(&p);
+        let e = pipeline(&p);
+        let (m, um) = (e.machine(), u.machine());
+        assert_eq!(um.mmem[0o32], LIST | y, "{what}: micro read Y's pointer");
+        assert_eq!(
+            [um.mmem[0o26], um.mmem[0o27], um.mmem[0o30]],
+            [if y_read { 0o1004 } else { 0 }, 0o1005, 0o1003],
+            "{what}: micro reads Y, Z and X through their own tables"
+        );
+        assert_eq!(um.tlb.lookup(y as u32).is_some(), y_held || y_read, "{what}: micro's Y");
+        let tlb = |m: &Machine| [x, y, z].map(|va| m.tlb.lookup(va as u32));
+        if tlb(m) != tlb(um) || state(m) != state(um) {
+            failed.push(format!(
+                "{what}: rtl reads {:o} {:o} {:o}, its TLB {:?}, micro's {:?}",
+                m.mmem[0o26],
+                m.mmem[0o27],
+                m.mmem[0o30],
+                tlb(m),
+                tlb(um)
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{} of {cases} cases differ:\n{}", failed.len(), failed.join("\n"));
+}
+
 // --- The file device behind the posted writes (A15b.5, A15b.6) -----------------
 
 /// The file device's rings and buffer A, physical word addresses, each on a
