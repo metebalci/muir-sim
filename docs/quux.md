@@ -1980,10 +1980,10 @@ loads, and is written again as version 51
 reverse, naming the revision that wrote it
 (`revision_15_and_the_others_refuse_each_other_s_checkpoints`).
 
-**The console** reads `IR<63:48>` at spy register 3, `SPY-IR-EXT` (a
-proposed name), after `IR<15:0>`, `<31:16>` and `<47:32>` at 0 to 2, and
-write strobe 6, with its alias 14, loads the debug IR's `<63:48>`,
-`-LDDBIRX` (a proposed name); a console writes all four halves. On the
+**The console** reads `IR<63:48>` at spy register 3, `SPY-IR-EXT`, after
+`IR<15:0>`, `<31:16>` and `<47:32>` at 0 to 2, and write strobe 6, with
+its alias 14, loads the debug IR's `<63:48>`, `-LDDBIRX`; a console writes
+all four halves. On the
 CADR and revisions 13 and 14 register 3 reads open and strobe 6 loads
 nothing
 (`spy_register_3_and_write_strobe_6_are_ir_s_extension_on_revision_15`).

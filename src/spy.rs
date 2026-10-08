@@ -70,10 +70,10 @@ pub const IR_LOW: u8 = 0;
 pub const IR_MED: u8 = 1;
 /// `-SPY.IRH`, `SPY-IR-HIGH`: `IR<47:32>`, SPY1 3F21 and 3E06.
 pub const IR_HIGH: u8 = 2;
-/// `SPY-IR-EXT` (a proposed name, after CC's `SPY-IR-LOW`, `-MED` and
-/// `-HIGH`): on QUUX revision 15 alone, `IR<63:48>`, the 64-bit word's
-/// extension (MP4 ruling Q4). On the CADR and revisions 13 and 14 nothing
-/// is decoded there and it reads [`OPEN_READ`].
+/// `SPY-IR-EXT` (after CC's `SPY-IR-LOW`, `-MED` and `-HIGH`): on QUUX
+/// revision 15 alone, `IR<63:48>`, the 64-bit word's extension (MP4 ruling
+/// Q4). On the CADR and revisions 13 and 14 nothing is decoded there and it
+/// reads [`OPEN_READ`].
 pub const IR_EXT: u8 = 3;
 /// `-SPY.OPC`, `SPY-OPC`: `OPC<13:0>`, the last stage of the OPCS shift
 /// registers, through SPY4 1E07 and 1E06.  Bits 15 and 14 are grounded.
@@ -127,7 +127,7 @@ pub const OPC_CONTROL: u8 = 4;
 /// aliasing.
 pub const MODE: u8 = 5;
 
-/// `-LDDBIRX` (a proposed name), `EADR` 6 and its alias 14: on QUUX
+/// `-LDDBIRX`, `EADR` 6 and its alias 14: on QUUX
 /// revision 15 alone, the debug IR's `<63:48>`, so that a console's word
 /// runs with its extension (MP4 ruling Q4). A console writes all four
 /// halves, the extension's too, so that no stale extension rides along.

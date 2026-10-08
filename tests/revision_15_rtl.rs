@@ -4538,7 +4538,7 @@ fn pipeline_halted(p: &Prog) -> Pipeline {
 
 /// **Spy register 3 reads `IR<63:48>` and write strobe 6, with its alias
 /// 14, loads the debug IR's `<63:48>`, on revision 15 only** (MP4 ruling
-/// Q4: `SPY-IR-EXT` and `-LDDBIRX`, proposed). Strobe 7 and 15 load
+/// Q4: `SPY-IR-EXT` and `-LDDBIRX`). Strobe 7 and 15 load
 /// nothing; on revision 14 and the CADR, 6 and 14 load nothing and
 /// register 3 is open. Read on `micro` and on the pipeline, halted at a
 /// word whose extension is 1.
