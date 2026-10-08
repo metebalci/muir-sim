@@ -683,7 +683,11 @@ Holds and write pulses:
 - **QUUX holds a memory start in the microcycle right after a start**, a
   `-WAIT` term of its own, `MEMSTART AND MEMOP`, until the first cycle has
   gone out and ended; both then land as written, a first write with the
-  `MD` from before the held microcycle, an instruction fetch held the
+  `MD` from before the held microcycle, a first read's word in `MD` before
+  the second's, the word right after the second start reading the first's
+  (`row_a_read_start_right_after_a_read_start_both_land`,
+  `revision_14_s_engines_land_both_reads` in `tests/revision_15_rtl.rs`),
+  an instruction fetch held the
   same way (`a_start_right_after_a_start_waits_for_it` in
   `tests/quux_device_registers.rs`,
   `a_start_held_behind_a_write_loads_md_after_the_write` and
@@ -1900,6 +1904,22 @@ entry written before the producer index is in main memory when the index
 is taken (`cmd_prod_is_taken_after_every_earlier_write`). `rtl` posts its
 writes, and holds the producer index's write until its port is empty.
 
+**A register write's interrupt** is taken by the next word that tests it,
+not the word right after the start. A write to a device register goes out
+at the edge ending the microcycle after its start, as the single-edge
+contract has every cycle go out, so that word's conditions see the
+interrupt as it stood before the write; on revision 15 `micro` sends a
+register write out then, sooner only when a start in that microcycle or a
+halt sends it, and keeps its shortcut, the end of the start's own
+microcycle, for main memory alone. A write of block-disk's command with
+`<11>`, the disk idle, raises word 100 `<3>`: the page-fault-or-interrupt
+check right after the start does not call, the one after it does; a write
+that lowers the level is still seen up by the check right after it
+(`a_register_write_s_interrupt_is_seen_by_the_check_after_the_next`,
+`a_register_write_that_lowers_the_level_is_seen_by_the_check_after_the_next`).
+Under neutral time the device sees the write at its start's instant
+(`under_neutral_time_a_device_sees_a_write_at_its_start_s_instant`).
+
 **`WRITE-I-MEM`** writes `IWR<63:32>` from `A<31:0>` and `IWR<31:0>` from
 `M<31:0>`: a word with `<63:48>` set is written whole, and a tag left in
 `A<39:32>` reaches no bit of it, where revisions 13 and 14 take `A<15:0>`
@@ -2042,7 +2062,10 @@ default. Block-disk's START lands every posted write first, so a transfer
 reads every word written before it and a read's words are not overwritten
 by an older write (`block_disk_s_start_lands_the_posted_writes`); the
 transfer clears the cache's sets of the words it writes and no others
-(`a_block_disk_transfer_clears_the_sets_it_writes_and_no_more`). The file
+(`a_block_disk_transfer_clears_the_sets_it_writes_and_no_more`). A register
+access waits at WB while a register write before it is still to be taken,
+so that a read right after a write reads the device as the write left it
+(`a_register_read_right_after_a_register_write_reads_it_written`). The file
 device takes CMD_PROD once every earlier write is answered, so a command
 whose entry is still in the posted writes is read whole, and its
 completion's sweep leaves no line of what it wrote in the cache
@@ -2080,16 +2103,28 @@ naming the flag that matches it
 the period: the timers, the RTC, the interrupts' sampling and the devices
 see it and nothing else, and the drain, the sweeps and every memory wait
 take none. The harness acts on an absolute schedule of `Machine::cycles`
-with the host's dates fixed. At every 65,536th step of LC the pipeline
+with the host's dates fixed, and between two microcycles on both engines:
+the pipeline halts after the schedule's microcycle and drains, its posted
+writes landed, before the harness looks at the screen or presses a key, and
+`micro` sends out a write still waiting
+(`the_harness_acts_between_two_microcycles_on_both_engines`). At every 65,536th step of LC the pipeline
 halts after the word that stepped it, the word in EX not yet run squashed
 with RD's and CS's, and drains (`Pipeline::boundary_at`); a digest of
 `Machine::cycles`, the step count, the registers, A, M, the PDL buffer, the
 SPC stack, the OA registers and the MACRO-DISPATCH state is then `micro`'s
 after that microcycle, and at a workload's end with main memory and the
-dispatch memory. On main-loop programs, D on and off, every boundary
-digests alike, and a missing d3 bypass, a stack copy not restored, a
-squashed start and a nopped slot counted twice each change a digest
-(`the_harness_digests_the_pipeline_as_micro_at_every_boundary`).
+dispatch memory. At a boundary `micro` sends out a write still waiting, as
+its halt does, where the pipeline's drain takes it
+(`a_boundary_between_a_register_write_and_the_next_word_digests_alike`).
+On main-loop programs, D on and off, every boundary digests alike, and a
+missing d3 bypass, a stack copy not restored, a squashed start and a nopped
+slot counted twice each change a digest
+(`the_harness_digests_the_pipeline_as_micro_at_every_boundary`). The
+profile's log opens with the run's configuration: the engine, the machine,
+the band, the PROM, the period, the memory timing, the cache, the prefetch
+(none on the pipeline, whose fused returns use no prefetched word) and the
+harness's switch; and, on the pipeline, closes with the starts made right
+after a start, by the two starts' kinds.
 
 ## Not modeled
 
