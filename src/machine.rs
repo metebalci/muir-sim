@@ -648,6 +648,32 @@ pub struct Fused {
     pub operand: Option<Operand>,
 }
 
+/// The writes an engine's last microcycle handed the next, between two
+/// microcycles: a read's word for `MD`, the PDL buffer's write, the SPC
+/// stack's (`Micro::pending`, `Pipeline::pending`). For a comparison of the
+/// state between microcycles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pending {
+    pub md: Option<Word>,
+    pub pdl: Option<(u16, Word)>,
+    pub spc: Option<(u8, u32)>,
+}
+
+impl Pending {
+    /// Lands them in `m`.
+    pub fn land(self, m: &mut Machine) {
+        if let Some(w) = self.md {
+            m.md = w;
+        }
+        if let Some((adr, w)) = self.pdl {
+            m.pdl[adr as usize] = w;
+        }
+        if let Some((ptr, w)) = self.spc {
+            m.spc[ptr as usize] = w;
+        }
+    }
+}
+
 /// QUUX's MACRO-DISPATCH register and MACRO DISPATCH MEMORY
 /// ([`macro_dispatch`]).
 #[derive(Clone)]
@@ -1306,6 +1332,10 @@ pub struct Machine {
     pub quux_input: crate::quux_input::QuuxInput,
 
     pub cycles: u64,
+    /// The steps of LC, the macroinstruction boundaries: a meter both
+    /// engines count where LC steps, for the time-neutral harness's digests
+    /// (MP2b ruling Q12). Not in a checkpoint.
+    pub lc_steps: u64,
     /// Simulated nanoseconds, kept by the engine that owns this machine:
     /// `rtl` and `chip`'s cable set it to the instant a bus cycle is
     /// acknowledged, off their own clocks, and `micro`, which has no clock,
@@ -1471,6 +1501,7 @@ impl Machine {
             tv: Tv::default(),
             color_tv: None,
             cycles: 0,
+            lc_steps: 0,
             ns: 0,
         }
     }
@@ -2878,6 +2909,7 @@ impl Machine {
             ioboard,
             quux_input,
             cycles,
+            lc_steps: _,
             ns,
         } = self;
         // Words from here on, the engine's after the machine's, at the

@@ -17,6 +17,7 @@
 
 pub mod file;
 pub mod macro_dispatch;
+pub mod neutral;
 pub mod profile;
 pub mod server;
 pub mod status;
@@ -584,17 +585,14 @@ pub fn wait_for_the_prompt_within<E: Engine>(e: &mut E, limit: u64) -> u64 {
             > 400
     };
     let mut ran = 0u64;
+    let mut step = |e: &mut E| e.step().expect("the boot halted");
     while !reading(e) {
-        for _ in 0..500_000 {
-            e.step().expect("the boot halted");
-        }
+        neutral::run_for(e, 500_000, &mut step);
         ran += 500_000;
         assert!(ran < limit, "the listener never began reading");
     }
     // And a moment for the prompt to settle.
-    for _ in 0..2_000_000 {
-        e.step().expect("the boot halted");
-    }
+    neutral::run_for(e, 2_000_000, &mut step);
     ran + 2_000_000
 }
 

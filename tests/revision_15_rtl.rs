@@ -237,6 +237,8 @@ fn straight_line_alu_words_end_as_on_micro() {
     let e = same(&p);
     assert_eq!(e.machine().mmem[0o26], 16 + 32);
     differs(&p, Mutation::NoD3);
+    differs(&p, Mutation::NoD2);
+    differs(&p, Mutation::NoD1);
 }
 
 /// `p` ends otherwise than on `micro` with `mutation` planted: the check
@@ -2074,7 +2076,8 @@ fn a_squash_restores_rd_s_lc_and_stack_copies() {
 enum Around {
     /// After a start that does not fault.
     Plain,
-    /// Its M source `MD`, so that it waits in EX for the read's fill.
+    /// Its M source `MD`, a word after the start, so that it waits in EX
+    /// for the read's fill.
     HeldOnMd,
     /// On the fall-through of a conditional jump hinted taken and not
     /// taken: behind the squash.
@@ -2100,6 +2103,11 @@ fn interrupt_program(case: Around, n: bool) -> (Prog, u64) {
     }
     let first = if case == Around::AfterFaultingStart { bad } else { ok };
     p.op(ALU | SETA | a_src(first) | START_READ);
+    if case == Around::HeldOnMd {
+        // The word right after the start reads the MD from before it and
+        // waits for nothing; the one after that waits.
+        p.fill(1);
+    }
     let check = p.at();
     let md = if case == Around::HeldOnMd { SRC_MD } else { 0 };
     p.op(jcond(5) | P | target(SUBS[0]) | nbit | md);
@@ -2977,4 +2985,681 @@ fn a_checkpoint_refuses_another_period_timing_or_cache() {
     assert!(why.contains("--memory-timing 247,130,10"), "{why}");
     let why = load(&|f| f.configure(17, kria, 16_384)).unwrap_err();
     assert!(why.contains("--cache 65536"), "{why}");
+}
+
+// --- The rows on revision 15's rtl (A15b.3) -----------------------------------
+//
+// The single-edge contract's rows (`docs/quux.md`, "The single-edge
+// contract"), each on revision 15's `rtl` against `micro`, its own rule
+// read off the end, and its fault planted. The rows the tests above hold
+// already: the delay slot (`the_speculation_matrix_ends_as_on_micro`), A
+// and M memory (`straight_line_alu_words_end_as_on_micro`), the PDL buffer
+// (`the_pdl_buffer_across_its_wrap`), the OA registers
+// (`the_oa_high_hold_is_2_1_0_clocks`), RD's return decision
+// (`each_case_of_the_guard_on_planted_pairs`), conditions 4-6 after a start
+// (`the_late_squash_after_a_faulting_start`,
+// `an_interrupt_at_every_clock_around_a_check`), a faulting start, `MD` from
+// memory and a device register
+// (`a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_later`,
+// `a_register_takes_a_clock_more_than_nothing`), a start after a map write
+// (`a_start_after_a_map_write_translates_through_the_new_entry`), DIV and
+// MUL (`div_stays_18_clocks_in_ex_and_mul_5`).
+
+/// **The registers, a PDL read through a pointer just written** (A15b.3's
+/// second row): the word after a write of the PDL pointer from the ALU reads
+/// the buffer at the new pointer, held a clock for it; a read that does not
+/// wait reads at the old.
+#[test]
+fn row_a_pdl_read_through_a_pointer_just_written_waits_for_it() {
+    use muir::isa::asm::src;
+    let mut p = Prog::default();
+    let (four, seven, five, v) = (p.k(4), p.k(7), p.k(5), p.k(0o6543));
+    p.op(ALU | SETA | a_src(four) | fd(0o14));
+    p.fill(2);
+    p.op(ALU | SETA | a_src(v) | fd(0o11));
+    p.fill(2);
+    p.op(ALU | SETA | a_src(seven) | fd(0o14));
+    p.fill(2);
+    p.op(ALU | SETA | a_src(five) | fd(0o14));
+    p.op(ALU | SETM | src(0o25) | m_dest(0o26));
+    p.stop();
+    let e = same(&p);
+    assert_eq!(e.machine().mmem[0o26], 0o6543, "the word at the new pointer");
+    assert!(e.meters.pdl_wait > 0, "held a clock");
+    differs(&p, Mutation::NoPdlWait);
+}
+
+/// **The PDL buffer written by the index** (A15b.3's PDL row): a write by
+/// PDL-INDEX lands at the index its word left, not at the one the next word
+/// writes.
+#[test]
+fn row_a_write_by_the_index_takes_its_own_word_s_index() {
+    let mut p = Prog::default();
+    let (ten, twenty, v) = (p.k(0o10), p.k(0o20), p.k(0o4444));
+    p.op(ALU | SETA | a_src(ten) | fd(0o13));
+    p.fill(2);
+    p.op(ALU | SETA | a_src(v) | fd(0o12));
+    p.op(ALU | SETA | a_src(twenty) | fd(0o13));
+    p.fill(3);
+    p.stop();
+    let e = same(&p);
+    assert_eq!(e.machine().pdl[0o10], 0o4444, "at its own index");
+    assert_eq!(e.machine().pdl[0o20], 0, "not at the next word's");
+}
+
+/// **The SPC stack, a push** (A15b.3's SPC row): an M read of the stack in
+/// the word after a push reads the old word at the new pointer, the word
+/// after that the new; and a POPJ right after a push returns to the word
+/// pushed, RD's top serving it. A push written at once is caught.
+#[test]
+fn row_an_spc_push_is_read_old_by_the_next_word_and_new_after() {
+    use muir::isa::asm::src;
+    let mut p = Prog::default();
+    let v = p.k(0o1234);
+    p.op(ALU | SETA | a_src(v) | fd(0o15));
+    p.op(ALU | SETM | src(0o1) | m_dest(0o26));
+    p.op(ALU | SETM | src(0o1) | m_dest(0o27));
+    p.fill(1);
+    let to = p.at() + 6;
+    let t = p.k(to);
+    p.op(ALU | SETA | a_src(t) | fd(0o15));
+    p.op(filler().raw() | POPJ);
+    p.fill(1);
+    p.stop();
+    while p.at() < to {
+        p.fill(1);
+    }
+    let mark = ALU | muir::isa::asm::ADD | a_src(ONE) | m_src(0o25) | m_dest(0o25);
+    p.op(mark);
+    p.stop();
+    let e = same(&p);
+    let m = e.machine();
+    assert_eq!(m.mmem[0o26] & 0o1777777, 0, "the old word at the new pointer");
+    assert_eq!(m.mmem[0o27] & 0o1777777, 0o1234, "the new word a word later");
+    assert_eq!(m.mmem[0o25], 1, "the POPJ returned to the word pushed");
+    differs(&p, Mutation::SpcWriteAtOnce);
+}
+
+/// **The TLB, a `WRITE-MAP` operation** (A15b.3's TLB row): `MAP(MD)` in
+/// the word after the operation reads the old entry, the word after that
+/// the new. A `MAP(MD)` that reads the new at once is caught.
+#[test]
+fn row_map_md_right_after_a_map_write_reads_the_old_entry() {
+    use muir::isa::asm::src;
+    let mut p = Prog::default();
+    direct_write(&mut p, 0o4000, 3);
+    p.op(ALU | SETM | src(0o11) | m_dest(0o26));
+    p.op(ALU | SETM | src(0o11) | m_dest(0o27));
+    p.stop();
+    let e = same(&p);
+    let m = e.machine();
+    assert_ne!(m.mmem[0o26], m.mmem[0o27], "old, then new");
+    assert_eq!(m.mmem[0o27] & 0o777777, 3, "the new entry's frame");
+    differs(&p, Mutation::MapSeenNew);
+}
+
+/// **The dispatch memory, a write** (A15b.3's dispatch row): the dispatch
+/// in the word after a dispatch-memory write reads the new entry, its
+/// predicted target, the old entry's, checked against it in EX.
+#[test]
+fn row_a_dispatch_after_a_dispatch_write_takes_the_new_entry() {
+    use muir::isa::asm::{DMEM_WRITE, predicted};
+    const T: u64 = 0o40;
+    let mut p = Prog::default();
+    let (old_to, new_to) = (0o300, 0o320);
+    p.dmem.push((T as usize, old_to as u32));
+    let e = p.k(new_to);
+    p.op(DISPATCH | DMEM_WRITE | a_src(e) | T << 12);
+    p.op(disp(T) | predicted(old_to, false, false));
+    p.fill(1);
+    p.stop();
+    let mark = |m: u64| ALU | muir::isa::asm::ADD | a_src(ONE) | m_src(m) | m_dest(m);
+    for (at, slot) in [(old_to, 0o26), (new_to, 0o27)] {
+        while p.at() < at {
+            p.fill(1);
+        }
+        p.op(mark(slot));
+        p.stop();
+    }
+    let e = same(&p);
+    let m = e.machine();
+    assert_eq!((m.mmem[0o26], m.mmem[0o27]), (0, 1), "the new entry's target");
+    assert_eq!(e.meters.mispredicted[1], 1, "the old entry's prediction checked");
+}
+
+/// **The control store, `WRITE-I-MEM`** (A15b.3's control-store row; A15b.4):
+/// a write of the word two ahead, already fetched: that word runs as
+/// written, the words behind the write fetched again. Not fetched again,
+/// the old word runs: caught.
+#[test]
+fn row_a_word_written_by_write_i_mem_runs_as_written() {
+    let mut p = Prog::default();
+    let (old, new) = (p.k(0o1111), p.k(0o2222));
+    let at = p.at() + 2;
+    let word = ALU | SETA | a_src(new) | m_dest(0o26);
+    let hi = p.k(word >> 32);
+    p.mmem.push((0o30, word & 0xffff_ffff));
+    p.op(JUMP | P | R | ALWAYS | target(at) | a_src(hi) | m_src(0o30));
+    p.fill(1);
+    assert_eq!(p.at(), at);
+    p.op(ALU | SETA | a_src(old) | m_dest(0o26));
+    p.fill(1);
+    p.stop();
+    let e = same(&p);
+    assert_eq!(e.machine().mmem[0o26], 0o2222, "the word written ran");
+    differs(&p, Mutation::NoImemRefetch);
+}
+
+/// **A write carries the `MD` of the microcycle after its start** (A15b.3;
+/// `docs/quux.md`): a word right after a write start that loads `MD` and
+/// starts nothing gives the word written; one that loads `MD` and starts a
+/// read leaves the write the `MD` from before it, and the read returns it.
+/// A write that carries its start's `MD` is caught.
+#[test]
+fn row_a_write_carries_the_md_of_the_microcycle_after_its_start() {
+    let mut p = Prog::default();
+    let (a, b, v1, v2) = (p.k(PHYS | 0o50), p.k(PHYS | 0o60), p.k(0o1111), p.k(0o2222));
+    p.op(ALU | SETA | a_src(v1) | MD);
+    p.op(ALU | SETA | a_src(a) | START_WRITE);
+    p.op(ALU | SETA | a_src(v2) | MD);
+    p.fill(2);
+    // A start right after a write start, loading MD: held, the write
+    // carries the MD before it.
+    p.op(ALU | SETA | a_src(v1) | MD);
+    p.op(ALU | SETA | a_src(b) | START_WRITE);
+    p.op(ALU | SETA | a_src(v2) | fd(0o31));
+    p.fill(2);
+    p.op(ALU | SETM | SRC_MD | m_dest(0o26));
+    p.stop();
+    let e = same(&p);
+    let m = e.machine();
+    assert_eq!(m.main[0o50], 0o2222, "the next word's MD");
+    assert_eq!(m.main[0o60], 0o1111, "the MD before a held start");
+    assert_eq!(m.mmem[0o26], 0o1111, "and the read returns it");
+    assert!(e.meters.start_wait > 0, "the start right after a start waited");
+    differs(&p, Mutation::WriteMdAtStart);
+}
+
+/// **`MD` from memory** (A15b.3's `MD` row; the single-edge contract: a
+/// cycle goes out at the edge ending the microcycle after its start): the
+/// word right after a read start reads `MD` as the start found it and
+/// waits for nothing, a write of `MD` there giving way to the read's word;
+/// every later word that uses `MD` waits for the word read. Read, written
+/// and through `MAP(MD)`, at gaps 0 to 2, a miss and a hit; and
+/// a halt at every clock of the gap-0 run. A word right after the start
+/// that waits for the read's word is caught.
+#[test]
+fn row_the_word_after_a_read_start_reads_the_old_md() {
+    use muir::isa::asm::src;
+    let user = |p: &mut Prog, k: usize| {
+        let nine = p.k(0o11);
+        match k {
+            0 => p.op(ALU | SETM | SRC_MD | m_dest(0o26)),
+            1 => p.op(ALU | SETA | a_src(nine) | MD),
+            _ => p.op(ALU | SETM | src(0o11) | m_dest(0o26)),
+        };
+    };
+    let mut caught = 0;
+    let mut cases = 0;
+    for hit in [false, true] {
+        for gap in 0..3 {
+            for k in 0..3 {
+                let mut p = Prog::default();
+                p.main.push((0o40, 5));
+                let (two, a) = (p.k(2), p.k(PHYS | 0o40));
+                if hit {
+                    p.op(ALU | SETA | a_src(a) | START_READ);
+                    p.fill(3);
+                }
+                p.op(ALU | SETA | a_src(two) | MD);
+                p.op(ALU | SETA | a_src(a) | START_READ);
+                p.fill(gap);
+                user(&mut p, k);
+                p.op(ALU | SETM | SRC_MD | m_dest(0o27));
+                p.fill(2);
+                p.stop();
+                let e = same(&p);
+                if gap == 0 && k == 0 {
+                    assert_eq!(e.machine().mmem[0o26], 2, "hit {hit}: the MD before");
+                }
+                cases += 1;
+                let u = micro(&p);
+                let x = pipeline_with(&p, |x| x.mutation = Mutation::SuccessorWaitsForMd);
+                if state(x.machine()) != state(u.machine()) {
+                    caught += 1;
+                }
+                if gap == 0 && k == 0 && !hit {
+                    let fresh = || {
+                        let mut u = Micro::new(machine(&p, REV15));
+                        u.boot();
+                        u
+                    };
+                    let (t0, e0) = halted_run(&p, None, false, &mut fresh());
+                    for checkpoint in [false, true] {
+                        let mut u = fresh();
+                        for c in 1..e0.clock() {
+                            let (t, e) = halted_run(&p, Some(c), checkpoint, &mut u);
+                            assert_eq!(t, t0, "halted at {c}, checkpoint {checkpoint}");
+                            if state(e.machine()) != state(e0.machine()) {
+                                diff_state(e.machine(), e0.machine(), c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "the word after the start waiting for the read: {caught} of {cases} cases end otherwise"
+    );
+    assert!(caught > 0, "caught");
+}
+
+// --- The file device behind the posted writes (A15b.5, A15b.6) -----------------
+
+/// The file device's rings and buffer A, physical word addresses, each on a
+/// line: one command entry, one response entry.
+const CMD_RING: u64 = 0o1000;
+const RESP_RING: u64 = 0o1100;
+const BUF_A: u64 = 0o1200;
+const LOG_TAG: u64 = 0o4321;
+
+/// A program that sets the file device's rings up through its registers,
+/// writes a LOG command of "hello" into the ring and buffer A, word 0 last,
+/// reads the response's word 0 into M 25 so that its line is cached, writes
+/// CMD_PROD, waits for the response index to move, and reads the response's
+/// word 0 into M 26.
+fn file_device_log_program() -> Prog {
+    use muir::file_device::{CMD_BASE, CMD_PROD, CONTROL, RESP_PROD, op};
+    let mut p = Prog::default();
+    let reg = |w: u32| REGISTER_PAGE | Word::from(w);
+    p.write(CMD_RING, reg(CMD_BASE));
+    p.write(0, reg(CMD_BASE + 1));
+    p.write(RESP_RING, reg(CMD_BASE + 4));
+    p.write(0, reg(CMD_BASE + 5));
+    p.write(1, reg(CONTROL));
+    for k in 1..8 {
+        let v = match k {
+            2 => BUF_A,
+            3 => 5,
+            _ => 0,
+        };
+        p.write(v, PHYS | (CMD_RING + k));
+    }
+    p.write(u64::from(u32::from_le_bytes(*b"hell")), PHYS | BUF_A);
+    p.write(u64::from(b'o'), PHYS | (BUF_A + 1));
+    p.read(PHYS | RESP_RING, 0o25);
+    p.write(LOG_TAG | u64::from(op::LOG) << 16, PHYS | CMD_RING);
+    p.write(1, reg(CMD_PROD));
+    // Round until the response index is 1.
+    let (prod, one) = (p.k(reg(RESP_PROD)), p.k(1));
+    let round = p.at();
+    p.op(ALU | SETA | a_src(prod) | START_READ);
+    p.fill(1);
+    p.op(jcond(3) | 1 << 6 | SRC_MD | a_src(one) | target(round));
+    p.fill(1);
+    p.read(PHYS | RESP_RING, 0o26);
+    p.stop();
+    p
+}
+
+/// The file device's log kept, for the line the command logged.
+fn with_device_log(m: &mut Machine) {
+    m.file_device.log = Some(Vec::new());
+}
+
+/// **A command whose ring entry is still in the posted writes when CMD_PROD
+/// is written is read whole** (A15b.5), and **its response is read after
+/// it by the sweep** (A15b.6): main memory answers a write in 25 us, so
+/// the entry is still going in when the producer write is made; the device
+/// takes it once every earlier write is answered, logs "hello", and the
+/// program reads the response it wrote over a line it had cached. CMD_PROD
+/// taken at once is caught; a sweep that misses the response's set is
+/// caught.
+#[test]
+fn the_file_device_reads_its_entry_whole_and_the_sweep_shows_its_response() {
+    let p = file_device_log_program();
+    let slow = |e: &mut Pipeline| {
+        let t = muir::pipeline::PortTiming { read_ns: 247, write_ns: 25_000, occupancy_ns: 10 };
+        e.configure(e.period(), t, 65_536);
+    };
+    let response = LOG_TAG | u64::from(muir::file_device::op::LOG) << 24;
+    let e = same_on(&p, &with_device_log, &slow);
+    let m = e.machine();
+    assert_eq!(m.mmem[0o25], 0, "the response's line cached before the command");
+    assert_eq!(m.mmem[0o26] & 0xffff_ffff, response, "status 0, the program's word 0 read");
+    assert_eq!(
+        m.file_device.log.as_deref(),
+        Some(&[b"hello".to_vec()][..]),
+        "the entry read whole"
+    );
+    assert!(e.meters.cmd_prod_wait > 0, "CMD_PROD waited for the writes");
+    assert!(e.port.meters.sweeps > 0, "the completion swept");
+    for (mutation, what) in [
+        (Mutation::NoCmdProdWait, "CMD_PROD taken at once"),
+        (Mutation::SweepMissesASet, "a sweep that misses a set"),
+    ] {
+        let mut m = machine(&p, REV15);
+        with_device_log(&mut m);
+        let e = ends_on(m, &|e| {
+            slow(e);
+            e.mutation = mutation;
+        });
+        eprintln!(
+            "{what}: the response word {:o}, the log {:?}",
+            e.machine().mmem[0o26],
+            e.machine().file_device.log
+        );
+        assert_ne!(e.machine().mmem[0o26] & 0xffff_ffff, response, "{what}: caught");
+    }
+}
+
+/// **A block-disk transfer over words the cache holds** (A15b.6): the
+/// processor has a word of the page and a word elsewhere cached; a disk read
+/// into the page; after it the processor reads the disk's word, and the word
+/// elsewhere still hits: no whole-cache invalidation. A transfer that leaves
+/// the sets it writes is caught.
+#[test]
+fn a_block_disk_transfer_clears_the_sets_it_writes_and_no_more() {
+    const READ: u64 = 0;
+    const FOUR_BYTE: u64 = 1 << 12;
+    let disk_word = |k: u64, w: u64| muir::machine::UNBOXED_TAG | k << 16 | w;
+    let mut p = Prog::default();
+    p.main.push((0o777, 0o2000));
+    p.main.push((0o2005, 0o1111));
+    p.main.push((0o5000, 0o2222));
+    p.read(PHYS | 0o2005, 0o24);
+    p.read(PHYS | 0o5000, 0o25);
+    block_disk_command(&mut p, 0o777, 3, READ | FOUR_BYTE);
+    p.read(PHYS | 0o2005, 0o26);
+    p.read(PHYS | 0o5000, 0o27);
+    p.stop();
+    let e = same_on(&p, &with_block_disk, &|_| {});
+    let m = e.machine();
+    assert_eq!((m.mmem[0o24], m.mmem[0o25]), (0o1111, 0o2222), "before");
+    assert_eq!(m.mmem[0o26], disk_word(3, 5), "the disk's word after the transfer");
+    assert_eq!(m.mmem[0o27], 0o2222);
+    let c = &e.port.cache;
+    assert_eq!((c.misses, c.hits), (3, 1), "the page's word missed again, the other hit");
+    let mut m = machine(&p, REV15);
+    with_block_disk(&mut m);
+    let e = ends_on(m, &|e| e.mutation = Mutation::NoClearSet);
+    assert_eq!(
+        e.machine().mmem[0o26],
+        0o1111,
+        "a transfer that leaves its sets: the old word, caught"
+    );
+}
+
+// --- The time-neutral harness (MP2b ruling Q12) ---------------------------------
+
+/// The digests of `m` run to opcode 7's stop under neutral time, every
+/// `every` steps of LC: on `micro`, and on the pipeline with `mutation`
+/// planted (`tests/support/neutral.rs`).
+fn digest_lines(m: &Machine, every: u64, mutation: Mutation) -> (Vec<String>, Vec<String>) {
+    use support::neutral::{Digests, Neutral};
+    fn run<E: Neutral>(mut e: Digests<E>) -> Vec<String> {
+        e.engine.time_neutral();
+        e.boot();
+        for _ in 0..20_000 {
+            if e.machine().opc == OP_7 as u16 {
+                break;
+            }
+            if e.step().is_err() {
+                break;
+            }
+        }
+        e.lines
+    }
+    let u = run(Digests::new(Micro::new(m.clone()), every));
+    let mut x = Pipeline::new(m.clone());
+    x.mutation = mutation;
+    x.skip_sweep();
+    let mut d = Digests::new(x, every);
+    d.engine.skip_sweep();
+    let e = {
+        d.engine.time_neutral();
+        d.boot();
+        d.engine.skip_sweep();
+        for _ in 0..20_000 {
+            if d.machine().opc == OP_7 as u16 {
+                break;
+            }
+            if d.step().is_err() {
+                break;
+            }
+        }
+        d.lines
+    };
+    (u, e)
+}
+
+/// The main-loop machines the harness's check runs, D on and off: the main
+/// loop's paths, and opcode 3's handler with a squash to restore.
+fn harness_machines() -> Vec<(String, Machine)> {
+    use muir::isa::asm::HINT;
+    let mut out = Vec::new();
+    for d in [false, true] {
+        out.push((
+            format!("ones, D {d}"),
+            d_machine(REV15, d_register(d), &ONES, CODE, false, false),
+        ));
+        let program = [hw(0o10, 5, 5), hw(0o10, 6, 3), hw(1, 0, 0), hw(0o10, 5, 1), hw(7, 0, 0)];
+        out.push((
+            format!("operands, D {d}"),
+            d_machine(REV15, d_register(d), &program, CODE, false, false),
+        ));
+        let never = JUMP | m_src(2) | R | HINT;
+        out.push((
+            format!("a wrong return, D {d}"),
+            ml_machine(d, &TWOS_THREES, &[never, filler().raw()], &|_| {}),
+        ));
+        // Opcode 3's handler: an A write read three words on (d3), and a
+        // jump hinted onto a write start, not taken, the word the read
+        // after it returns into M 27.
+        // Past the handler's return and its slot, which ml_machine puts
+        // after the body.
+        let at = OP_3 + 9 + 2;
+        let body = [
+            ALU | SETM | m_src(0o31) | a_dest(0o1650),
+            filler().raw(),
+            filler().raw(),
+            ALU | SETA | a_src(0o1650) | m_dest(0o26),
+            JUMP | m_src(2) | HINT | target(at),
+            filler().raw(),
+            ALU | SETA | a_src(0o1700) | START_READ,
+            filler().raw(),
+            ALU | SETM | SRC_MD | m_dest(0o27),
+        ];
+        assert_eq!(OP_3 + body.len() as u64 + 2, at, "the hinted target is past the handler");
+        let mut m = ml_machine(d, &TWOS_THREES, &body, &|m| m.amem[0o1700] = PHYS | 0o100);
+        // The target, past the handler's return: a write start, and back.
+        let put = |m: &mut Machine, k: u64, w: u64| m.imem[(at + k) as usize] = Insn::extended(w);
+        put(&mut m, 0, ALU | SETA | a_src(0o1700) | START_WRITE);
+        put(&mut m, 1, filler().raw() | POPJ);
+        put(&mut m, 2, filler().raw());
+        out.push((format!("d3 and a wrong-path write, D {d}"), m));
+    }
+    out
+}
+
+/// **The time-neutral harness** (MP2b ruling Q12): under neutral time the
+/// pipeline, halted and drained at every boundary, digests as `micro`
+/// does at the same `Machine::cycles`, every step of LC and every third, D
+/// on and off. A speculative pop not restored and a delay slot counted
+/// twice fail it.
+#[test]
+fn the_harness_digests_the_pipeline_as_micro_at_every_boundary() {
+    let machines = harness_machines();
+    let mut boundaries = 0;
+    for (what, m) in &machines {
+        for every in [1, 3] {
+            let (u, e) = digest_lines(m, every, Mutation::None);
+            assert!(!u.is_empty(), "{what}: boundaries");
+            assert_eq!(e, u, "{what}, every {every}: the digests");
+            boundaries += u.len();
+        }
+    }
+    eprintln!("{boundaries} boundaries digested alike");
+    for mutation in
+        [Mutation::NoD3, Mutation::NoSpcRestore, Mutation::SquashedStart, Mutation::NopCountedTwice]
+    {
+        let caught = machines.iter().filter(|(_, m)| {
+            let (u, e) = digest_lines(m, 1, mutation);
+            e != u
+        });
+        let n = caught.count();
+        eprintln!("{mutation:?}: {n} of {} machines' digests differ", machines.len());
+        assert!(n > 0, "{mutation:?} planted, the harness passes");
+    }
+}
+
+/// **Revision 14's IMOD on the pipeline, the measurement aid**: an
+/// OA-REG-LOW write is ORed into the word after it and into no other. The
+/// word after that, an unconditional jump RD resolves, whose target the
+/// value would change, jumps where it says. A decode that ORs the value
+/// into every word leaving CS before the flags are spent is caught here.
+#[test]
+fn revision_14_s_imod_reaches_the_next_word_alone() {
+    let mut p = Prog::default();
+    let to = 0o300u64;
+    // OA-REG-LOW's value, in the jump target's place: 2 << 12, a bit the
+    // target lacks.
+    let v = p.k(2 << 12);
+    p.op(ALU | SETA | a_src(v) | fd(0o16));
+    p.fill(1);
+    p.op(JUMP | ALWAYS | N | target(to));
+    p.fill(1);
+    let mark = |m: u64| ALU | muir::isa::asm::ADD | a_src(ONE) | m_src(m) | m_dest(m);
+    for (at, slot) in [(to, 0o26), (to | 2, 0o27)] {
+        while p.at() < at {
+            p.fill(1);
+        }
+        p.op(mark(slot));
+        p.stop();
+    }
+    let g = Geometry::QUUX_14;
+    let u = match run_engine(Micro::new(machine(&p, g))) {
+        Ok(u) => u,
+        Err((h, _)) => panic!("micro halted: {h:?}"),
+    };
+    let e = match run_engine(Pipeline::new(machine(&p, g))).and_then(settled) {
+        Ok(e) => e,
+        Err((h, _)) => panic!("the pipeline halted: {h:?}"),
+    };
+    assert_eq!(
+        (u.machine().mmem[0o26], u.machine().mmem[0o27]),
+        (1, 0),
+        "micro: the target as written"
+    );
+    assert_eq!(state(e.machine()), state(u.machine()), "the pipeline against micro");
+}
+
+/// The pipeline on the main-loop machine `m` to opcode 7's stop, halted at
+/// clock `halt` and run on, from a checkpoint with `checkpoint`: its trace
+/// and its end. At the halt the state is `micro`'s, `u`, at the same
+/// `Machine::cycles`.
+fn ml_halted_run(
+    m: &Machine,
+    halt: Option<u64>,
+    checkpoint: bool,
+    u: &mut Micro,
+) -> (Vec<Option<u16>>, Pipeline) {
+    let mut e = Pipeline::new(m.clone());
+    e.trace = Some(Vec::new());
+    e.boot();
+    e.skip_sweep();
+    let mut t = Vec::new();
+    for _ in 0..20_000 {
+        if e.machine().opc == OP_7 as u16 {
+            break;
+        }
+        if Some(e.clock() + 1) == halt {
+            e.machine_mut().clock_control.run = false;
+            for _ in 0..10_000 {
+                if e.is_halted() {
+                    break;
+                }
+                e.tick().unwrap();
+            }
+            assert!(e.is_halted(), "halted at {halt:?}");
+            while u.machine().cycles < e.machine().cycles {
+                u.step().unwrap();
+            }
+            let (el, ul) = (e.landed(), u.landed());
+            if state(&el) != state(&ul) {
+                eprintln!("halted at clock {halt:?}, checkpoint {checkpoint}");
+                diff_state(&el, &ul, 0);
+            }
+            if checkpoint {
+                let mut w = muir::checkpoint::Writer::new();
+                e.save(&mut w);
+                let bytes = w.finish();
+                t.extend(e.trace.take().unwrap());
+                let mut f = Pipeline::new(m.clone());
+                f.load(&mut muir::checkpoint::Reader::for_word_bits(&bytes, 40)).unwrap();
+                f.skip_sweep();
+                f.trace = Some(Vec::new());
+                e = f;
+            }
+            e.machine_mut().clock_control.run = true;
+        }
+        e.tick().unwrap();
+    }
+    t.extend(e.trace.take().unwrap());
+    if e.machine().opc != OP_7 as u16 {
+        return (t, e);
+    }
+    if let Some(k) = t.iter().position(|&p| p == Some(OP_7 as u16)) {
+        t.truncate(k + 1);
+    }
+    for _ in 0..16 {
+        e.step().unwrap();
+    }
+    let e = settled(e).unwrap_or_else(|(h, _)| panic!("halted settling: {h:?}"));
+    (t, e)
+}
+
+/// **A halt at every clock of the main-loop machines** (A15b.13): D on and
+/// off, fused returns, D's wait, a squash to restore, a wrong-path write;
+/// halted at each clock, drained to `micro`'s state, run on, plain and
+/// from a checkpoint, each ends as the run without the halt.
+#[test]
+fn a_halt_at_every_clock_of_the_main_loop_machines() {
+    let mut halts = 0;
+    for (what, m) in harness_machines() {
+        let fresh = || {
+            let mut u = Micro::new(m.clone());
+            u.boot();
+            u
+        };
+        let (t0, e0) = ml_halted_run(&m, None, false, &mut fresh());
+        for checkpoint in [false, true] {
+            let mut u = fresh();
+            for c in 1..e0.clock() {
+                let (t, e) = ml_halted_run(&m, Some(c), checkpoint, &mut u);
+                if let Some(k) = (0..t.len().min(t0.len())).find(|&k| t[k] != t0[k]) {
+                    let o = |t: &[Option<u16>]| {
+                        t[k.saturating_sub(12)..(k + 4).min(t.len())]
+                            .iter()
+                            .map(|p| p.map_or("-".into(), |p| format!("{p:o}")))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    panic!(
+                        "{what}, halted at {c}, checkpoint {checkpoint}: microcycle {k} differs:\n  {}\n  {}",
+                        o(&t),
+                        o(&t0)
+                    );
+                }
+                assert_eq!(t.len(), t0.len(), "{what}, halted at {c}: the microcycles");
+                if state(e.machine()) != state(e0.machine()) {
+                    eprintln!("{what}, halted at {c}, checkpoint {checkpoint}: the end");
+                    diff_state(e.machine(), e0.machine(), c);
+                }
+                halts += 1;
+            }
+        }
+    }
+    eprintln!("{halts} halts");
 }

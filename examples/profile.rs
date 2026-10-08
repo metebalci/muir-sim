@@ -16,6 +16,25 @@
 //! The machine is the CADR unless `quux` is named: QUUX, revision 13, as
 //! the `quux` executable runs it.
 //! `quux-4k` and `quux-16k` are QUUX with a PDL buffer of 4K or 16K words.
+//! `quux-14` and `quux-15` are revisions 14 and 15, their band
+//! `MUIR_BAND`'s and their PROM `MUIR_PROM`'s file, as `--prom` takes it;
+//! revision 15 has none built in. On them `rtl` is the pipeline
+//! (`muir::pipeline`), revision 14 as a measurement aid: its clock is
+//! `MUIR_MICROCYCLE_NS`, in ns, 5 to 40 in steps of 0.5, the Kria's 8.5 by
+//! default, on `micro` too; `MUIR_MEMORY_NS` is the port's
+//! `<read>,<write>,<occupancy>` in ns or `kria`, `arty` or `de25`, `kria`
+//! by default, `MUIR_CACHE` its cache's words, and `MUIR_SYNC_TICKS` is
+//! refused.
+//!
+//! `MUIR_TIME_NEUTRAL=1` is the time-neutral harness (MP2b ruling Q12,
+//! `tests/support/neutral.rs`), for `micro` and the pipeline: both run on
+//! neutral time, `Machine::cycles` times the period; the harness's keys,
+//! screen checks and marker polls are on an absolute schedule of
+//! `Machine::cycles`; the host's dates and the RTC are fixed; and every
+//! 65,536th macroinstruction boundary, a step of LC, prints a `digest`
+//! line, the pipeline halted after that word and drained, with one of the
+//! whole state at each workload's end. Two runs' `digest` lines compare as
+//! they are.
 //!
 //! On QUUX, `MUIR_H8A` fills the MACRO DISPATCH MEMORY with the generic
 //! handlers, `OPDTB`'s entry for each index's opcode, and enables the
@@ -83,6 +102,7 @@ use muir::engine::Engine;
 use muir::isa::{Insn, Op};
 use muir::machine::Halt;
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 use muir::sym::{Space, Symbols};
 use muir::terminal::keyboard::{Keyboard, keysym};
@@ -92,6 +112,7 @@ use muir::terminal::keyboard::{Keyboard, keysym};
 #[path = "../tests/support/mod.rs"]
 mod support;
 
+use support::neutral::{Digests, Neutral};
 use support::profile::Span;
 
 /// LISPM-1 and OZ, as the release's `site/hosts.text` gives them.
@@ -181,6 +202,8 @@ trait Profiled: Engine {
     fn prefetch_counts(&self) -> Option<muir::memory_port::PrefetchCounts> {
         None
     }
+    /// A workload's end: under the time-neutral harness, its whole digest.
+    fn workload_end(&mut self, _name: &str) {}
 }
 
 impl Profiled for Micro {
@@ -215,6 +238,51 @@ impl<E: Profiled + support::macro_dispatch::Executes> Profiled
     }
     fn prefetch_counts(&self) -> Option<muir::memory_port::PrefetchCounts> {
         self.engine.prefetch_counts()
+    }
+    fn workload_end(&mut self, name: &str) {
+        self.engine.workload_end(name)
+    }
+}
+
+/// Revision 15's `rtl`, its pipeline: no stall of its own in the bus's
+/// sense; the port's writes and fills are its memory cycles.
+impl Profiled for Pipeline {
+    fn executed_pc(&self) -> Option<u16> {
+        self.executed()
+    }
+    fn span(&self) -> Span {
+        Span::of_pipeline(self)
+    }
+    fn bus(&self) -> Option<[u64; 5]> {
+        let c = &self.port.cache;
+        let cycles = self.port.meters.writes + self.port.meters.fills;
+        Some([0, cycles, Span::of_pipeline(self).ns, c.hits, c.misses])
+    }
+}
+
+/// An engine under the time-neutral harness: its digests printed as it
+/// runs (`tests/support/neutral.rs`).
+impl<E: Profiled + Neutral + support::macro_dispatch::Executes> Profiled for Digests<E> {
+    fn checker(&self) -> Option<&support::macro_dispatch::Checker> {
+        self.engine.checker()
+    }
+    fn executed_pc(&self) -> Option<u16> {
+        self.engine.executed_pc()
+    }
+    fn span(&self) -> Span {
+        self.engine.span()
+    }
+    fn bus(&self) -> Option<[u64; 5]> {
+        self.engine.bus()
+    }
+    fn fetch_started(&self) -> Option<bool> {
+        Profiled::fetch_started(&self.engine)
+    }
+    fn prefetch_counts(&self) -> Option<muir::memory_port::PrefetchCounts> {
+        self.engine.prefetch_counts()
+    }
+    fn workload_end(&mut self, name: &str) {
+        self.end_of(name);
     }
 }
 
@@ -422,17 +490,15 @@ fn type_echoed<E: Engine>(e: &mut E, k: &mut Keyboard, text: &str, step: &mut im
             } else {
                 k.deliver(&mut e.machine_mut().ioboard);
             }
-            for _ in 0..1_000 {
-                step(e);
-            }
+            // Under the time-neutral harness, at the same microcycles on
+            // every engine.
+            support::neutral::run_for(e, 1_000, &mut *step);
             waited += 1_000;
             assert!(waited < 50_000_000, "the machine never read the keyboard");
         }
         let mut echoed = 0u64;
         while screen_hash(e) == before && echoed < 20_000_000 {
-            for _ in 0..50_000 {
-                step(e);
-            }
+            support::neutral::run_for(e, 50_000, &mut *step);
             echoed += 50_000;
         }
     }
@@ -580,9 +646,7 @@ fn run<E: Profiled>(
     type_echoed(e, k, form, &mut step);
     let mut ran = 0u64;
     while !marker.exists() {
-        for _ in 0..100_000 {
-            step(e);
-        }
+        support::neutral::run_for(e, 100_000, &mut step);
         ran += 100_000;
         if ran >= 2_000_000_000 {
             // What the listener says is the only account of why.
@@ -827,6 +891,8 @@ fn main() {
         Some("quux") => Some(Geometry::QUUX),
         Some("quux-4k") => Some(Geometry { pdl_bits: 12, ..Geometry::QUUX }),
         Some("quux-16k") => Some(Geometry { pdl_bits: 14, ..Geometry::QUUX }),
+        Some("quux-14") => Some(Geometry::QUUX_14),
+        Some("quux-15") => Some(Geometry::QUUX_15),
         _ => None,
     };
     let geometry = match geometry {
@@ -845,7 +911,54 @@ fn main() {
             })
             .collect()
     };
+    let neutral = support::neutral::on();
+    // Revision 15's clock, on both engines: `MUIR_MICROCYCLE_NS`, in ns, 5
+    // to 40 in steps of 0.5; the Kria's 8.5 by default.
+    let period = std::env::var("MUIR_MICROCYCLE_NS").ok().map(|v| {
+        assert!(geometry.extended(), "MUIR_MICROCYCLE_NS={v} is QUUX revision 15's: quux-15");
+        muir::clock::parse_microcycle_ns(&v).unwrap_or_else(|| {
+            panic!("MUIR_MICROCYCLE_NS={v}: the period in ns, 5 to 40 in steps of 0.5")
+        })
+    });
     match engine.as_str() {
+        "rtl" if geometry.paged() => {
+            // Revisions 14 and 15 on `rtl` are the pipeline, 14 as a
+            // measurement aid; its clock is the period, never `sync`'s.
+            if let Ok(v) = std::env::var("MUIR_SYNC_TICKS") {
+                panic!(
+                    "MUIR_SYNC_TICKS={v} is refused on the pipeline, whose clock is MUIR_MICROCYCLE_NS's"
+                );
+            }
+            // `MUIR_MEMORY_NS=<read>,<write>,<occupancy>`, or `kria`, `arty`
+            // or `de25`: the port's timing; `MUIR_CACHE`, its cache's words.
+            let timing = std::env::var("MUIR_MEMORY_NS").ok().map_or(muir::pipeline::PortTiming::KRIA, |v| {
+                muir::pipeline::PortTiming::parse(&v).unwrap_or_else(|| {
+                    panic!("MUIR_MEMORY_NS={v}: <read>,<write>,<occupancy> in ns, or kria, arty or de25")
+                })
+            });
+            let cache = std::env::var("MUIR_CACHE").ok().map_or(muir::pipeline::CACHE_WORDS, |v| {
+                v.parse().unwrap_or_else(|_| panic!("MUIR_CACHE={v}: the cache's words"))
+            });
+            let pipeline = move |m: muir::machine::Machine| {
+                let mut e = Pipeline::new(m);
+                let p = period.unwrap_or(e.period());
+                e.configure(p, timing, cache);
+                e
+            };
+            if neutral {
+                profile(
+                    move |m| {
+                        let mut e = pipeline(m);
+                        e.time_neutral();
+                        neutral_digests(e)
+                    },
+                    geometry,
+                    &wanted,
+                )
+            } else {
+                profile(pipeline, geometry, &wanted)
+            }
+        }
         "rtl" => {
             // `MUIR_SYNC_TICKS` runs QUUX's synchronous microcycle of that
             // many ticks, and `MUIR_CACHE` fits a memory cache of that many
@@ -901,8 +1014,42 @@ fn main() {
                 &wanted,
             )
         }
-        _ => profile(Micro::new, geometry, &wanted),
+        _ => {
+            let micro = move |m: muir::machine::Machine| {
+                let revision_14 = m.geometry.paged() && !m.geometry.extended();
+                let mut e = Micro::new(m);
+                if let Some(p) = period {
+                    e.period = p;
+                } else if revision_14 && neutral {
+                    // Revision 14's neutral time at the pipeline's period for
+                    // it, so that the two compare.
+                    e.period = muir::pipeline::PERIOD_14;
+                }
+                e
+            };
+            if neutral {
+                profile(
+                    move |m| {
+                        let mut e = micro(m);
+                        e.time_neutral();
+                        neutral_digests(e)
+                    },
+                    geometry,
+                    &wanted,
+                )
+            } else {
+                profile(micro, geometry, &wanted)
+            }
+        }
     }
+}
+
+/// `e` under the time-neutral harness: its digests at every 65,536th
+/// boundary and at each workload's end, printed as it runs.
+fn neutral_digests<E: Neutral>(e: E) -> Digests<E> {
+    let mut d = Digests::new(e, support::neutral::EVERY);
+    d.print = true;
+    d
 }
 
 fn profile<E: Profiled + support::macro_dispatch::Executes>(
@@ -1050,8 +1197,23 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
                 n << 4
             });
         let mut m = muir::machine::Machine::with_geometry(geometry, boards);
-        // QUUX's own PROM, PROM 2001.
-        m.load_prom(&muir::prom::quux_boot_prom());
+        // QUUX's own PROM, PROM 2001, or `MUIR_PROM`'s file, as `--prom`
+        // takes it: revision 15 has no PROM built in.
+        let prom = match std::env::var_os("MUIR_PROM").map(PathBuf::from) {
+            Some(file) => {
+                let bytes =
+                    std::fs::read(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+                muir::prom::parse_quux_mcr(&bytes, geometry)
+                    .unwrap_or_else(|e| panic!("MUIR_PROM={}: {e}", file.display()))
+            }
+            None if geometry.extended() => {
+                panic!(
+                    "QUUX revision 15 has no built-in boot PROM: MUIR_PROM=<file>, a revision-15 .mcr"
+                )
+            }
+            None => muir::prom::quux_boot_prom(),
+        };
+        m.load_prom(&prom);
         let mut d = muir::block_disk::BlockDisk::new(muir::block_disk::BLOCK_NS);
         d.attach(muir::disk_image::Disk::open_rw(&copy).unwrap());
         m.block_disk = Some(d);
@@ -1067,6 +1229,10 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
     m.geometry = geometry;
     if let Some(s) = std::env::var("MUIR_RTC").ok().and_then(|v| v.parse().ok()) {
         m.rtc = muir::machine::Rtc::Counted { start: s, base_ns: 0 };
+    } else if support::neutral::on() {
+        // The time-neutral harness counts the RTC, never the host's.
+        m.rtc =
+            muir::machine::Rtc::Counted { start: support::neutral::FIXED_UNIX as u32, base_ns: 0 };
     }
     let mut e = make(m);
     e.boot();
@@ -1143,7 +1309,10 @@ fn measure<E: Profiled>(
     home: PathBuf,
     wanted: &[&(&str, &str)],
 ) {
-    let ran = support::boot_to_the_prompt_within(&mut e, CHAOS, root.clone(), 400_000_000);
+    // Neutral time runs the machine's waits at the period, many more
+    // microcycles than its time otherwise gives them.
+    let limit = if support::neutral::on() { 4_000_000_000 } else { 400_000_000 };
+    let ran = support::boot_to_the_prompt_within(&mut e, CHAOS, root.clone(), limit);
     eprintln!("listener after {ran} microcycles");
     let mut k = Keyboard::new();
     let mut plain = |e: &mut E| {
@@ -1182,6 +1351,7 @@ fn measure<E: Profiled>(
         let p =
             run(&mut e, &mut k, &format!("(progn {form} (w-done \"{name}-{n}\"))"), &marker, syms);
         report(name, &p, syms, files, qmlp, &generic);
+        e.workload_end(&format!("{name}-{n}"));
         total = Some(total.map_or(p.span, |t| t.plus(p.span)));
         // `MUIR_PC_DUMP=<dir>`: every executed address's count and the
         // nanoseconds stalled at it, one file a workload.

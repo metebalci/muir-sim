@@ -136,6 +136,8 @@ impl File {
 fn now_date(time: Option<u32>) -> String {
     let secs = match time {
         Some(t) => (t as u64).saturating_sub(super::time::UNIX_EPOCH_UNIVERSAL),
+        // The time-neutral harness's date, fixed, for runs that repeat.
+        None if super::time::neutral() => super::time::FIXED_UNIX,
         None => std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1365,6 +1367,9 @@ fn date(meta: &std::fs::Metadata) -> String {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    // Under the time-neutral harness every file has its fixed date: the
+    // run's own files are made when it runs.
+    let secs = if super::time::neutral() { super::time::FIXED_UNIX } else { secs };
     let (y, m, d, hh, mm, ss) = civil(secs);
     format!("{m:02}/{d:02}/{:02} {hh:02}:{mm:02}:{ss:02}", y % 100)
 }

@@ -68,6 +68,10 @@ pub const L: u64 = 1;
 /// KR260's 64K words (contract §12.1; MP2b ruling Q14).
 pub const CACHE_WORDS: u32 = 65_536;
 
+/// The period revision 14 runs at on the pipeline, a measurement aid: in
+/// its time's units, ns.
+pub const PERIOD_14: u64 = 9;
+
 /// The longest a word may wait in one stage before the engine gives up, in
 /// clocks: above a sweep of the largest TLB, a file device's sweep and the
 /// late-answering memory model's waits (MP2b ruling Q9).
@@ -299,6 +303,9 @@ pub struct Pipeline {
     cs_wait_until: u64,
     /// CS loads nothing until the stream's fetch brings D's word.
     d_wait: bool,
+    /// While D waits, its delay slot is still to be fetched: after a halt
+    /// that squashed it, the word that makes the stream's fetch.
+    d_slot_pending: bool,
     /// The microcycles committed in EX, to number the next.
     committed: u64,
     /// `SRUN`, `SSTEP`, `SSDONE`, as `micro` has them.
@@ -319,6 +326,17 @@ pub struct Pipeline {
     pub meters: Meters,
     /// The TLB's sweep holds starts and port-B lookups until this clock.
     tlb_sweep_until: u64,
+    /// The time-neutral harness's boundary (MP2b ruling Q12 (e)): when
+    /// [`Machine::lc_steps`] reaches it, the word that stepped LC is the
+    /// last to run before a halt, which drains, so that the state is the
+    /// single-edge machine's after that microcycle. The harness reads it and
+    /// the run goes on at the next clock.
+    pub boundary_at: Option<u64>,
+    /// Halted at a boundary.
+    boundary_halt: bool,
+    /// The address of the microcycle counted last, `None` for a nopped
+    /// one: what [`Pipeline::executed`] says.
+    last_counted: Option<u16>,
     /// Test aids: a mutation planted by a test.
     pub mutation: Mutation,
     /// Every microcycle committed, in order, when a test asks for the record
@@ -374,6 +392,34 @@ pub enum Mutation {
     SquashedLookup,
     /// Block-disk's START leaves the posted writes queued and in flight.
     NoLandAtStart,
+    /// A PDL read through a pointer or index the word before writes from
+    /// the ALU does not wait for it.
+    NoPdlWait,
+    /// The d1 bypass, WB's write into the word in EX, left out.
+    NoD1,
+    /// The d2 bypass, WB's write into RD's operand, left out.
+    NoD2,
+    /// A push's SPC word written at once, so that an M read of the stack
+    /// in the next microcycle reads it.
+    SpcWriteAtOnce,
+    /// `MAP(MD)` right after a map store reads the new entry.
+    MapSeenNew,
+    /// The words behind a `WRITE-I-MEM` not fetched again.
+    NoImemRefetch,
+    /// A write carries `MD` as its start left it, whatever the microcycle
+    /// after loads.
+    WriteMdAtStart,
+    /// The word right after a read start waits for the read's word, as
+    /// every later word that uses `MD` does.
+    SuccessorWaitsForMd,
+    /// CMD_PROD taken at once, its earlier writes still queued or in
+    /// flight.
+    NoCmdProdWait,
+    /// The file device's completion sweep leaves the set of the line last
+    /// filled.
+    SweepMissesASet,
+    /// Block-disk's transfer leaves the sets of the words it writes.
+    NoClearSet,
     /// A delay slot N inhibits counted twice.
     NopCountedTwice,
     /// The OA-REG-HIGH hold removed, or one clock short.
@@ -398,7 +444,7 @@ impl Pipeline {
     /// [`Pipeline::configure`] says otherwise (MP2b ruling Q14).
     pub fn new(m: Machine) -> Pipeline {
         assert!(m.geometry.paged(), "the pipeline runs QUUX revisions 14 and 15");
-        let period = if m.geometry.extended() { crate::clock::PERIOD_15 } else { 9 };
+        let period = if m.geometry.extended() { crate::clock::PERIOD_15 } else { PERIOD_14 };
         let time = Self::time_of(&m, period);
         let mut p = Pipeline {
             port: Port::new(PortTiming::KRIA, time, CACHE_WORDS),
@@ -419,6 +465,7 @@ impl Pipeline {
             x: exec::Exec::default(),
             cs_wait_until: 0,
             d_wait: false,
+            d_slot_pending: false,
             committed: 0,
             srun: false,
             sstep: false,
@@ -430,6 +477,9 @@ impl Pipeline {
             pending_halt: None,
             meters: Meters::default(),
             tlb_sweep_until: 0,
+            boundary_at: None,
+            boundary_halt: false,
+            last_counted: None,
             mutation: Mutation::None,
             trace: None,
             operands: None,

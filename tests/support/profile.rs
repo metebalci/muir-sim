@@ -17,6 +17,7 @@
 
 use muir::engine::Engine;
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 
 /// Where a span's memory time comes from.
@@ -26,6 +27,10 @@ pub enum Memory {
     Stalled,
     /// `micro`'s fixed charge of `each_ns` a memory cycle.
     Charged { each_ns: u64 },
+    /// Revision 15's pipeline: clocks of one period, in units of 0.5 ns,
+    /// a microcycle counted in some and none in the rest (bubbles, holds,
+    /// memory waits).
+    Clocks { period: u64, clocks: u64 },
 }
 
 /// A span of a run: the engine's clock and counts at its end less those at
@@ -57,15 +62,29 @@ impl Span {
         }
     }
 
-    /// `micro`'s clock and counts so far.
+    /// `micro`'s clock and counts so far: on revision 15 its clock counts
+    /// 0.5 ns.
     pub fn of_micro(e: &Micro) -> Span {
         let each_ns = e.memory_cycle_ns;
         Span {
             microcycles: e.machine().cycles,
             memory_ns: e.memory_cycles() * each_ns,
             halted_ns: 0,
-            ns: e.machine().ns,
+            ns: e.machine().ns / e.machine().time_base().per_ns,
             memory: Memory::Charged { each_ns },
+        }
+    }
+
+    /// Revision 15's pipeline's clocks and counts so far.
+    pub fn of_pipeline(e: &Pipeline) -> Span {
+        let (period, per_ns) = (e.period(), e.time().per_ns);
+        let ns = e.clock() * period / per_ns;
+        Span {
+            microcycles: e.machine().cycles,
+            memory_ns: ns - e.machine().cycles.min(e.clock()) * period / per_ns,
+            halted_ns: 0,
+            ns,
+            memory: Memory::Clocks { period, clocks: e.clock() },
         }
     }
 
@@ -76,7 +95,12 @@ impl Span {
             memory_ns: self.memory_ns - earlier.memory_ns,
             halted_ns: self.halted_ns - earlier.halted_ns,
             ns: self.ns - earlier.ns,
-            memory: self.memory,
+            memory: match (self.memory, earlier.memory) {
+                (Memory::Clocks { period, clocks }, Memory::Clocks { clocks: c0, .. }) => {
+                    Memory::Clocks { period, clocks: clocks - c0 }
+                }
+                (m, _) => m,
+            },
         }
     }
 
@@ -88,7 +112,12 @@ impl Span {
             memory_ns: self.memory_ns + other.memory_ns,
             halted_ns: self.halted_ns + other.halted_ns,
             ns: self.ns + other.ns,
-            memory: self.memory,
+            memory: match (self.memory, other.memory) {
+                (Memory::Clocks { period, clocks }, Memory::Clocks { clocks: c1, .. }) => {
+                    Memory::Clocks { period, clocks: clocks + c1 }
+                }
+                (m, _) => m,
+            },
         }
     }
 
@@ -115,6 +144,14 @@ impl Span {
                 self.microcycle_ns(),
                 self.memory_ns,
                 self.ns
+            ),
+            Memory::Clocks { period, clocks } => format!(
+                "time: {} microcycles in {clocks} clocks of {} ns, {:.3} clocks a microcycle, = {} ns in all; {} ns of clocks with no microcycle, {share:.2}% of the time in all",
+                self.microcycles,
+                muir::clock::microcycle_ns_text(period),
+                clocks as f64 / self.microcycles.max(1) as f64,
+                self.ns,
+                self.memory_ns
             ),
             Memory::Charged { each_ns } => format!(
                 "time: {} microcycles in {} ns + memory charged {} ns ({} ns a memory cycle, fixed; micro does not stall){halted} = {} ns in all; memory charged {share:.2}% of the time in all",

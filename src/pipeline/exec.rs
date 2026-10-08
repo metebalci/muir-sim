@@ -58,6 +58,8 @@ pub(crate) struct Exec {
     /// Revision 14's IMOD: the registers ORed into the next microcycle's
     /// word.
     pub imod: [bool; 2],
+    /// The sequence of the word IMOD's flags are for: the writer's next.
+    pub imod_seq: u64,
     pub map_write: Option<(Word, Word)>,
     pub map_write_d: Option<(Word, Word)>,
     pub map_seen: Option<crate::machine::Translation>,
@@ -193,6 +195,9 @@ impl Pipeline {
         self.x.spc_pushed = true;
         self.m.spcptr = (self.m.spcptr + 1) & 0o37;
         self.x.spc_write = Some((self.m.spcptr, word));
+        if self.mutation == super::Mutation::SpcWriteAtOnce {
+            self.m.spc[self.m.spcptr as usize] = word;
+        }
     }
 
     fn pop_spc(&mut self) -> u32 {
@@ -304,6 +309,7 @@ impl Pipeline {
         let inc = if self.m.byte_mode() { 1 } else { 2 };
         let lc = (self.m.lc & counter).wrapping_add(inc) & counter;
         self.m.lc = (self.m.lc & !counter) | lc;
+        self.m.lc_steps += 1;
         if self.needfetch() {
             self.m.lc &= !self.m.geometry.need_fetch();
             self.m.vma = fetch_from.into();
@@ -417,12 +423,14 @@ impl Pipeline {
                 self.x.oa_low = data as u64 & 0o377777777;
                 if !self.m.geometry.extended() {
                     self.x.imod[0] = true;
+                    self.x.imod_seq = self.x.seq + 1;
                 }
             }
             0o17 => {
                 self.x.oa_high = data as u64 & 0o37777777;
                 if !self.m.geometry.extended() {
                     self.x.imod[1] = true;
+                    self.x.imod_seq = self.x.seq + 1;
                 }
             }
             0o20 => self.m.vma = word,
@@ -791,7 +799,9 @@ impl Pipeline {
         // The head of the microcycle: a map store's write lands, MAP(MD)
         // reading the word from before it (`micro`'s
         // `head_of_microcycle_14`).
-        self.x.map_seen = self.x.map_write_d.is_some().then(|| self.m.translate(self.m.md as u32));
+        self.x.map_seen = (self.x.map_write_d.is_some()
+            && self.mutation != super::Mutation::MapSeenNew)
+            .then(|| self.m.translate(self.m.md as u32));
         if let Some((vma, md)) = self.x.map_write_d.take() {
             let now = self.m.ns;
             if self.m.write_map_14(vma, md, now) {
@@ -897,7 +907,9 @@ impl Pipeline {
         // `next_microcycle_holds_the_write`).
         let starts = !self.x.starts.is_empty() || (self.x.next_instrd && self.needfetch());
         if let Some((seq, md)) = self.x.write_pending.take() {
-            let word = if executed && loads_md && !starts { self.m.md } else { md };
+            let next_s =
+                executed && loads_md && !starts && self.mutation != super::Mutation::WriteMdAtStart;
+            let word = if next_s { self.m.md } else { md };
             self.fix_write(seq, word);
         }
         if std::mem::take(&mut self.x.write_new) {

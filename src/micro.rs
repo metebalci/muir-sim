@@ -167,7 +167,9 @@ pub struct Micro {
     /// under the time-neutral harness. The memory cycle's charge, the
     /// divider's and the multiplier's holds, the nopped microcycles of a
     /// control-store write and a halted machine's steps take none.
-    /// `MUIR_TIME_NEUTRAL=1` in the harnesses.
+    /// `MUIR_TIME_NEUTRAL=1` in the harnesses. Revision 14 takes it too, at
+    /// the period it is given, as a measurement aid for the pipeline's
+    /// revision-14 runs.
     pub neutral: bool,
     /// Memory cycles started, for [`Micro::memory_cycles`].
     memory_cycles: u64,
@@ -349,11 +351,11 @@ impl Micro {
     /// whole periods, so that every instant stays a clock's (MP2b ruling
     /// Q1), and nothing under neutral time.
     fn memory_charge(&self) -> u64 {
+        if self.neutral && self.m.geometry.paged() {
+            return 0;
+        }
         if !self.m.geometry.extended() {
             return self.memory_cycle_ns;
-        }
-        if self.neutral {
-            return 0;
         }
         let units = self.m.time_base().ns(self.memory_cycle_ns);
         units.div_ceil(self.period.max(1)) * self.period
@@ -372,17 +374,20 @@ impl Micro {
     /// pipeline's is compared with.
     pub fn landed(&self) -> crate::machine::Machine {
         let mut m = self.m.clone();
-        if self.new_md_delay > 0 {
-            m.md = self.new_md;
-        }
-        if let Some((adr, word)) = self.pdl_write {
-            let adr = if adr == PDL_AT_INDEX { m.pdl_index } else { adr };
-            m.pdl[adr as usize] = word;
-        }
-        if let Some((ptr, word)) = self.spc_write {
-            m.spc[ptr as usize] = word;
-        }
+        self.pending().land(&mut m);
         m
+    }
+
+    /// What [`Micro::landed`] lands, without a copy of the machine.
+    pub fn pending(&self) -> crate::machine::Pending {
+        let pdl = self
+            .pdl_write
+            .map(|(adr, word)| (if adr == PDL_AT_INDEX { self.m.pdl_index } else { adr }, word));
+        crate::machine::Pending {
+            md: (self.new_md_delay > 0).then_some(self.new_md),
+            pdl,
+            spc: self.spc_write,
+        }
     }
 
     /// The OA registers' words, OA-REG-LOW in `IR<25:0>`'s positions and
@@ -970,6 +975,7 @@ impl Micro {
         let inc = if self.m.byte_mode() { 1 } else { 2 };
         let lc = (self.m.lc & counter).wrapping_add(inc) & counter;
         self.m.lc = (self.m.lc & !counter) | lc;
+        self.m.lc_steps += 1;
 
         if self.needfetch() {
             self.m.lc &= !self.m.geometry.need_fetch();
@@ -2494,7 +2500,7 @@ impl Engine for Micro {
         // The period feature word 25 reads on revision 15 (A15b.1), and the
         // grid its devices act on.
         self.m.period = self.period;
-        let neutral = self.neutral && self.m.geometry.extended();
+        let neutral = self.neutral && self.m.geometry.paged();
         // `MACHRUN`, less the statistics halt this engine cannot raise, and
         // with the one `ERR` it can: no parity check, but `HALTED` under
         // `ERRSTOP`.  Halted, a step is one master clock cycle and no

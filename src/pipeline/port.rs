@@ -358,6 +358,9 @@ pub struct Port {
     errors: u32,
     /// Tags for the queue's entries.
     next_tag: u64,
+    /// The line the last fill installed: a test aid, for a sweep planted
+    /// to miss its set.
+    pub last_filled: Option<u32>,
 }
 
 impl Port {
@@ -380,6 +383,7 @@ impl Port {
             meters: PortMeters::default(),
             errors: 0,
             next_tag: 1,
+            last_filled: None,
         }
     }
 
@@ -499,6 +503,7 @@ impl Port {
                     *w = load(m, base + k as u32);
                 }
                 self.cache.install(line, words);
+                self.last_filled = Some(line);
                 self.filled = Some((now, words[(f.bus % LINE_WORDS) as usize]));
                 self.fill = None;
                 self.meters.fills += 1;
@@ -609,8 +614,17 @@ impl Port {
     }
 
     /// The file device's completion at `now`: the sweep (MP2b ruling Q10).
-    pub fn sweep(&mut self, now: u64) {
+    /// `missing`, a test aid, leaves the set of that line as it is.
+    pub fn sweep(&mut self, now: u64, missing: Option<u32>) {
+        let keep = missing.map(|line| {
+            let s = self.cache.set_of(line);
+            (s, [self.cache.ways[2 * s].take(), self.cache.ways[2 * s + 1].take()])
+        });
         self.cache.invalidate();
+        if let Some((s, [a, b])) = keep {
+            self.cache.ways[2 * s] = a;
+            self.cache.ways[2 * s + 1] = b;
+        }
         self.sweep_until = now + (self.cache.words() / 512).max(1) as u64;
         self.meters.sweeps += 1;
     }

@@ -78,6 +78,14 @@ pub(crate) struct Back {
     /// after the next word's read as on a single-edge machine: its
     /// address and word.
     pub pdl_pending: Option<(u16, Word)>,
+    /// The word that reached [`Pipeline::boundary_at`] has committed this
+    /// clock.
+    pub boundary_now: bool,
+    /// A read start's sequence and `MD` as it stood at the grant: the word
+    /// right after the start reads that `MD`, the read's word landing in
+    /// the microcycle after it (the single-edge contract: a cycle goes out
+    /// at the edge ending the microcycle after its start).
+    pub md_old: Option<(u64, Word)>,
 }
 
 /// What RD would do with its word this clock, reckoned from the clock's
@@ -286,6 +294,10 @@ impl Pipeline {
         let wb_leaves = self.wb_stage();
         let ex = self.ex_stage(wb_leaves)?;
         self.front_and_edge(plan, ex, wb_leaves, oa_high);
+        if std::mem::take(&mut self.b.boundary_now) {
+            self.boundary_halt = true;
+            self.begin_drain_from(true);
+        }
         if ex.halt {
             self.begin_drain();
         }
@@ -310,10 +322,18 @@ impl Pipeline {
             // RD's copies from the state the drained words left: the words
             // in EX and WB committed after the drain began.
             self.restore_copies();
+            // D still waits for the stream's word: its fetch is made by the
+            // word after it, which the halt squashed and which is fetched
+            // again ahead of the wait.
+            self.d_slot_pending = self.d_wait;
             // The last microcycle's PDL buffer write waits for the next
             // word's read, which a single-edge machine makes before it
             // lands: no word reads its predecessor's PDL write (the
             // forward's `seq + 2`).
+            // So does the `MD` the next word reads after a read start.
+            if self.b.md_old.is_some_and(|(s, _)| s != self.b.last_seq) {
+                self.b.md_old = None;
+            }
             if let Some((adr, old, word, seq)) = self.b.last_pdl
                 && seq == self.b.last_seq
                 && self.b.pdl_pending.is_none()
@@ -322,8 +342,12 @@ impl Pipeline {
                 self.b.pdl_pending = Some((adr, word));
                 self.b.last_pdl = None;
             }
-            self.m.clock_control.run = false;
-            self.srun = false;
+            // A boundary's halt keeps RUN: the run goes on at the next
+            // clock, once the harness has read the state.
+            if !self.boundary_halt {
+                self.m.clock_control.run = false;
+                self.srun = false;
+            }
         }
         if let Some(h) = self.pending_halt.take() {
             return Err(h);
@@ -367,7 +391,7 @@ impl Pipeline {
         }
         // CMD_PROD, once every earlier write is answered (A15b.5).
         if let Some((v, mc)) = self.b.cmd_prod {
-            if self.port.empty() {
+            if self.port.empty() || self.mutation == Mutation::NoCmdProdWait {
                 self.b.cmd_prod = None;
                 let keep = self.m.ns;
                 self.m.ns = self.device_time(mc);
@@ -389,7 +413,10 @@ impl Pipeline {
         self.m.dma_written = false;
         self.m.advance_file_device();
         if std::mem::take(&mut self.m.dma_written) {
-            self.port.sweep(self.clock);
+            let missing = (self.mutation == Mutation::SweepMissesASet)
+                .then_some(self.port.last_filled)
+                .flatten();
+            self.port.sweep(self.clock, missing);
             self.drop_prefetch();
         }
     }
@@ -754,6 +781,7 @@ impl Pipeline {
         }
         self.m.cycles += 1;
         self.meters.retired += 1;
+        self.last_counted = (!w.nop).then_some(w.pc);
         if w.nop && self.mutation == Mutation::NopCountedTwice {
             self.m.cycles += 1;
         }
@@ -804,6 +832,7 @@ impl Pipeline {
                         None => self.b.pending_word = Some(PendingWord { seq, to: WordTo::Pdl(i) }),
                     }
                 } else {
+                    self.b.md_old = Some((seq, self.m.md));
                     self.b.md = Some((now + 3, self.m.pdl[i as usize]));
                 }
                 self.b.ack_at = now + 3;
@@ -842,6 +871,7 @@ impl Pipeline {
                         Answer::Filling => self.b.md_fill = true,
                         Answer::Busy => return false,
                     }
+                    self.b.md_old = Some((seq, self.m.md));
                     if s.fetch {
                         self.b.fetch = Some((bus, va));
                     }
@@ -866,6 +896,7 @@ impl Pipeline {
                     let word = self.m.bus_read(bus);
                     self.m.ns = keep;
                     self.event(super::Event::Register(bus));
+                    self.b.md_old = Some((seq, self.m.md));
                     self.b.md = Some((now + 2, word));
                 }
                 self.b.ack_at = now + 2;
@@ -874,6 +905,7 @@ impl Pipeline {
                 // Nothing there: one clock after the grant, MD zero, the
                 // NXM bit (A15b.3).
                 if !s.write {
+                    self.b.md_old = Some((seq, self.m.md));
                     self.b.md = Some((now + 1, 0));
                 }
                 self.m.bus_error |= crate::machine::bus_error::XBUS_NXM;
@@ -1095,7 +1127,9 @@ impl Pipeline {
             return Ok(res);
         }
         // d1: the word in WB this clock into the operands.
-        apply_am(&mut e, &self.b.landing.am);
+        if self.mutation != Mutation::NoD1 {
+            apply_am(&mut e, &self.b.landing.am);
+        }
         let ir = if e.nop { 0 } else { e.ir };
         let now = self.clock;
         let needfetch = self.m.lc & self.m.geometry.need_fetch() != 0;
@@ -1107,7 +1141,11 @@ impl Pipeline {
                 && field(ir, 10, 2) != 2
                 && needfetch);
         let read_in_flight = self.b.md.is_some() || self.b.md_fill;
-        if !e.nop && uses_md(ir) && read_in_flight {
+        // The word right after a read start reads `MD` as the start found
+        // it, and waits for nothing.
+        let successor = self.b.md_old.is_some_and(|(s, _)| s + 1 == e.seq)
+            && self.mutation != Mutation::SuccessorWaitsForMd;
+        if !e.nop && uses_md(ir) && read_in_flight && !successor {
             self.meters.md_wait += 1;
             self.ex = Some(e);
             return Ok(res);
@@ -1184,9 +1222,30 @@ impl Pipeline {
             self.x.interrupt_sample = Some(self.m.interrupt_at(self.m.ns));
             self.m.ns = now;
         }
-        if let Err(h) = self.execute(&e, mc, vmaok) {
+        // The read landed while the word after its start waited for
+        // something else: that word reads the `MD` from before, and the
+        // read's word stands after it, whatever it wrote, as it lands in
+        // the microcycle after.
+        let landed = match self.b.md_old {
+            Some((_, old)) if successor && !read_in_flight => {
+                Some(std::mem::replace(&mut self.m.md, old))
+            }
+            _ => None,
+        };
+        let done = self.execute(&e, mc, vmaok);
+        if let Some(w) = landed {
+            self.m.md = w;
+        }
+        if let Err(h) = done {
             self.ex = Some(e);
             return Err(h);
+        }
+        if self.b.md_old.is_some_and(|(s, _)| e.seq > s) {
+            self.b.md_old = None;
+        }
+        if self.boundary_at.is_some_and(|t| self.m.lc_steps >= t) {
+            self.boundary_at = None;
+            self.b.boundary_now = true;
         }
         self.committed = mc;
         e.mc = mc;
@@ -1226,7 +1285,7 @@ impl Pipeline {
             let predicted = e.next2.unwrap_or(self.x.npc_seq);
             res.kill_rd = self.x.inhibit;
             res.restore = e.ex_resolved && self.x.inhibit;
-            if self.x.wrote_imem {
+            if self.x.wrote_imem && self.mutation != Mutation::NoImemRefetch {
                 res.redirect = Some((e.pc + 1) & 0o37777);
                 res.refetch = true;
             } else if e.ex_resolved {
@@ -1335,7 +1394,9 @@ impl Pipeline {
         }
         for page in pages {
             for w in (page..page + 1024).step_by(super::port::LINE_WORDS as usize) {
-                self.port.cache.clear_set(w);
+                if self.mutation != Mutation::NoClearSet {
+                    self.port.cache.clear_set(w);
+                }
             }
             self.drop_prefetch();
         }
@@ -1493,7 +1554,9 @@ impl Pipeline {
                 }
                 self.held_am = held;
             }
-            apply_am(r, &landing.am);
+            if self.mutation != Mutation::NoD2 {
+                apply_am(r, &landing.am);
+            }
             if let Some((adr, word, wseq)) = landing.pdl
                 && adr == r.pdl_addr
                 && wseq + 2 <= r.seq
@@ -1553,9 +1616,10 @@ impl Pipeline {
             && !self.draining
             && !self.stepping
             && self.clock + 1 >= self.cs_wait_until
-            && !self.d_wait
+            && (!self.d_wait || self.d_slot_pending)
             && self.fetching()
         {
+            self.d_slot_pending = false;
             let pc = self.npc;
             let mut s = Slot::new(self.seq, pc, self.m.fetch(pc));
             self.seq += 1;
@@ -1639,7 +1703,7 @@ impl Pipeline {
         if let Some(by_pointer) = reads_pdl(ir) {
             let pending =
                 if by_pointer { self.copies.pdl_ptr_pending } else { self.copies.pdl_idx_pending };
-            if pending.is_some() {
+            if pending.is_some() && self.mutation != Mutation::NoPdlWait {
                 self.meters.pdl_wait += 1;
                 return true;
             }
@@ -1661,9 +1725,10 @@ impl Pipeline {
                 let fields = 0o1777 << 32 | if ir >> 31 & 1 == 0 { 0o37 << 26 } else { 0 };
                 ir |= (oa_high << 26) & fields;
             }
-        } else {
+        } else if self.x.imod_seq == c.seq {
             // Revision 14's IMOD: the word after an OA write, which the hold
-            // let in only once the write committed.
+            // let in only once the write committed; no word after it, which
+            // leaves CS before the flags are spent.
             c.imod_low = imod[0];
             c.imod_high = imod[1];
             if imod[0] {

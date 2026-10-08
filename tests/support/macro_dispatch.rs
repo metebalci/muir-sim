@@ -70,6 +70,12 @@ impl Executes for Micro {
     }
 }
 
+impl Executes for muir::pipeline::Pipeline {
+    fn executed(&self) -> Option<u16> {
+        muir::pipeline::Pipeline::executed(self)
+    }
+}
+
 impl Executes for Rtl {
     fn executed(&self) -> Option<u16> {
         Rtl::executed(self)

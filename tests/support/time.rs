@@ -57,10 +57,15 @@ impl Time {
         match self.clock {
             Clock::Fixed(t) => t,
             Clock::System => {
-                let unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let unix = if neutral() {
+                    // The time-neutral harness's, fixed, for runs that repeat.
+                    FIXED_UNIX
+                } else {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                };
                 // Four bytes on the wire: the count wraps on 7 February
                 // 2036, as the band's own universal time does.
                 (unix + UNIX_EPOCH_UNIVERSAL) as u32
@@ -103,4 +108,13 @@ impl Service for Uptime {
         let secs = (now.saturating_sub(self.since) / 1_000_000_000) as u32;
         Response::Answer(secs.to_le_bytes().to_vec())
     }
+}
+
+/// The host's date under the time-neutral harness, 1 September 2026
+/// (`tests/support/neutral.rs`).
+pub const FIXED_UNIX: u64 = 1_788_220_800;
+
+/// Whether the time-neutral harness is on: `MUIR_TIME_NEUTRAL=1`.
+pub fn neutral() -> bool {
+    std::env::var("MUIR_TIME_NEUTRAL").is_ok_and(|v| v == "1")
 }

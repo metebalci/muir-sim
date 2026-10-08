@@ -66,6 +66,7 @@ impl Pipeline {
         self.x.map_write_d = None;
         self.x.spc_write = None;
         self.d_wait = false;
+        self.d_slot_pending = false;
         self.cs_wait_until = 0;
         self.held_am.clear();
         self.held_pdl = None;
@@ -111,6 +112,7 @@ impl Pipeline {
         }
         if run && self.halted && !(self.m.mode.errstop && self.x.halted) {
             self.halted = false;
+            self.boundary_halt = false;
         }
         if self.sstep && !self.ssdone && self.halted {
             // A single step: one word through the four stages.
@@ -134,24 +136,39 @@ impl Pipeline {
     /// The halt begins: CS and RD squashed, the next word to run the first
     /// of them, its fetch's order kept.
     pub(crate) fn begin_drain(&mut self) {
+        self.begin_drain_from(false);
+    }
+
+    /// The halt begins, and with `ex` the word in EX, not yet run, is
+    /// squashed too, so that the machine stops after the word that has just
+    /// committed: the boundary halt of the time-neutral harness (MP2b
+    /// ruling Q12 (e)).
+    ///
+    /// The squashed words are fetched again in order. The first's address
+    /// and the second's were chosen by words that have committed, so both
+    /// are kept: the second fetched, or the address the next fetch would
+    /// have taken. Every later address is the first's own choice, made
+    /// again in RD.
+    pub(crate) fn begin_drain_from(&mut self, ex: bool) {
         if self.draining {
             return;
         }
         self.draining = true;
-        let (rd, cs) = (self.rd.take(), self.cs.take());
-        let first = rd.as_ref().or(cs.as_ref());
-        if let Some(f) = first {
+        let ex = if ex { self.ex.take() } else { None };
+        let words: Vec<super::Slot> =
+            [ex, self.rd.take(), self.cs.take()].into_iter().flatten().collect();
+        if let Some(f) = words.first() {
+            let next = self.npc;
             self.npc = f.pc;
             self.b.nop_next = f.nop;
             self.b.pre_nop_next = f.pre_nop && !f.nop;
-            if let (Some(_), Some(c)) = (&rd, &cs) {
-                self.npc_after = Some(c.pc);
-            } else if f.trap {
+            self.npc_after = Some(match words.get(1) {
+                Some(s) => s.pc,
                 // The trap again, its word after it.
-                self.npc_after = Some(f.pc);
-            }
+                None if f.trap => f.pc,
+                None => next,
+            });
         }
-        self.d_wait = false;
         self.seq =
             [&self.ex, &self.wb].into_iter().flatten().map(|w| w.seq).max().unwrap_or(self.seq) + 1;
         self.restore_copies();
@@ -208,6 +225,23 @@ impl Pipeline {
         self.tlb_sweep_until = 0;
     }
 
+    /// The control-store address of the microcycle the last step counted,
+    /// `None` when it was nopped ([`crate::micro::Micro::executed`]).
+    pub fn executed(&self) -> Option<u16> {
+        self.last_counted
+    }
+
+    /// Whether the pipeline is halted at the harness's boundary
+    /// ([`Pipeline::boundary_at`]), drained.
+    pub fn at_boundary(&self) -> bool {
+        self.halted && self.boundary_halt
+    }
+
+    /// OA-REG-LOW and OA-REG-HIGH ([`crate::micro::Micro::oa_registers`]).
+    pub fn oa_registers(&self) -> (u64, u64) {
+        (self.x.oa_low, self.x.oa_high)
+    }
+
     /// Whether the memory side is quiet: every write answered, no read on
     /// its way, nothing for a register (a test aid, for a comparison at the
     /// end of a run).
@@ -225,13 +259,13 @@ impl Pipeline {
     /// microcycles ([`crate::micro::Micro::landed`]).
     pub fn landed(&self) -> crate::machine::Machine {
         let mut m = self.m.clone();
-        if let Some((ptr, word)) = self.x.spc_write {
-            m.spc[ptr as usize] = word;
-        }
-        if let Some((adr, word)) = self.b.pdl_pending {
-            m.pdl[adr as usize] = word;
-        }
+        self.pending().land(&mut m);
         m
+    }
+
+    /// What [`Pipeline::landed`] lands, without a copy of the machine.
+    pub fn pending(&self) -> crate::machine::Pending {
+        crate::machine::Pending { md: None, pdl: self.b.pdl_pending, spc: self.x.spc_write }
     }
 
     /// Whether the machine is halted, drained.
@@ -291,6 +325,9 @@ impl Pipeline {
             w.u16(a);
             w.word(v);
         });
+        w.opt(self.b.md_old.map(|(_, v)| v), crate::checkpoint::Writer::word);
+        w.bool(self.d_wait);
+        w.bool(self.d_slot_pending);
         w.u64(self.x.oa_low);
         w.u64(self.x.oa_high);
         w.bool(self.x.imod[0]);
@@ -339,6 +376,11 @@ impl Pipeline {
         self.b.pre_nop_next = r.bool()?;
         self.b.nop_next = r.bool()?;
         self.b.pdl_pending = r.opt(|r| Ok((r.u16()?, r.word()?)))?;
+        // The next word fetched is the one after the read start.
+        self.b.md_old =
+            r.opt(crate::checkpoint::Reader::word)?.map(|v| (self.seq.wrapping_sub(1), v));
+        self.d_wait = r.bool()?;
+        self.d_slot_pending = r.bool()?;
         self.x.oa_low = r.u64()?;
         self.x.oa_high = r.u64()?;
         self.x.imod = [r.bool()?, r.bool()?];
