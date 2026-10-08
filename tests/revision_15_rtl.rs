@@ -3778,3 +3778,398 @@ fn a_halt_keeps_d_s_wait_for_the_stream_s_word() {
         }
     }
 }
+
+// --- A register write's interrupt, a read after a read (MP2b rulings 2) --------
+
+/// Interrupts enabled: INTERRUPT-CONTROL `<27>`, which a 40-bit machine's
+/// destination 2 takes from the word's `<35>` (A1.6).
+fn enable_interrupts(p: &mut Prog) {
+    let v = p.k(1 << 35);
+    p.op(ALU | SETA | a_src(v) | fd(0o2));
+}
+
+/// Block-disk's command, register-page word 200, written with `v`; its
+/// `<11>` with the disk idle raises word 100 `<3>`, the interrupt.
+fn block_disk_command_start(p: &mut Prog, v: Word) {
+    let (w, at) = (p.k(v), p.k(REGISTER_PAGE | 0o200));
+    p.op(ALU | SETA | a_src(w) | MD);
+    p.op(ALU | SETA | a_src(at) | START_WRITE);
+}
+
+/// Two checks of condition 5 (page fault or interrupt), N set, calling
+/// the handlers at `SUBS[0]`, which counts in M 26, and `SUBS[1]`, in M 27.
+fn two_checks(p: &mut Prog) {
+    p.op(jcond(5) | P | N | target(SUBS[0]));
+    p.op(jcond(5) | P | N | target(SUBS[1]));
+}
+
+/// The handlers [`two_checks`] call, after the program's stop.
+fn check_handlers(p: &mut Prog) {
+    use muir::isa::asm::ADD;
+    for (k, slot) in [(0, 0o26), (1, 0o27)] {
+        while p.at() < SUBS[k] {
+            p.fill(1);
+        }
+        p.op(ALU | ADD | a_src(ONE) | m_src(slot) | m_dest(slot));
+        p.op(filler().raw() | POPJ);
+        p.fill(1);
+    }
+}
+
+/// **A register write's interrupt is taken by the next check that tests
+/// it, not the one right after the start** (MP2b rulings 2, Q1, test 1): a
+/// write of block-disk's command with `<11>`, the disk idle, raises word 100
+/// `<3>`; the check right after the start does not call, the one after it
+/// does. On both engines, plain and under neutral time.
+#[test]
+fn a_register_write_s_interrupt_is_seen_by_the_check_after_the_next() {
+    let mut p = Prog::default();
+    enable_interrupts(&mut p);
+    block_disk_command_start(&mut p, 1 << 11);
+    two_checks(&mut p);
+    p.fill(2);
+    p.stop();
+    check_handlers(&mut p);
+    for neutral in [false, true] {
+        let u = {
+            let mut m = machine(&p, REV15);
+            with_block_disk(&mut m);
+            let mut u = Micro::new(m);
+            u.neutral = neutral;
+            match run_engine(u) {
+                Ok(u) => u,
+                Err((h, _)) => panic!("micro halted: {h:?}"),
+            }
+        };
+        let mut m = machine(&p, REV15);
+        with_block_disk(&mut m);
+        let e = ends_on(m, &|e| e.neutral = neutral);
+        for (what, m) in [("micro", u.machine()), ("rtl", e.machine())] {
+            assert_eq!(
+                (m.mmem[0o26], m.mmem[0o27]),
+                (0, 1),
+                "neutral {neutral}, {what}: the second check calls"
+            );
+        }
+        assert_eq!(state(e.machine()), state(u.machine()), "neutral {neutral}: the ends");
+    }
+}
+
+/// **The reverse** (MP2b rulings 2, Q1, test 2): with the level up, a write
+/// of the command with 0 lowers it; the check right after the start still
+/// calls, and the check after it, once the handler has returned, does not.
+#[test]
+fn a_register_write_that_lowers_the_level_is_seen_by_the_check_after_the_next() {
+    let mut p = Prog::default();
+    enable_interrupts(&mut p);
+    block_disk_command_start(&mut p, 1 << 11);
+    p.fill(4);
+    block_disk_command_start(&mut p, 0);
+    two_checks(&mut p);
+    p.fill(2);
+    p.stop();
+    check_handlers(&mut p);
+    let e = same_on(&p, &with_block_disk, &|_| {});
+    assert_eq!((e.machine().mmem[0o26], e.machine().mmem[0o27]), (1, 0));
+}
+
+/// **A register read right after a register write reads the device as the
+/// write left it** (MP2b rulings 2, F1; A15b.3, "A start right after a
+/// start": both land): the write of test 1, then a read of word 100 in the
+/// next word; `<3>` reads up on both engines.
+#[test]
+fn a_register_read_right_after_a_register_write_reads_it_written() {
+    let mut p = Prog::default();
+    enable_interrupts(&mut p);
+    block_disk_command_start(&mut p, 1 << 11);
+    let word_100 = p.k(REGISTER_PAGE | 0o100);
+    p.op(ALU | SETA | a_src(word_100) | START_READ);
+    p.fill(1);
+    p.op(ALU | SETM | SRC_MD | m_dest(0o26));
+    p.stop();
+    let e = same_on(&p, &with_block_disk, &|_| {});
+    assert_eq!(e.machine().mmem[0o26] & 1 << 3, 1 << 3, "word 100 <3> up");
+}
+
+/// **A harness boundary between a register write's start and the next
+/// word** (MP2b rulings 2, Q1, test 4): a return with `SPC<14>` arms the
+/// LC step in its delay slot, which starts the write of test 1, so that
+/// the harness's boundary falls right after the start. `micro` sends the
+/// waiting write out at the boundary, as its halt does, and the pipeline's
+/// drain takes it: the digests are alike, and so are the ends.
+#[test]
+fn a_boundary_between_a_register_write_and_the_next_word_digests_alike() {
+    use support::neutral::{Digests, Neutral};
+    let mut p = Prog::default();
+    enable_interrupts(&mut p);
+    let (w, reg) = (p.k(1 << 11), p.k(REGISTER_PAGE | 0o200));
+    p.op(ALU | SETA | a_src(w) | MD);
+    // A return to `at` + 2 with `SPC<14>`: LC steps in the microcycle
+    // after it, its delay slot, which starts the write; the checks are at
+    // the return's target.
+    let at = 0o100;
+    let ret = p.k(at | 1 << 14);
+    p.op(ALU | SETA | a_src(ret) | fd(0o15));
+    p.fill(1);
+    p.op(filler().raw() | POPJ);
+    p.op(ALU | SETA | a_src(reg) | START_WRITE);
+    while p.at() < at + 2 {
+        p.fill(1);
+    }
+    two_checks(&mut p);
+    p.fill(2);
+    p.stop();
+    check_handlers(&mut p);
+    fn run<E: Neutral>(mut e: Digests<E>) -> Digests<E> {
+        e.engine.time_neutral();
+        e.boot();
+        for _ in 0..20_000 {
+            if e.machine().opc == STOP as u16 {
+                break;
+            }
+            e.step().unwrap();
+        }
+        for _ in 0..16 {
+            e.step().unwrap();
+        }
+        e
+    }
+    let mut m = machine(&p, REV15);
+    with_block_disk(&mut m);
+    let u = run(Digests::new(Micro::new(m.clone()), 1));
+    let mut x = Pipeline::new(m);
+    x.skip_sweep();
+    let mut d = Digests::new(x, 1);
+    d.engine.time_neutral();
+    d.boot();
+    d.engine.skip_sweep();
+    for _ in 0..20_000 {
+        if d.machine().opc == STOP as u16 {
+            break;
+        }
+        d.step().unwrap();
+    }
+    for _ in 0..16 {
+        d.step().unwrap();
+    }
+    let e = settled(d.engine).unwrap_or_else(|(h, _)| panic!("halted settling: {h:?}"));
+    assert_eq!(u.lines.len(), 1, "one boundary, at the start: {:?}", u.lines);
+    // Sent out at the boundary, the write is seen by the check right after
+    // it, and the level still up by the one after, on both engines alike.
+    assert_eq!((e.machine().mmem[0o26], e.machine().mmem[0o27]), (1, 1), "both checks call");
+    assert_eq!(d.lines, u.lines, "the digests");
+    assert_eq!(state(e.machine()), state(u.engine.machine()), "the ends");
+}
+
+/// **A read start right after a read start: both land** (A15b.3, "A start
+/// right after a start"; MP2b rulings 2, Q2): the second start is held
+/// behind the first; the word right after the second start reads the
+/// first's word, and the word after that the second's. The second a read
+/// of main memory, missing and hitting, or of a register. On both engines;
+/// the first word dropped is caught.
+#[test]
+fn row_a_read_start_right_after_a_read_start_both_land() {
+    let mut caught = 0;
+    for (kind, second) in
+        [("a miss", PHYS | 0o50), ("a hit", PHYS | 0o50), ("a register", REGISTER_PAGE)]
+    {
+        let mut p = Prog::default();
+        p.main.push((0o40, 5));
+        p.main.push((0o50, 7));
+        let (two, a, b) = (p.k(2), p.k(PHYS | 0o40), p.k(second));
+        if kind == "a hit" {
+            p.read(PHYS | 0o40, 0o20);
+            p.read(PHYS | 0o50, 0o21);
+        }
+        p.op(ALU | SETA | a_src(two) | MD);
+        p.op(ALU | SETA | a_src(a) | START_READ);
+        p.op(ALU | SETA | a_src(b) | START_READ);
+        p.op(ALU | SETM | SRC_MD | m_dest(0o26));
+        p.op(ALU | SETM | SRC_MD | m_dest(0o27));
+        p.fill(2);
+        p.stop();
+        let e = same(&p);
+        let m = e.machine();
+        let second_word = if kind == "a register" { m.mmem[0o27] } else { 7 };
+        assert_eq!(m.mmem[0o26], 5, "{kind}: the word after the second start reads the first's");
+        assert_eq!(m.mmem[0o27], second_word, "{kind}: the word after it the second's");
+        if kind == "a register" {
+            assert_ne!(second_word, 5, "{kind}: a word of its own");
+        }
+        assert_eq!(
+            e.meters.consecutive_starts[0][0], 1,
+            "{kind}: one read right after a read counted"
+        );
+        let u = micro(&p);
+        let x = pipeline_with(&p, |x| x.mutation = Mutation::FirstReadDropped);
+        if state(x.machine()) != state(u.machine()) {
+            caught += 1;
+        }
+    }
+    assert_eq!(caught, 3, "the first word dropped is caught in every case");
+}
+
+/// **On revision 14 too, both reads land** (MP2b rulings 2, Q2: the hold is
+/// QUUX's on every revision): the program of
+/// [`row_a_read_start_right_after_a_read_start_both_land`] on revision 14's
+/// `rtl`, the single-edge engine, and `micro`: the word after the second
+/// start reads the first's word on both. A checkpoint of `micro` taken
+/// between the two starts' landings carries the second word.
+#[test]
+fn revision_14_s_engines_land_both_reads() {
+    let mut p = Prog::default();
+    p.main.push((0o40, 5));
+    p.main.push((0o50, 7));
+    let (two, a, b) = (p.k(2), p.k(PHYS | 0o40), p.k(PHYS | 0o50));
+    p.op(ALU | SETA | a_src(two) | MD);
+    p.op(ALU | SETA | a_src(a) | START_READ);
+    p.op(ALU | SETA | a_src(b) | START_READ);
+    p.op(ALU | SETM | SRC_MD | m_dest(0o26));
+    p.op(ALU | SETM | SRC_MD | m_dest(0o27));
+    p.fill(2);
+    p.stop();
+    let g = Geometry::QUUX_14;
+    let u = match run_engine(Micro::new(machine(&p, g))) {
+        Ok(u) => u,
+        Err((h, _)) => panic!("micro halted: {h:?}"),
+    };
+    let r = match run_engine(muir::rtl::Rtl::new(machine(&p, g))) {
+        Ok(r) => r,
+        Err((h, _)) => panic!("rtl halted: {h:?}"),
+    };
+    for (what, m) in [("micro", u.machine()), ("rtl", r.machine())] {
+        assert_eq!((m.mmem[0o26], m.mmem[0o27]), (5, 7), "{what}");
+    }
+    // micro's checkpoint at every microcycle of the run, resumed: the end.
+    for k in 1..40 {
+        let mut v = Micro::new(machine(&p, g));
+        v.boot();
+        for _ in 0..k {
+            v.step().unwrap();
+        }
+        let mut w = muir::checkpoint::Writer::new();
+        v.save(&mut w);
+        let bytes = w.finish();
+        let mut x = Micro::new(machine(&p, g));
+        x.load(&mut muir::checkpoint::Reader::for_word_bits(&bytes, 40)).unwrap();
+        while x.machine().opc != STOP as u16 {
+            x.step().unwrap();
+        }
+        assert_eq!((x.machine().mmem[0o26], x.machine().mmem[0o27]), (5, 7), "resumed after {k}");
+    }
+}
+
+/// **Under neutral time a device sees a register write at its start's
+/// instant** (MP2b rulings 1, Q12(c); rulings 2, Q1), however late the
+/// write goes out: timer 0, one-shot, a microsecond, its interrupt enabled,
+/// then a run of checks of condition 5; the check that first calls, named
+/// by its return address in M 26, is the same on both engines.
+#[test]
+fn under_neutral_time_a_device_sees_a_write_at_its_start_s_instant() {
+    use muir::isa::asm::src;
+    let mut p = Prog::default();
+    enable_interrupts(&mut p);
+    p.write(1, REGISTER_PAGE | 0o111);
+    p.write(1 | 4 | 1 << 8, REGISTER_PAGE | 0o110);
+    for _ in 0..160 {
+        p.op(jcond(5) | P | N | target(SUBS[0]));
+    }
+    p.stop();
+    while p.at() < SUBS[0] {
+        p.fill(1);
+    }
+    let off = p.k(0);
+    p.op(ALU | SETM | src(0o1) | m_dest(0o26));
+    p.op(ALU | SETA | a_src(off) | fd(0o2));
+    p.op(filler().raw() | POPJ);
+    p.fill(1);
+    let u = {
+        let mut u = Micro::new(machine(&p, REV15));
+        u.neutral = true;
+        match run_engine(u) {
+            Ok(u) => u,
+            Err((h, _)) => panic!("micro halted: {h:?}"),
+        }
+    };
+    let e = ends_on(machine(&p, REV15), &|e| e.neutral = true);
+    assert_ne!(u.machine().mmem[0o26], 0, "a check called");
+    assert_eq!(e.machine().mmem[0o26], u.machine().mmem[0o26], "the same check");
+    assert_eq!(state(e.machine()), state(u.machine()), "the ends");
+}
+
+/// **The harness acts between two microcycles on both engines** (MP2b
+/// rulings 1, Q12(b)): a program writes its round's count to the frame
+/// buffer's first word, as a listener echoes to the screen, and reads the
+/// keyboard's status, register-page word 120, until a key is waiting. The
+/// harness looks at the screen at the action point its schedule gives, `n`
+/// microcycles in, for each `n` over a span of the loop's, and presses a
+/// key there. The pipeline halts after that microcycle and drains, its
+/// posted writes landed, so that the screen and the count are `micro`'s at
+/// every `n`; looking at the pipeline as it stands, its writes still in the
+/// queue, is caught.
+#[test]
+fn the_harness_acts_between_two_microcycles_on_both_engines() {
+    use muir::isa::asm::ADD;
+    use muir::quux_input::KeyboardMouse;
+    use support::neutral::{restart_schedule, run_for_under};
+    let mut p = Prog::default();
+    // The keyboard enabled: word 120 <8>.
+    p.write(1 << 8, REGISTER_PAGE | 0o120);
+    let (status, screen) = (p.k(REGISTER_PAGE | 0o120), p.k(Word::from(muir::tlb::DEVICE_WINDOW)));
+    let round = p.at();
+    p.op(ALU | ADD | a_src(ONE) | m_src(0o27) | m_dest(0o27));
+    p.op(ALU | SETM | m_src(0o27) | MD);
+    p.op(ALU | SETA | a_src(screen) | START_WRITE);
+    p.fill(1);
+    p.op(ALU | SETA | a_src(status) | START_READ);
+    p.fill(1);
+    p.op(ALU | SETM | SRC_MD | m_dest(0o26));
+    // Bit 0 of M 26 clear: round again.
+    p.op(JUMP | m_src(0o26) | 1 << 6 | target(round) | N);
+    p.fill(1);
+    p.stop();
+    let video = |p: &Prog| {
+        let mut m = machine(p, REV15);
+        m.tv.set_board(muir::tv::Board::Video);
+        m
+    };
+    fn run<E: Engine>(mut e: E, n: u64, act: bool) -> (u32, u64) {
+        restart_schedule();
+        e.boot();
+        let mut step = |e: &mut E| e.step().unwrap();
+        if act {
+            run_for_under(true, &mut e, n, &mut step);
+        } else {
+            for _ in 0..n {
+                step(&mut e);
+            }
+        }
+        let seen = e.machine().tv.read_buffer(0);
+        e.machine_mut().quux_input.press(0o123);
+        for _ in 0..20_000 {
+            if e.machine().opc == STOP as u16 {
+                break;
+            }
+            step(&mut e);
+        }
+        (seen, e.machine().mmem[0o27])
+    }
+    let mut caught = 0;
+    for n in 200..240 {
+        let mut u = Micro::new(video(&p));
+        u.neutral = true;
+        let want = run(u, n, true);
+        assert_ne!(want.0, 0, "n {n}: the screen written");
+        let mut x = Pipeline::new(video(&p));
+        x.neutral = true;
+        let got = run(x, n, true);
+        assert_eq!(got, want, "n {n}: the screen seen and the rounds counted");
+        let mut x = Pipeline::new(video(&p));
+        x.neutral = true;
+        if run(x, n, false) != want {
+            caught += 1;
+        }
+    }
+    eprintln!("looking at the pipeline as it stands: {caught} of 40 action points see otherwise");
+    assert!(caught > 0, "acting without the halt is caught");
+}

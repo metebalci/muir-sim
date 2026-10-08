@@ -121,6 +121,25 @@ pub trait Engine {
     /// say: the pack under it and the Chaosnet on it stay as they are.
     fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()>;
 
+    /// **The time-neutral harness's action point** (MP2b rulings 1,
+    /// Q12(b)): stand still after microcycle `mc`, nothing of a later
+    /// microcycle begun, so that what the harness does there --- a key, a
+    /// look at the screen, a poll for a file --- lands between the two
+    /// microcycles, as on a single-edge machine. An engine that runs one
+    /// microcycle a step stands there already; the pipeline halts after the
+    /// word and drains (`Pipeline::boundary_at`).
+    fn stop_after_microcycle(&mut self, _mc: u64) {}
+
+    /// Whether the engine stands where [`Engine::stop_after_microcycle`]
+    /// asked, every write of the microcycles before taken.
+    fn stands_between_microcycles(&self) -> bool {
+        true
+    }
+
+    /// At the harness's action point, what a halt would settle: `micro`
+    /// sends out a write still waiting (MP2b rulings 2, Q1).
+    fn settle_for_harness(&mut self) {}
+
     /// Runs until it halts or `limit` microcycles have passed.  Returns the
     /// number run.
     fn run(&mut self, limit: u64) -> (u64, Option<Halt>) {

@@ -48,7 +48,18 @@ thread_local! {
 /// the steps took, so that the harness acts at the same `Machine::cycles`
 /// on every engine.
 pub fn run_for<E: Engine>(e: &mut E, n: u64, step: &mut dyn FnMut(&mut E)) {
-    if !on() {
+    run_for_under(on(), e, n, step)
+}
+
+/// The schedule started again, at the next [`run_for`]'s machine.
+pub fn restart_schedule() {
+    SCHEDULE.with(|s| s.set(None));
+}
+
+/// [`run_for`], the harness on as `neutral` says rather than as the
+/// environment does.
+pub fn run_for_under<E: Engine>(neutral: bool, e: &mut E, n: u64, step: &mut dyn FnMut(&mut E)) {
+    if !neutral {
         for _ in 0..n {
             step(e);
         }
@@ -60,12 +71,16 @@ pub fn run_for<E: Engine>(e: &mut E, n: u64, step: &mut dyn FnMut(&mut E)) {
         s.set(Some(at));
         at
     });
+    // The pipeline halts after the microcycle and drains, so that the
+    // harness acts between two microcycles on every engine.
+    e.stop_after_microcycle(at);
     let mut k = 0u64;
-    while e.machine().cycles < at {
+    while e.machine().cycles < at || !e.stands_between_microcycles() {
         step(e);
         k += 1;
         assert!(k < 4 * n + 1_000_000, "the schedule's microcycles never came");
     }
+    e.settle_for_harness();
 }
 
 /// What the harness needs of an engine beyond [`Engine`].
@@ -82,6 +97,8 @@ pub trait Neutral: Engine {
     fn reached(&self, at: u64) -> bool;
     /// Neutral time on.
     fn time_neutral(&mut self);
+    /// At a boundary, before the digest: what a halt would settle.
+    fn settle(&mut self) {}
 }
 
 impl Neutral for Micro {
@@ -97,6 +114,11 @@ impl Neutral for Micro {
     }
     fn time_neutral(&mut self) {
         self.neutral = true;
+    }
+    /// A write still waiting goes out, as at `micro`'s halt (MP2b rulings
+    /// 2, Q1): the pipeline's drain takes it.
+    fn settle(&mut self) {
+        self.send_out_waiting_write();
     }
 }
 
@@ -209,6 +231,7 @@ impl<E: Neutral> Digests<E> {
         if !self.engine.reached(self.next) {
             return;
         }
+        self.engine.settle();
         let m = self.engine.machine();
         let pending = self.engine.pending();
         let (what, whole) = match self.end.take() {
@@ -267,6 +290,15 @@ impl<E: Neutral> Engine for Digests<E> {
     }
     fn lc_wide(&self) -> u64 {
         self.engine.lc_wide()
+    }
+    fn stop_after_microcycle(&mut self, mc: u64) {
+        self.engine.stop_after_microcycle(mc)
+    }
+    fn stands_between_microcycles(&self) -> bool {
+        self.engine.stands_between_microcycles()
+    }
+    fn settle_for_harness(&mut self) {
+        self.engine.settle_for_harness()
     }
     fn spy_read(&self, eadr: u8) -> u16 {
         self.engine.spy_read(eadr)

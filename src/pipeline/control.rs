@@ -113,6 +113,7 @@ impl Pipeline {
         if run && self.halted && !(self.m.mode.errstop && self.x.halted) {
             self.halted = false;
             self.boundary_halt = false;
+            self.action_halt = false;
         }
         if self.sstep && !self.ssdone && self.halted {
             // A single step: one word through the four stages.

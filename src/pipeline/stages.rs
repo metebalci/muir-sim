@@ -79,8 +79,12 @@ pub(crate) struct Back {
     /// address and word.
     pub pdl_pending: Option<(u16, Word)>,
     /// The word that reached [`Pipeline::boundary_at`] has committed this
-    /// clock.
+    /// clock; or the word of the harness's action point.
     pub boundary_now: bool,
+    pub action_now: bool,
+    /// The last word that made a start, and the kind of its last start
+    /// ([`super::Meters::consecutive_starts`]).
+    pub last_start: Option<(u64, usize)>,
     /// A read start's sequence and `MD` as it stood at the grant: the word
     /// right after the start reads that `MD`, the read's word landing in
     /// the microcycle after it (the single-edge contract: a cycle goes out
@@ -294,8 +298,11 @@ impl Pipeline {
         let wb_leaves = self.wb_stage();
         let ex = self.ex_stage(wb_leaves)?;
         self.front_and_edge(plan, ex, wb_leaves, oa_high);
-        if std::mem::take(&mut self.b.boundary_now) {
-            self.boundary_halt = true;
+        let (lc, action) =
+            (std::mem::take(&mut self.b.boundary_now), std::mem::take(&mut self.b.action_now));
+        if lc || action {
+            self.boundary_halt |= lc;
+            self.action_halt |= action;
             self.begin_drain_from(true);
         }
         if ex.halt {
@@ -344,7 +351,7 @@ impl Pipeline {
             }
             // A boundary's halt keeps RUN: the run goes on at the next
             // clock, once the harness has read the state.
-            if !self.boundary_halt {
+            if !(self.boundary_halt || self.action_halt) {
                 self.m.clock_control.run = false;
                 self.srun = false;
             }
@@ -378,7 +385,10 @@ impl Pipeline {
             && at <= now
         {
             self.b.md = None;
-            self.m.md = w;
+            let held_start = self.ex.as_ref().is_some_and(|e| !e.nop && starts_cycle(e.ir));
+            if !(self.mutation == Mutation::FirstReadDropped && held_start) {
+                self.m.md = w;
+            }
             self.event(super::Event::Md(w));
             if let Some((bus, va)) = self.b.fetch.take() {
                 self.prefetch_after(bus, va);
@@ -842,6 +852,17 @@ impl Pipeline {
                 self.m.tlb.redirects[1] += 1;
             }
         }
+        // A register access waits while a register write before it is still
+        // to be taken: both land, in order, so that a read right after a
+        // write reads the device as the write left it (A15b.3, "A start
+        // right after a start"; MP2b rulings 2, F1).
+        let device = |bus: u32, m: &crate::machine::Machine| {
+            crate::busint::decode_quux_14(bus, m.main.len(), m.tv.buffer_words())
+                == crate::busint::Responder::Device
+        };
+        if self.b.register_write.is_some() && device(crate::tlb::bus_address(va, entry), &self.m) {
+            return false;
+        }
         // The write-back, ahead of the reference's own cycle (A14.6).
         let md = s.word.unwrap_or(self.m.md);
         if self.write_back_at_wb(va, entry, s.write, md) == Some(false) {
@@ -1247,6 +1268,10 @@ impl Pipeline {
             self.boundary_at = None;
             self.b.boundary_now = true;
         }
+        if self.boundary_mc == Some(mc) {
+            self.boundary_mc = None;
+            self.b.action_now = true;
+        }
         self.committed = mc;
         e.mc = mc;
         if let Some(t) = self.trace.as_mut() {
@@ -1263,6 +1288,19 @@ impl Pipeline {
         }
         e.am = std::mem::take(&mut self.x.am);
         e.pdl_w = self.x.pdl_w.take();
+        let kind = |s: &Start| if s.fetch { 2 } else { s.write as usize };
+        let kinds: Vec<usize> = self.x.starts.iter().map(kind).collect();
+        if let (Some(&first), Some((seq, last))) = (kinds.first(), self.b.last_start)
+            && seq + 1 == e.seq
+        {
+            self.meters.consecutive_starts[last][first] += 1;
+        }
+        for pair in kinds.windows(2) {
+            self.meters.consecutive_starts[pair[0]][pair[1]] += 1;
+        }
+        if let Some(&last) = kinds.last() {
+            self.b.last_start = Some((e.seq, last));
+        }
         let mut starts = std::mem::take(&mut self.x.starts).into_iter();
         e.start = starts.next();
         self.b.more = starts.collect();

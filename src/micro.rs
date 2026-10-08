@@ -111,6 +111,12 @@ pub struct Micro {
 
     new_md: Word,
     new_md_delay: u8,
+    /// A second read's word, started right after the first: QUUX holds the
+    /// second start until the first has gone out, and both land, each two
+    /// microcycles after its start (A15b.3, "A start right after a start";
+    /// MP2b rulings 2, Q2). Its delay 0 is none.
+    new_md2: Word,
+    new_md2_delay: u8,
 
     aaddr: u16,
     maddr: u8,
@@ -197,6 +203,10 @@ pub struct Micro {
     /// A write started and not yet gone out: the physical address, and
     /// when it goes out ([`Micro::start_write`]).
     write_out: Option<(u32, WriteOut)>,
+    /// That write's start's instant: under neutral time a device sees the
+    /// write at it, whenever it goes out (MP2b rulings 1, Q12(c)). Not in a
+    /// checkpoint, which is taken halted, the write gone out.
+    write_ns: u64,
     /// Revision 14: the virtual address of that write, for its write-back
     /// as it goes out, which carries the setter's bit from the word written
     /// (A14.6, A14.8). Kept in a checkpoint of revision 14 alone.
@@ -286,6 +296,8 @@ impl Micro {
             oa_shadow: [false; 2],
             new_md: 0,
             new_md_delay: 0,
+            new_md2: 0,
+            new_md2_delay: 0,
             aaddr: 0,
             maddr: 0,
             adata: 0,
@@ -315,6 +327,7 @@ impl Micro {
             memstart: false,
             memop: false,
             write_out: None,
+            write_ns: 0,
             write_va: None,
             write_pdl: None,
             redirect: None,
@@ -384,7 +397,11 @@ impl Micro {
             .pdl_write
             .map(|(adr, word)| (if adr == PDL_AT_INDEX { self.m.pdl_index } else { adr }, word));
         crate::machine::Pending {
-            md: (self.new_md_delay > 0).then_some(self.new_md),
+            md: if self.new_md2_delay > 0 {
+                Some(self.new_md2)
+            } else {
+                (self.new_md_delay > 0).then_some(self.new_md)
+            },
             pdl,
             spc: self.spc_write,
         }
@@ -907,7 +924,7 @@ impl Micro {
         }
         self.m.macro_dispatch.m31 = self.d_m31.take();
         if let Some((physical, WriteOut::Started)) = self.write_out {
-            if self.next_microcycle_holds_the_write() {
+            if self.next_microcycle_holds_the_write() || self.register_write_waits(physical) {
                 self.write_out = Some((physical, WriteOut::Next));
             } else {
                 self.write_goes_out();
@@ -1237,12 +1254,20 @@ impl Micro {
         self.land_map_write();
     }
 
-    /// A read's word lands in `MD` two microcycles after its start.
+    /// A read's word lands in `MD` two microcycles after its start; a
+    /// second read's after it, two microcycles after its own.
     fn land_md(&mut self) {
         if self.new_md_delay > 0 {
             self.new_md_delay -= 1;
             if self.new_md_delay == 0 {
                 self.m.md = self.new_md;
+            }
+        }
+        if self.new_md2_delay > 0 {
+            self.new_md2_delay -= 1;
+            if self.new_md_delay == 0 {
+                (self.new_md, self.new_md_delay) = (self.new_md2, self.new_md2_delay);
+                self.new_md2_delay = 0;
             }
         }
     }
@@ -1418,8 +1443,11 @@ impl Micro {
     /// board it is not. QUUX holds the second start until the first has
     /// gone out, so a first write has gone out already, with `MD` as it
     /// stood before the second start's microcycle
-    /// ([`Micro::next_microcycle_holds_the_write`]), and both land
-    /// (`a_start_right_after_a_start_waits_for_it`,
+    /// ([`Micro::next_microcycle_holds_the_write`]), and a first read's
+    /// word is kept beside the second's, each landing two microcycles
+    /// after its start ([`Micro::pend_md`]): both land
+    /// (`row_a_read_start_right_after_a_read_start_both_land`,
+    /// `tests/revision_15_rtl.rs`; `a_start_right_after_a_start_waits_for_it`,
     /// `tests/quux_device_registers.rs`; `a_start_held_behind_a_write_loads_md_after_the_write`
     /// and `a_fetch_right_after_a_write_waits_for_it`,
     /// `tests/quux_memory_port.rs`).
@@ -1430,6 +1458,7 @@ impl Micro {
             self.write_va = None;
             self.write_pdl = None;
             self.new_md_delay = 0;
+            self.new_md2_delay = 0;
         } else if self.memstart {
             self.write_goes_out();
         }
@@ -1507,6 +1536,7 @@ impl Micro {
                 WriteOut::Started
             };
             self.write_out = Some((t.physical, when));
+            self.write_ns = self.m.ns;
             match self.redirect.take() {
                 // Inside the buffer: no memory cycle and no write-back.
                 Some(crate::tlb::Redirect::Inside(i)) => self.write_pdl = Some(i),
@@ -1530,8 +1560,39 @@ impl Micro {
             if let Some(va) = self.write_va.take() {
                 self.m.write_back(va, self.lvmo, true, md);
             }
+            // Under neutral time the device sees the write at its start's
+            // instant, as `rtl`'s does (MP2b rulings 1, Q12(c)).
+            let keep = self.m.ns;
+            if self.neutral && self.m.geometry.paged() {
+                self.m.ns = self.write_ns;
+            }
             self.m.bus_write(physical, md);
+            self.m.ns = keep;
         }
+    }
+
+    /// Whether a write started in this microcycle to the bus address
+    /// `physical` waits for the end of the next though that one leaves
+    /// `MD` alone: on revision 15, a write to a device register (MP2b
+    /// rulings 2, Q1). The cycle goes out at the edge ending the microcycle
+    /// after its start, so the word right after the start never sees what
+    /// the write does to a device, an interrupt level it raises among it;
+    /// the next word that tests the interrupt does. A start in that
+    /// microcycle or a halt sends it out sooner. Main memory keeps the
+    /// shortcut, where nothing can see the difference. Revision 14 under
+    /// neutral time takes the rule too, the measurement aid that compares
+    /// it with the pipeline; its own runs keep their traces.
+    fn register_write_waits(&self, physical: u32) -> bool {
+        (self.m.geometry.extended() || (self.neutral && self.m.geometry.paged()))
+            && crate::busint::decode_quux_14(physical, self.m.main.len(), self.m.tv.buffer_words())
+                == crate::busint::Responder::Device
+    }
+
+    /// **The time-neutral harness's boundary** (MP2b rulings 2, Q1): a
+    /// write still waiting goes out, as at a halt, so that the state is
+    /// the one the pipeline's drain leaves.
+    pub fn send_out_waiting_write(&mut self) {
+        self.write_goes_out();
     }
 
     /// Whether a write started in this microcycle waits for the next: it
@@ -1593,8 +1654,8 @@ impl Micro {
             if self.m.geometry.paged() {
                 self.m.write_back(self.m.vma as u32, self.lvmo, false, 0);
             }
-            self.new_md = self.read(self.m.vma as u32);
-            self.new_md_delay = 2;
+            let w = self.read(self.m.vma as u32);
+            self.pend_md(w);
         } else {
             self.m.vmaok = false;
         }
@@ -1608,8 +1669,8 @@ impl Micro {
         let va = self.m.vma as u32;
         if let Some(crate::tlb::Redirect::Inside(i)) = self.redirect.take() {
             self.m.vmaok = true;
-            self.new_md = self.m.pdl[i as usize];
-            self.new_md_delay = 2;
+            let w = self.m.pdl[i as usize];
+            self.pend_md(w);
             return;
         }
         let e = self.lvmo;
@@ -1619,8 +1680,19 @@ impl Micro {
         }
         self.m.write_back(va, e, false, 0);
         self.m.vmaok = true;
-        self.new_md = self.m.bus_read(crate::tlb::bus_address(va, e));
-        self.new_md_delay = 2;
+        let w = self.m.bus_read(crate::tlb::bus_address(va, e));
+        self.pend_md(w);
+    }
+
+    /// A read's word, two microcycles from now: the second pending word on
+    /// QUUX when a first is still on its way, where the CADR's board loses
+    /// the first ([`Micro::start_cycle`]).
+    fn pend_md(&mut self, w: Word) {
+        if self.new_md_delay > 0 && self.m.geometry.machine_id.is_some() {
+            (self.new_md2, self.new_md2_delay) = (w, 2);
+        } else {
+            (self.new_md, self.new_md_delay) = (w, 2);
+        }
     }
 
     /// How many memory cycles this engine has started.
@@ -2286,6 +2358,8 @@ impl Engine for Micro {
             oa_shadow,
             new_md,
             new_md_delay,
+            new_md2,
+            new_md2_delay,
             aaddr,
             maddr,
             adata,
@@ -2320,6 +2394,7 @@ impl Engine for Micro {
             memstart,
             memop,
             write_out,
+            write_ns: _,
             write_va,
             write_pdl,
             // Set and used within one start.
@@ -2355,7 +2430,13 @@ impl Engine for Micro {
         w.u64(*oa_low);
         w.u64(*oa_high);
         w.word(*new_md);
-        w.u8(*new_md_delay);
+        // A second read's word, rare, flagged in the delay's `<7>` and
+        // written after it: a checkpoint without one is as before.
+        w.u8(*new_md_delay | if *new_md2_delay > 0 { 0o200 } else { 0 });
+        if *new_md2_delay > 0 {
+            w.word(*new_md2);
+            w.u8(*new_md2_delay);
+        }
         w.u16(*aaddr);
         w.u8(*maddr);
         w.word(*adata);
@@ -2431,7 +2512,10 @@ impl Engine for Micro {
         self.oa_low = r.u64()?;
         self.oa_high = r.u64()?;
         self.new_md = r.word()?;
-        self.new_md_delay = r.u8()?;
+        let delay = r.u8()?;
+        self.new_md_delay = delay & 0o177;
+        (self.new_md2, self.new_md2_delay) =
+            if delay & 0o200 != 0 { (r.word()?, r.u8()?) } else { (0, 0) };
         self.aaddr = r.u16()?;
         self.maddr = r.u8()?;
         self.adata = r.word()?;
@@ -2711,6 +2795,10 @@ impl Engine for Micro {
     /// registered flags, and no `JCOND` or `PCS` outside a jump.  `IR` and
     /// `PC` are the instruction waiting to execute and the address after
     /// it, which is what `rtl` holds in `IR` and `PC` between microcycles.
+    fn settle_for_harness(&mut self) {
+        self.send_out_waiting_write();
+    }
+
     fn spy_read(&self, eadr: u8) -> u16 {
         let half = |v: u64, k: u8| (v >> (16 * k as u32)) as u16;
         match eadr {

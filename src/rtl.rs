@@ -2358,8 +2358,9 @@ impl Rtl {
     /// `tests/chip.rs`). **QUUX holds it** instead, a `-WAIT` term of its
     /// own, `MEMSTART AND MEMOP`: the first cycle goes out at the next
     /// master clock edge, `MBUSY.SYNC` then holds the second start until
-    /// that cycle ends, and both land as written, as `micro` has them
-    /// (`a_start_right_after_a_start_waits_for_it`,
+    /// that cycle ends, and both land as written, as `micro` has them,
+    /// a read's word with the second's kept beside it (`Micro::pend_md`;
+    /// `a_start_right_after_a_start_waits_for_it`,
     /// `tests/quux_device_registers.rs`). **Unverified** that muir-fpga's
     /// fabric holds it the same way.
     fn stall(&self, r: &Read) -> Option<Stall> {

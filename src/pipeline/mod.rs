@@ -240,6 +240,12 @@ pub struct Meters {
     /// Clocks run, and microcycles retired from WB.
     pub clocks: u64,
     pub retired: u64,
+    /// Starts right after a start, by the two starts' kinds, each a read,
+    /// a write or an instruction fetch, in that order: a start in the word
+    /// right after the word that made the first, or two in one word (MP2b
+    /// rulings 2, Q2's measurement). A read after a read is a site that
+    /// loses a read on the CADR.
+    pub consecutive_starts: [[u64; 3]; 3],
     /// Bubbles: words squashed on a wrong prediction, by kind (a
     /// conditional jump, a dispatch, other words EX resolves), and by the
     /// late squash.
@@ -332,8 +338,12 @@ pub struct Pipeline {
     /// single-edge machine's after that microcycle. The harness reads it and
     /// the run goes on at the next clock.
     pub boundary_at: Option<u64>,
-    /// Halted at a boundary.
+    /// Halted at a boundary, or at the harness's action point.
     boundary_halt: bool,
+    action_halt: bool,
+    /// The harness's action point: the microcycle to halt after
+    /// ([`Engine::stop_after_microcycle`]).
+    boundary_mc: Option<u64>,
     /// The address of the microcycle counted last, `None` for a nopped
     /// one: what [`Pipeline::executed`] says.
     last_counted: Option<u16>,
@@ -420,6 +430,9 @@ pub enum Mutation {
     SweepMissesASet,
     /// Block-disk's transfer leaves the sets of the words it writes.
     NoClearSet,
+    /// A read's word that lands while a start is held behind the read is
+    /// dropped, as `micro` dropped it.
+    FirstReadDropped,
     /// A delay slot N inhibits counted twice.
     NopCountedTwice,
     /// The OA-REG-HIGH hold removed, or one clock short.
@@ -479,6 +492,8 @@ impl Pipeline {
             tlb_sweep_until: 0,
             boundary_at: None,
             boundary_halt: false,
+            action_halt: false,
+            boundary_mc: None,
             last_counted: None,
             mutation: Mutation::None,
             trace: None,
@@ -580,6 +595,15 @@ impl Engine for Pipeline {
 
     fn spy_read(&self, eadr: u8) -> u16 {
         self.spy_15(eadr)
+    }
+
+    fn stop_after_microcycle(&mut self, mc: u64) {
+        // A microcycle already committed is past stopping after: the next.
+        self.boundary_mc = Some(mc.max(self.committed + 1));
+    }
+
+    fn stands_between_microcycles(&self) -> bool {
+        self.is_halted() && (self.action_halt || self.boundary_halt)
     }
 
     fn machine(&self) -> &Machine {

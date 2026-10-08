@@ -726,6 +726,15 @@ impl<E: Executes> Engine for Checked<E> {
     fn lc(&self) -> u32 {
         self.engine.lc()
     }
+    fn stop_after_microcycle(&mut self, mc: u64) {
+        self.engine.stop_after_microcycle(mc)
+    }
+    fn stands_between_microcycles(&self) -> bool {
+        self.engine.stands_between_microcycles()
+    }
+    fn settle_for_harness(&mut self) {
+        self.engine.settle_for_harness()
+    }
     fn spy_read(&self, eadr: u8) -> u16 {
         self.engine.spy_read(eadr)
     }

@@ -204,6 +204,10 @@ trait Profiled: Engine {
     }
     /// A workload's end: under the time-neutral harness, its whole digest.
     fn workload_end(&mut self, _name: &str) {}
+    /// Lines of the engine's own for the whole run's account.
+    fn run_lines(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 impl Profiled for Micro {
@@ -242,6 +246,9 @@ impl<E: Profiled + support::macro_dispatch::Executes> Profiled
     fn workload_end(&mut self, name: &str) {
         self.engine.workload_end(name)
     }
+    fn run_lines(&self) -> Vec<String> {
+        self.engine.run_lines()
+    }
 }
 
 /// Revision 15's `rtl`, its pipeline: no stall of its own in the bus's
@@ -257,6 +264,15 @@ impl Profiled for Pipeline {
         let c = &self.port.cache;
         let cycles = self.port.meters.writes + self.port.meters.fills;
         Some([0, cycles, Span::of_pipeline(self).ns, c.hits, c.misses])
+    }
+    fn run_lines(&self) -> Vec<String> {
+        let c = &self.meters.consecutive_starts;
+        let kinds = ["read", "write", "fetch"];
+        let pairs: Vec<String> = (0..3)
+            .flat_map(|a| (0..3).map(move |b| (a, b)))
+            .map(|(a, b)| format!("{}->{} {}", kinds[a], kinds[b], c[a][b]))
+            .collect();
+        vec![format!("starts right after a start: {}", pairs.join(", "))]
     }
 }
 
@@ -283,6 +299,9 @@ impl<E: Profiled + Neutral + support::macro_dispatch::Executes> Profiled for Dig
     }
     fn workload_end(&mut self, name: &str) {
         self.end_of(name);
+    }
+    fn run_lines(&self) -> Vec<String> {
+        self.engine.run_lines()
     }
 }
 
@@ -920,6 +939,7 @@ fn main() {
             panic!("MUIR_MICROCYCLE_NS={v}: the period in ns, 5 to 40 in steps of 0.5")
         })
     });
+    println!("{}", configuration(&engine, geometry, period, neutral));
     match engine.as_str() {
         "rtl" if geometry.paged() => {
             // Revisions 14 and 15 on `rtl` are the pipeline, 14 as a
@@ -1042,6 +1062,66 @@ fn main() {
             }
         }
     }
+}
+
+/// The run's configuration in a line, at its head: the engine and the
+/// machine, and every setting that changes what runs (MP2b rulings 2, F3).
+fn configuration(
+    engine: &str,
+    geometry: muir::machine::Geometry,
+    period: Option<u64>,
+    neutral: bool,
+) -> String {
+    let env = |k: &str| std::env::var(k).unwrap_or_else(|_| "unset".into());
+    let machine = match geometry.revision() {
+        _ if geometry == muir::machine::Geometry::CADR => "the CADR".to_string(),
+        Some(r) => {
+            format!("QUUX revision {r}, a PDL buffer of {} words", geometry.pdl_mask() as u32 + 1)
+        }
+        None => "QUUX".to_string(),
+    };
+    let pipeline = engine == "rtl" && geometry.paged();
+    let clock = if pipeline || (geometry.paged() && neutral) {
+        let p = period.unwrap_or(if geometry.extended() {
+            muir::clock::PERIOD_15
+        } else {
+            muir::pipeline::PERIOD_14
+        });
+        if geometry.extended() {
+            format!("{} ns", muir::clock::microcycle_ns_text(p))
+        } else {
+            format!("{p} ns")
+        }
+    } else {
+        format!("the engine's own (MUIR_SYNC_TICKS {})", env("MUIR_SYNC_TICKS"))
+    };
+    let prefetch = if pipeline {
+        "none: the pipeline's fused returns use no prefetched word, as with MUIR_PREFETCH=off"
+            .to_string()
+    } else if engine == "rtl" && geometry != muir::machine::Geometry::CADR {
+        format!("MUIR_PREFETCH {}, page when unset", env("MUIR_PREFETCH"))
+    } else {
+        "none".to_string()
+    };
+    format!(
+        "configuration: engine {engine}; machine {machine}; band {}; PROM {}; microcode {}; main memory {}; period {clock}; memory timing {}; cache {}; prefetch {prefetch}; MUIR_H8A {}; time-neutral {neutral}; RTC {}",
+        env("MUIR_BAND"),
+        std::env::var("MUIR_PROM").unwrap_or_else(|_| "built in".into()),
+        std::env::var("MUIR_UCODE").unwrap_or_else(|_| "the pack's".into()),
+        std::env::var("MUIR_MAIN_MEMORY_SIZE").unwrap_or_else(|_| "2MW".into()),
+        std::env::var("MUIR_MEMORY_NS").unwrap_or_else(|_| if pipeline {
+            "kria".into()
+        } else {
+            "default".into()
+        }),
+        std::env::var("MUIR_CACHE").unwrap_or_else(|_| "default".into()),
+        env("MUIR_H8A"),
+        std::env::var("MUIR_RTC").unwrap_or_else(|_| if neutral {
+            "counted from the fixed date".into()
+        } else {
+            "the host's".into()
+        }),
+    )
 }
 
 /// `e` under the time-neutral harness: its digests at every 65,536th
@@ -1397,5 +1477,8 @@ fn measure<E: Profiled>(
     }
     if let Some(c) = e.prefetch_counts() {
         println!("   {}", prefetch_line(&c));
+    }
+    for line in e.run_lines() {
+        println!("== the whole run: {line}");
     }
 }
