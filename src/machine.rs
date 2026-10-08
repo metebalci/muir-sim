@@ -2824,6 +2824,13 @@ pub const WINDOW_13: u32 = 0o1760000000;
 /// device's buffers carries: `005`, the unboxed fixnum's (G1 §2.6).
 pub const UNBOXED_TAG: Word = 0o005 << 32;
 
+/// **The micro stack's word, `SPC<18:0>`**: page SPCW's `SPCW0`-`SPCW18`
+/// into the 82S21s on page SPC, which give `SPCO0`-`SPCO18` back, with the
+/// parity bit `SPCWPAR` beside them and nothing above (`data/CADR.netlist`).
+/// QUUX keeps the width. A data push (destination 15) stores these bits of
+/// its word, and every read of the stack returns them.
+pub const SPC_WORD: u32 = 0o1777777;
+
 /// Revision 13's invalid level-2 block, whose 32 entries the software
 /// keeps 0: what level 1 reads for an address with `<31:28>` not zero
 /// (A1.7; today's `A-LEVEL-1-MAP-INVALID`, `77`).

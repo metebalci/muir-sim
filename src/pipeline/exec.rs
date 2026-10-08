@@ -418,7 +418,8 @@ impl Pipeline {
             0o12 => self.x.pdl_w = Some((PdlAt::Index, word)),
             0o13 => self.m.pdl_index = data as u16 & self.m.geometry.pdl_mask(),
             0o14 => self.m.pdl_pointer = data as u16 & self.m.geometry.pdl_mask(),
-            0o15 => self.push_spc(data),
+            // The stack keeps `SPC<18:0>` of the word, as `micro`.
+            0o15 => self.push_spc(data & crate::machine::SPC_WORD),
             0o16 => {
                 self.x.oa_low = data as u64 & 0o377777777;
                 if !self.m.geometry.extended() {

@@ -4924,3 +4924,44 @@ fn row_a_cached_frame_buffer_word_written_reads_back_as_the_window_holds_it() {
     assert_eq!(e.machine().mmem[0o26], muir::machine::UNBOXED_TAG | 0o1234, "the pipeline's hit");
     same(&p);
 }
+
+/// **A data push keeps the stack's 19 bits** (the CADR's `SPCW<18:0>` into
+/// the 82S21s on page SPC, `SPCO<18:0>` out; revision 15 keeps the width):
+/// a word with bits above `<18>` pushed by destination 15, then read back by
+/// source 1, which reads the pointer and `SPC<18:0>`. The stack holds the
+/// word's 19 bits on `micro` and the pipeline, and so does a checkpoint of
+/// each, loaded again. It held all 32, a field the read never returns.
+#[test]
+fn a_data_push_keeps_the_stack_s_19_bits() {
+    let mut p = Prog::default();
+    let w: Word = 0o37766554321;
+    let k = p.k(w);
+    p.op(ALU | SETA | a_src(k) | fd(0o15));
+    p.fill(2);
+    p.op(ALU | SETM | src(0o1) | m_dest(0o26));
+    p.stop();
+    let low = w & 0o1777777;
+    let u = micro(&p);
+    let mut e = pipeline(&p);
+    e.halt_between_microcycles().unwrap();
+    let body = |save: &dyn Fn(&mut muir::checkpoint::Writer)| {
+        let mut wr = muir::checkpoint::Writer::new();
+        save(&mut wr);
+        wr.finish()
+    };
+    let (ub, eb) = (body(&|wr| u.save(wr)), body(&|wr| e.save(wr)));
+    let mut v = Micro::new(machine(&p, REV15));
+    v.load(&mut muir::checkpoint::Reader::for_word_bits(&ub, 40)).unwrap();
+    let mut f = Pipeline::new(machine(&p, REV15));
+    f.load(&mut muir::checkpoint::Reader::for_word_bits(&eb, 40)).unwrap();
+    for (what, m) in [
+        ("micro", u.machine()),
+        ("the pipeline", e.machine()),
+        ("micro's checkpoint", v.machine()),
+        ("the pipeline's checkpoint", f.machine()),
+    ] {
+        let ptr = m.spcptr as usize;
+        assert_eq!(m.mmem[0o26] & 0o1777777, low, "{what}: the read");
+        assert_eq!(u64::from(m.spc[ptr]), low, "{what}: the stack's word");
+    }
+}

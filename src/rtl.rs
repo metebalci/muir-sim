@@ -1524,7 +1524,8 @@ impl Rtl {
         // *registered* `DESTSPC`, over `L` and the *registered* `RETA`. So
         // the word is known before the ALU is, and the pass-around closes no
         // loop.
-        let spcw = if self.destspcd { self.l as u32 & 0o7777777 } else { self.reta as u32 };
+        let spcw =
+            if self.destspcd { self.l as u32 & crate::machine::SPC_WORD } else { self.reta as u32 };
         let spco = self.m.spc[self.m.spcptr as usize];
         let spc = if self.spushd { spcw } else { spco };
 
@@ -2028,7 +2029,7 @@ impl Rtl {
         // `SPCPTR0..4` with no offset, and `-SWPA` is `NAND(WP4C, SPUSHD)`
         // at 4E30.
         if self.spushd {
-            self.m.spc[self.m.spcptr as usize] = r.spcw & 0o7777777;
+            self.m.spc[self.m.spcptr as usize] = r.spcw & crate::machine::SPC_WORD;
         }
     }
 

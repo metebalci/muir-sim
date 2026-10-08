@@ -1391,7 +1391,8 @@ impl Micro {
             0o13 => self.m.pdl_index = data as u16 & self.m.geometry.pdl_mask(),
             0o14 => self.m.pdl_pointer = data as u16 & self.m.geometry.pdl_mask(),
             // SPC, push
-            0o15 => self.push_spc(data),
+            // The stack keeps `SPC<18:0>` of the word (`SPC_WORD`).
+            0o15 => self.push_spc(data & crate::machine::SPC_WORD),
             // IMOD<25:0> and IMOD<47:26>: the OA register merge into the
             // next instruction.
             // Revision 15's are OA-REG-LOW and OA-REG-HIGH, loaded at the

@@ -1585,3 +1585,29 @@ fn a_write_i_mem_costs_its_nopped_microcycles_on_micro_as_on_the_board() {
         }
     }
 }
+
+/// **A data push keeps the CADR's 19 bits of the stack**: `SPCW<18:0>` into
+/// the 82S21s on page SPC (`data/CADR.netlist`: `SPCW0`-`SPCW18` and
+/// `SPCWPAR`, the parity bit, and nothing above), so a word pushed by
+/// destination 15 with bits above `<18>` leaves its 19 bits in the stack, on
+/// `micro` as on `rtl`, and source 1 reads them back. `micro` kept all 32
+/// bits and `rtl` 21.
+#[test]
+fn a_data_push_keeps_the_cadr_s_19_bits_of_the_stack() {
+    let prom = [
+        filler(),
+        Insn::new(ALU | SETM | m_src(2) | fdest(0o15)),
+        filler(),
+        filler(),
+        Insn::new(ALU | SETM | src(0o1) | m_dest(0o26)),
+        Insn::new(JUMP | target(5) | ALWAYS | N),
+        filler(),
+    ];
+    let w: u64 = 0o37766554321;
+    let (e, r) = both(&prom, &|m| m.mmem[2] = w, 20);
+    for (what, m) in [("micro", e.machine()), ("rtl", r.machine())] {
+        let ptr = m.spcptr as usize;
+        assert_eq!(u64::from(m.spc[ptr]), w & 0o1777777, "{what}: the stack's word");
+        assert_eq!(m.mmem[0o26] & 0o1777777, w & 0o1777777, "{what}: the read");
+    }
+}
