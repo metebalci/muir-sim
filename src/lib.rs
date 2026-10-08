@@ -42,6 +42,7 @@ pub mod micro;
 pub mod muldiv;
 pub mod netlist;
 pub mod part;
+pub mod pipeline;
 pub mod prom;
 pub mod prompt;
 pub mod quux_input;

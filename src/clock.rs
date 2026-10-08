@@ -161,6 +161,99 @@ pub enum TimingModel {
     Sync { cycle_ticks: u8, ilong_ticks: u8 },
 }
 
+/// **The machine's unit of time, and the grid its devices act on**: what
+/// [`crate::machine::Machine::ns`] counts. The CADR and QUUX revisions 13
+/// and 14 count nanoseconds with no grid of the machine's own
+/// ([`TimeBase::NS`]); their engines keep their own grids. **QUUX revision
+/// 15** counts units of 0.5 ns, feature word 25's unit, and its clock's
+/// period `period` is a whole number of them, so that every period
+/// `--microcycle-ns` admits is exact and clock k ends at the instant
+/// k·`period` (contract G3 revision 15, A15b.12; its MP2b ruling Q1). A
+/// duration in whole nanoseconds doubles exactly; a microsecond is 2,000
+/// units and a second 2·10^9.
+///
+/// The two rules of the contract's §9 follow from that. A duration a
+/// device starts at a clock ends at the first clock at or after its exact
+/// end, so it is rounded up to clocks once, from its own start, never per
+/// term or via whole nanoseconds ([`TimeBase::grid`]); and a true edge ---
+/// a timer's rise, a microsecond, a second of the real-time clock --- is
+/// acted on at the first clock at or after it, which the engines give by
+/// reading every device at a clock's instant (MP2b ruling Q2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimeBase {
+    /// Units a nanosecond: 1, or 2 on revision 15.
+    pub per_ns: u64,
+    /// The clock's period in units, revision 15's; 0 where the machine has
+    /// no grid of its own.
+    pub period: u64,
+}
+
+impl TimeBase {
+    /// Nanoseconds, with no grid: the CADR's and revisions 13 and 14's.
+    pub const NS: TimeBase = TimeBase { per_ns: 1, period: 0 };
+
+    /// Revision 15's: units of 0.5 ns, its clock `period` of them.
+    pub const fn half_ns(period: u64) -> TimeBase {
+        TimeBase { per_ns: 2, period }
+    }
+
+    /// Units a microsecond.
+    pub fn per_us(self) -> u64 {
+        1_000 * self.per_ns
+    }
+
+    /// Units a second.
+    pub fn per_s(self) -> u64 {
+        1_000_000_000 * self.per_ns
+    }
+
+    /// `ns` whole nanoseconds, in units.
+    pub fn ns(self, ns: u64) -> u64 {
+        ns * self.per_ns
+    }
+
+    /// The first clock's instant at or after `t`: `t` itself with no grid.
+    pub fn grid(self, t: u64) -> u64 {
+        if self.period <= 1 { t } else { t.div_ceil(self.period) * self.period }
+    }
+
+    /// Clocks of the period in `units`, rounded up: 0 with no grid.
+    pub fn clocks(self, units: u64) -> u64 {
+        if self.period == 0 { 0 } else { units.div_ceil(self.period) }
+    }
+}
+
+/// **Revision 15's period when no flag says**, in units of 0.5 ns: 17, the
+/// Kria KR260's 8.5 ns, the period its stage fit closes at until its
+/// binding fit sets one (contract G3 revision 15, §12.1; MP2b ruling Q14).
+pub const PERIOD_15: u64 = 17;
+
+/// `--microcycle-ns`'s range in units of 0.5 ns: 5 to 40 ns (A15b.12).
+pub const PERIOD_15_RANGE: std::ops::RangeInclusive<u64> = 10..=80;
+
+/// The period `--microcycle-ns <n>` names, in units of 0.5 ns: a whole
+/// number of ns, or one with `.5` (`.0` allowed), from 5 to 40 (MP2b
+/// ruling Q15). Anything else is `None`.
+pub fn parse_microcycle_ns(text: &str) -> Option<u64> {
+    let (whole, half) = match text.split_once('.') {
+        None => (text, 0),
+        Some((w, "0")) => (w, 0),
+        Some((w, "5")) => (w, 1),
+        Some(_) => return None,
+    };
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let units = whole.parse::<u64>().ok()?.checked_mul(2)? + half;
+    PERIOD_15_RANGE.contains(&units).then_some(units)
+}
+
+/// A period in units of 0.5 ns as `--microcycle-ns` writes it: `8.5`,
+/// `40`.
+pub fn microcycle_ns_text(units: u64) -> String {
+    if units.is_multiple_of(2) { format!("{}", units / 2) } else { format!("{}.5", units / 2) }
+}
+
 /// `sync`'s microcycle when `--sync-cycle-ticks` does not say: 4 ticks,
 /// 40 ns, the DE25-Nano's. The Arty Z7-20 runs revision 13 at 5: its
 /// two-level map through the memory path's decode misses 4 ticks there by

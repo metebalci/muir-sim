@@ -151,9 +151,24 @@ pub struct Micro {
     pub memory_cycle_ns: u64,
     /// QUUX's microcycle, which has no delay lines: `sync`'s K ticks of
     /// 10 ns, in nanoseconds, in place of the speed's period; 0 on the
-    /// CADR. [`Micro::new`] gives a QUUX machine four ticks, and `muir`
-    /// sets `--sync-cycle-ticks`'.
+    /// CADR and on revision 15, whose clock is [`Micro::period`].
+    /// [`Micro::new`] gives revisions 13 and 14 four ticks, and `muir` sets
+    /// `--sync-cycle-ticks`'.
     pub sync_cycle_ns: u64,
+    /// **Revision 15's clock period**, in its units of 0.5 ns
+    /// ([`crate::clock::TimeBase`]): the microcycle, and feature word 25.
+    /// [`Micro::new`] gives the Kria KR260's 8.5 ns, and `muir` sets
+    /// `--microcycle-ns`' (contract G3 revision 15, §12.1; MP2b rulings Q1,
+    /// Q14, Q15). 0 on every other machine.
+    pub period: u64,
+    /// **Neutral time** (revision 15, MP2b ruling Q12): the machine's time
+    /// is [`Machine::cycles`] times the period and nothing else, so that
+    /// every device and the interrupts see the same time `rtl` gives them
+    /// under the time-neutral harness. The memory cycle's charge, the
+    /// divider's and the multiplier's holds, the nopped microcycles of a
+    /// control-store write and a halted machine's steps take none.
+    /// `MUIR_TIME_NEUTRAL=1` in the harnesses.
+    pub neutral: bool,
     /// Memory cycles started, for [`Micro::memory_cycles`].
     memory_cycles: u64,
     /// Microcycles the board spends nopped after a control-store write,
@@ -243,7 +258,8 @@ pub struct Micro {
 impl Micro {
     pub fn new(m: Machine) -> Self {
         // QUUX drops the delay lines: four ticks of 10 ns a microcycle.
-        let sync_cycle_ns = if m.geometry.machine_id.is_some() {
+        let period = if m.geometry.extended() { crate::clock::PERIOD_15 } else { 0 };
+        let sync_cycle_ns = if m.geometry.machine_id.is_some() && !m.geometry.extended() {
             crate::clock::SYNC_CYCLE_TICKS as u64 * crate::clock::GRID_NS
         } else {
             0
@@ -286,6 +302,8 @@ impl Micro {
             speed_a: Speed::ExtraSlow,
             memory_cycle_ns: MEMORY_ACCESS_NS,
             sync_cycle_ns,
+            period,
+            neutral: false,
             memory_cycles: 0,
             nopped: 0,
             srun: false,
@@ -314,10 +332,31 @@ impl Micro {
         }
     }
 
-    /// A microcycle's length: QUUX's `sync` period, or on the CADR the
-    /// speed bits' and `ILONG`'s.
+    /// A microcycle's length: revision 15's period, in its units; QUUX's
+    /// `sync` period; or on the CADR the speed bits' and `ILONG`'s.
     fn cycle_ns(&self, ilong: bool) -> u64 {
-        if self.sync_cycle_ns > 0 { self.sync_cycle_ns } else { self.speed.cycle_ns(ilong) as u64 }
+        if self.m.geometry.extended() {
+            self.period
+        } else if self.sync_cycle_ns > 0 {
+            self.sync_cycle_ns
+        } else {
+            self.speed.cycle_ns(ilong) as u64
+        }
+    }
+
+    /// What a memory cycle charges the clock: [`Micro::memory_cycle_ns`],
+    /// and on revision 15 that many nanoseconds in its units rounded up to
+    /// whole periods, so that every instant stays a clock's (MP2b ruling
+    /// Q1), and nothing under neutral time.
+    fn memory_charge(&self) -> u64 {
+        if !self.m.geometry.extended() {
+            return self.memory_cycle_ns;
+        }
+        if self.neutral {
+            return 0;
+        }
+        let units = self.m.time_base().ns(self.memory_cycle_ns);
+        units.div_ceil(self.period.max(1)) * self.period
     }
 
     /// The control store address executed in the last [`Engine::step`], or
@@ -325,6 +364,25 @@ impl Micro {
     /// board and retires nothing, so it is not an executed instruction.
     pub fn executed(&self) -> Option<u16> {
         self.executed
+    }
+
+    /// The machine with what the last microcycles handed the next ones
+    /// landed: the PDL buffer's and the SPC stack's writes and a read's
+    /// word in `MD`. The state between two microcycles, which a drained
+    /// pipeline's is compared with.
+    pub fn landed(&self) -> crate::machine::Machine {
+        let mut m = self.m.clone();
+        if self.new_md_delay > 0 {
+            m.md = self.new_md;
+        }
+        if let Some((adr, word)) = self.pdl_write {
+            let adr = if adr == PDL_AT_INDEX { m.pdl_index } else { adr };
+            m.pdl[adr as usize] = word;
+        }
+        if let Some((ptr, word)) = self.spc_write {
+            m.spc[ptr as usize] = word;
+        }
+        m
     }
 
     /// The OA registers' words, OA-REG-LOW in `IR<25:0>`'s positions and
@@ -349,7 +407,7 @@ impl Micro {
         // it.  What this engine's clock is worth is said above: the
         // machine's periods and `MEMORY_ACCESS_NS`, not the measured
         // waits, so the board's clock runs a little fast against `rtl`'s.
-        self.m.ioboard.advance(self.m.ns);
+        self.m.ioboard.advance(self.m.device_ns());
         // QUUX's file device completes what is due at this edge, before
         // the next microcycle begins (contract Q9).
         self.m.advance_file_device();
@@ -1060,7 +1118,7 @@ impl Micro {
                 self.m.geometry.machine_id.unwrap_or(!0).into()
             }
             // QUUX's microsecond clock (`machine::Timers`).
-            0o15 if self.m.geometry.tick => crate::machine::Timers::microseconds(self.m.ns).into(),
+            0o15 if self.m.geometry.tick => self.m.microseconds().into(),
             // Functional sources 0o15, 0o16 and 0o17: the 74S138 for the
             // upper eight has those three outputs unconnected, so no part
             // drives the M bus and an undriven TTL bus reads high, as `chip`
@@ -1392,7 +1450,7 @@ impl Micro {
         }
         self.wrcyc = write;
         if !lost {
-            self.m.ns += self.memory_cycle_ns;
+            self.m.ns += self.memory_charge();
             self.memory_cycles += 1;
         }
     }
@@ -2242,6 +2300,11 @@ impl Engine for Micro {
             memory_cycle_ns,
             // The flags set it again on a resume, as the timing model is.
             sync_cycle_ns: _,
+            // Revision 15's, kept below, so that a resume at another
+            // period is refused (MP2b ruling Q16).
+            period,
+            // A run setting.
+            neutral: _,
             memory_cycles,
             nopped,
             srun,
@@ -2340,6 +2403,7 @@ impl Engine for Micro {
         if m.geometry.extended() {
             w.bool(oa_shadow[0]);
             w.bool(oa_shadow[1]);
+            w.u64(*period);
         }
     }
 
@@ -2412,14 +2476,25 @@ impl Engine for Micro {
         }
         if self.m.geometry.extended() {
             self.oa_shadow = [r.bool()?, r.bool()?];
+            let period = r.u64()?;
+            if period != self.period {
+                return Err(crate::checkpoint::bad(format!(
+                    "a period of {} ns, and this run is at {} ns: --microcycle-ns {}",
+                    crate::clock::microcycle_ns_text(period),
+                    crate::clock::microcycle_ns_text(self.period),
+                    crate::clock::microcycle_ns_text(period)
+                )));
+            }
         }
         Ok(())
     }
 
     fn step(&mut self) -> Result<(), Halt> {
         self.executed = None;
-        // The period feature word 25 reads on revision 15 (A15b.1).
-        self.m.microcycle_ns = self.sync_cycle_ns;
+        // The period feature word 25 reads on revision 15 (A15b.1), and the
+        // grid its devices act on.
+        self.m.period = self.period;
+        let neutral = self.neutral && self.m.geometry.extended();
         // `MACHRUN`, less the statistics halt this engine cannot raise, and
         // with the one `ERR` it can: no parity check, but `HALTED` under
         // `ERRSTOP`.  Halted, a step is one master clock cycle and no
@@ -2432,7 +2507,9 @@ impl Engine for Micro {
             // `MCLK1A` (`Rtl::start_bus_cycle`).
             self.write_goes_out();
             self.speedclk();
-            self.m.ns += self.cycle_ns(false);
+            if !neutral {
+                self.m.ns += self.cycle_ns(false);
+            }
             self.mclk_edge();
             self.opc_clock(true, self.p1_pc);
             return Ok(());
@@ -2445,7 +2522,9 @@ impl Engine for Micro {
         // and `memory_cycle_ns` stands in for it with the band's mean.
         while self.nopped > 0 {
             self.speedclk();
-            self.m.ns += self.cycle_ns(false);
+            if !neutral {
+                self.m.ns += self.cycle_ns(false);
+            }
             self.nopped -= 1;
             self.mclk_edge();
         }
@@ -2465,22 +2544,34 @@ impl Engine for Micro {
         // the count starts there, what `rtl` does for a `DIV` whose read
         // has landed.
         let stepping = self.sstep && !self.ssdone;
-        if self.m.geometry.muldiv
-            && !nopa
-            && !stepping
-            && muldiv::decode(self.p1.raw()) == Some(muldiv::Op::Div)
-        {
+        // Revision 15 counts the divider's and the multiplier's clocks as
+        // its pipeline holds them (MP2b ruling Q3), in periods of its own
+        // time, and nothing under neutral time.
+        let held = match muldiv::decode(self.p1.raw()) {
+            _ if !self.m.geometry.muldiv || nopa || stepping => 0,
+            Some(muldiv::Op::Div) if self.m.geometry.extended() => muldiv::DIV_CLOCKS_15 - 1,
+            Some(muldiv::Op::Mul) if self.m.geometry.extended() => muldiv::MUL_CLOCKS_15 - 1,
+            Some(muldiv::Op::Div) => muldiv::DIV_CYCLES,
+            _ => 0,
+        };
+        if held > 0 && !neutral {
             // The master clock runs through the wait, and a write started
             // in the microcycle before goes out at its first edge, ahead of
             // the `DIV`'s own destination.
             self.write_goes_out();
-            for _ in 0..muldiv::DIV_CYCLES {
+            for _ in 0..held {
                 self.speedclk();
                 self.m.ns += self.cycle_ns(ilong);
                 self.mclk_edge();
             }
         }
-        self.m.ns += self.cycle_ns(ilong);
+        if neutral {
+            // Neutral time: this microcycle's instant, its number times the
+            // period (MP2b ruling Q12).
+            self.m.ns = (self.m.cycles + 1) * self.period;
+        } else {
+            self.m.ns += self.cycle_ns(ilong);
+        }
         self.mclk_edge();
         self.advance_pipeline();
         self.memstart = std::mem::take(&mut self.memop);

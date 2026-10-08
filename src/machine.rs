@@ -820,13 +820,18 @@ pub enum Rtc {
 impl Rtc {
     /// The word 103 reads when the machine's clock is at `ns`.
     pub fn seconds(self, ns: u64) -> u32 {
+        self.seconds_at(ns, 1_000_000_000)
+    }
+
+    /// The word 103 reads when the machine's clock, of `per_s` units a
+    /// second ([`Machine::time_base`]), is at `now`: on revision 15
+    /// `base_ns` and `now` are in its units of 0.5 ns.
+    pub fn seconds_at(self, now: u64, per_s: u64) -> u32 {
         let s = match self {
             Rtc::Host => std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
-            Rtc::Counted { start, base_ns } => {
-                start as u64 + ns.saturating_sub(base_ns) / 1_000_000_000
-            }
+            Rtc::Counted { start, base_ns } => start as u64 + now.saturating_sub(base_ns) / per_s,
         };
         s.min(u32::MAX as u64) as u32
     }
@@ -923,24 +928,26 @@ impl IntervalTimer {
             | if self.interrupt_enable { Self::INTERRUPT_ENABLE } else { 0 }
     }
 
-    /// A deadline a period after `now`, or never if the period is 0.
-    fn after(now: u64, period_us: u32) -> u64 {
-        if period_us == 0 { u64::MAX } else { now + period_us as u64 * 1000 }
+    /// A deadline a period after `now`, or never if the period is 0, in a
+    /// time of `per_us` units a microsecond ([`Machine::time_base`]).
+    fn after(now: u64, period_us: u32, per_us: u64) -> u64 {
+        if period_us == 0 { u64::MAX } else { now + period_us as u64 * per_us }
     }
 
-    /// A write of its control word at `now`.
-    pub fn write_control(&mut self, now: u64, v: u32) {
+    /// A write of its control word at `now`, in a time of `per_us` units a
+    /// microsecond.
+    pub fn write_control(&mut self, now: u64, v: u32, per_us: u64) {
         let on = v & Self::ON != 0;
         if on && !self.on {
             self.one_shot = v & Self::ONE_SHOT != 0;
-            self.deadline_ns = Self::after(now, self.period_us);
+            self.deadline_ns = Self::after(now, self.period_us, per_us);
         } else if v & Self::FLAG != 0 && self.flag(now) {
             self.deadline_ns = if self.one_shot || self.period_us == 0 {
                 // A one-shot counts nothing more once it has risen.
                 u64::MAX
             } else {
                 // The next boundary of the start's grid after `now`.
-                let p = self.period_us as u64 * 1000;
+                let p = self.period_us as u64 * per_us;
                 self.deadline_ns + (now - self.deadline_ns) / p * p + p
             };
         }
@@ -951,11 +958,12 @@ impl IntervalTimer {
         self.interrupt_enable = v & Self::INTERRUPT_ENABLE != 0;
     }
 
-    /// A write of its period word at `now`.
-    pub fn write_period(&mut self, now: u64, v: u32) {
+    /// A write of its period word at `now`, in a time of `per_us` units a
+    /// microsecond.
+    pub fn write_period(&mut self, now: u64, v: u32, per_us: u64) {
         self.period_us = v & 0o77777777;
         if self.on {
-            self.deadline_ns = Self::after(now, self.period_us);
+            self.deadline_ns = Self::after(now, self.period_us, per_us);
         }
     }
 }
@@ -1021,15 +1029,15 @@ impl Timers {
         Some(if period { t.period_us } else { t.status(now) })
     }
 
-    /// A write of register page word `word` at `now`: whether it is a
-    /// timer's.
-    pub fn write(&mut self, word: u32, v: u32, now: u64) -> bool {
+    /// A write of register page word `word` at `now`, in a time of
+    /// `per_us` units a microsecond: whether it is a timer's.
+    pub fn write(&mut self, word: u32, v: u32, now: u64, per_us: u64) -> bool {
         let Some((k, period)) = Self::word(word) else { return false };
         let t = &mut self.timer[k];
         if period {
-            t.write_period(now, v)
+            t.write_period(now, v, per_us)
         } else {
-            t.write_control(now, v)
+            t.write_control(now, v, per_us)
         }
         true
     }
@@ -1305,6 +1313,13 @@ pub struct Machine {
     /// and 60-cycle clocks count it. Microcycles times a constant, kept
     /// inside the board, is not time at any speed but one, and is not
     /// advanced at all by the far end of `chip`'s cables.
+    ///
+    /// **On QUUX revision 15 it counts units of 0.5 ns**, not nanoseconds,
+    /// in both engines ([`Machine::time_base`], contract G3 revision 15's
+    /// MP2b ruling Q1); every instant there is a multiple of the clock's
+    /// period. The name is kept for the CADR's and revisions 13 and 14's
+    /// sake, whose nanoseconds it is; every conversion of a real duration
+    /// into it goes through [`Machine::time_base`].
     pub ns: u64,
     /// QUUX's interval timers, where the geometry has them.
     pub timers: Timers,
@@ -1331,10 +1346,12 @@ pub struct Machine {
     /// reads memory once the processor's writes are out of the buffer). Not
     /// kept in a checkpoint: it is set afresh before it is read.
     pub write_buffer_empty_at: u64,
-    /// The microcycle, the clock's period, in ns, as the engine running
-    /// the machine keeps it: what revision 15's feature word 25 says
-    /// (A15b.1). The engine sets it; not kept in a checkpoint.
-    pub microcycle_ns: u64,
+    /// Revision 15's clock period, in units of 0.5 ns, as the engine
+    /// running the machine keeps it: what feature word 25 says (A15b.1),
+    /// and the grid its devices act on ([`Machine::time_base`]). The engine
+    /// sets it; 0 on every other machine. Not kept in the machine's part of
+    /// a checkpoint: the engine records it with its own.
+    pub period: u64,
     /// Revision 15's register-page word 225 (A15b.1, A15b.5): posted
     /// writes answered with an error, a count, read, and cleared by a
     /// write. `micro` has no posted writes and answers none so; kept in a
@@ -1421,7 +1438,7 @@ impl Machine {
             block_disk: None,
             file_device: crate::file_device::FileDevice::new(),
             write_buffer_empty_at: 0,
-            microcycle_ns: 0,
+            period: 0,
             posted_write_errors: 0,
             store_log: None,
             register_log: None,
@@ -1493,6 +1510,34 @@ impl Machine {
         u32::from_le_bytes(self.board_name[k..k + 4].try_into().unwrap())
     }
 
+    /// **The unit [`Machine::ns`] counts and the grid devices act on**:
+    /// nanoseconds with no grid, and on revision 15 units of 0.5 ns on its
+    /// clock's period ([`crate::clock::TimeBase`]).
+    pub fn time_base(&self) -> crate::clock::TimeBase {
+        if self.geometry.extended() {
+            crate::clock::TimeBase::half_ns(self.period)
+        } else {
+            crate::clock::TimeBase::NS
+        }
+    }
+
+    /// The microsecond clock, functional source 15, at the machine's time:
+    /// the microseconds since power-on, 32 bits, wrapping
+    /// ([`Timers::microseconds`] in nanoseconds; on revision 15 its units).
+    pub fn microseconds(&self) -> u32 {
+        (self.ns / self.time_base().per_us()) as u32
+    }
+
+    /// The machine's time in whole nanoseconds, as the Chaosnet interface
+    /// and the displays keep it: [`Machine::ns`] itself but on revision 15,
+    /// whose units it halves, the half dropped. **Unverified** for revision
+    /// 15's network, whose times the contract has double into units and act
+    /// on the clock's grid (MP2b ruling Q19): a started delay can end a
+    /// clock early here when its start is at an odd unit.
+    pub fn device_ns(&self) -> u64 {
+        self.ns / self.time_base().per_ns
+    }
+
     /// Loads the boot PROM.  Words past the end of the image stay zero.
     pub fn load_prom(&mut self, words: &[Insn]) {
         for (i, w) in words.iter().take(PROM_WORDS).enumerate() {
@@ -1525,7 +1570,8 @@ impl Machine {
     /// that wrote main memory invalidates QUUX's cache before that cycle, as
     /// a disk transfer does.
     pub fn advance_file_device(&mut self) {
-        if self.geometry.file_device && self.file_device.advance(self.ns, &mut self.main) {
+        let time = self.time_base();
+        if self.geometry.file_device && self.file_device.advance(self.ns, &mut self.main, time) {
             self.dma_written = true;
         }
     }
@@ -2403,7 +2449,7 @@ impl Machine {
                 0o13 if paged => crate::tlb::DEVICE_WINDOW,
                 // Revision 15 (A15b.1): word 25 the microcycle in units of
                 // 0.5 ns, word 225 the posted writes answered with an error.
-                0o25 if self.geometry.extended() => (self.microcycle_ns * 2) as u32,
+                0o25 if self.geometry.extended() => self.period as u32,
                 0o225 if self.geometry.extended() => self.posted_write_errors,
                 k @ 0o220..=0o227 if paged => self.memory_words.read(k).unwrap_or(0),
                 0o11 => (width as u32) << 16 | height as u32,
@@ -2417,7 +2463,9 @@ impl Machine {
                 0o101 => self.bus_error as u32,
                 0o102 => self.mode.errstop as u32,
                 // The real-time clock (contract Q9).
-                0o103 if self.geometry.rtc => self.rtc.seconds(self.ns),
+                0o103 if self.geometry.rtc => {
+                    self.rtc.seconds_at(self.ns, self.time_base().per_s())
+                }
                 // The interval timers (contract Q11), at the machine's
                 // clock.
                 k @ 0o110..=0o115 if self.geometry.tick => {
@@ -2431,7 +2479,10 @@ impl Machine {
                 // The network (contract Q4): the Chaosnet interface's five
                 // registers (contract Q13).
                 k @ 0o140..=0o147 => match network_register(k, false) {
-                    Some(r) => self.ioboard.read(r, self.ns) as u32,
+                    Some(r) => {
+                        let ns = self.device_ns();
+                        self.ioboard.read(r, ns) as u32
+                    }
                     None => 0,
                 },
                 // Block-disk (contract Q13), when it is fitted.
@@ -2443,7 +2494,9 @@ impl Machine {
                     None => 0,
                 },
                 // The video controller's mode (contract Q13).
-                0o210 if self.tv.board() == tv::Board::Video => self.tv.read_control(0, self.ns),
+                0o210 if self.tv.board() == tv::Board::Video => {
+                    self.tv.read_control(0, self.device_ns())
+                }
                 k => self.quux_input.read(k).unwrap_or(w),
             });
         }
@@ -2558,7 +2611,8 @@ impl Machine {
                 }
                 // The interval timers (contract Q11).
                 k @ 0o110..=0o115 if self.geometry.tick => {
-                    self.timers.write(k, value, self.ns);
+                    let per_us = self.time_base().per_us();
+                    self.timers.write(k, value, self.ns, per_us);
                 }
                 // The file device (contract Q9): what was due is done
                 // first, and a producer index is taken from when the write
@@ -2566,13 +2620,15 @@ impl Machine {
                 k @ 0o160..=0o171 if self.geometry.file_device => {
                     self.advance_file_device();
                     let (ns, drained) = (self.ns, self.write_buffer_empty_at);
-                    self.file_device.write(k, value, ns, drained, &self.main);
+                    let time = self.time_base();
+                    self.file_device.write(k, value, (ns, time), drained, &self.main);
                 }
                 // The network: the CSR and the write buffer; writes of its
                 // other words are ignored (contract Q13).
                 k @ 0o140..=0o147 => {
                     if let Some(r) = network_register(k, true) {
-                        self.ioboard.write(r, value as u16, self.ns);
+                        let ns = self.device_ns();
+                        self.ioboard.write(r, value as u16, ns);
                     }
                 }
                 // Block-disk (contract Q13): a transfer is a bus master
@@ -2581,7 +2637,9 @@ impl Machine {
                 // the processor's back, so QUUX's cache is invalidated
                 // before its next cycle.
                 k @ 0o200..=0o203 => {
+                    let unit = self.time_base().per_ns;
                     if let Some(d) = self.block_disk.as_mut() {
+                        d.unit = unit;
                         d.advance(self.ns);
                         d.write(k - 0o200, value, &mut self.main);
                         self.dma_written = true;
@@ -2589,7 +2647,8 @@ impl Machine {
                 }
                 // The video controller's mode (contract Q13).
                 0o210 if self.tv.board() == tv::Board::Video => {
-                    self.tv.write_control(0, value, self.ns);
+                    let ns = self.device_ns();
+                    self.tv.write_control(0, value, ns);
                 }
                 // Revision 15's word 225: a write clears it (A15b.1).
                 0o225 if self.geometry.extended() => self.posted_write_errors = 0,
@@ -2797,7 +2856,7 @@ impl Machine {
             block_disk,
             file_device,
             write_buffer_empty_at: _,
-            microcycle_ns: _,
+            period: _,
             posted_write_errors,
             store_log: _,
             register_log: _,

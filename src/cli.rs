@@ -1063,6 +1063,7 @@ const OWN_FLAGS: &[(&str, Whose)] = &[
     ("--file-root", Whose::Quux),
     ("--main-memory-size", Whose::Quux),
     ("--memory-timing", Whose::Quux),
+    ("--microcycle-ns", Whose::Quux),
     ("--rtc", Whose::Quux),
     ("--sync-cycle-ticks", Whose::Quux),
     ("--tlb", Whose::Quux),
@@ -1108,7 +1109,8 @@ const USAGE_QUUX: &str = "usage: quux [--micro|--rtl] [--cache <words>] [--chaos
             [--glass-tty [<endpoint>][,ro]] [--keyboard-boot <keys>]
             [--keyboard-mapping <file>] [--keyboard-mapping-dump]
             [--keyboard-mapping-trace] [--main-memory-size <n>MW]
-            [--memory-timing <r>,<w>] [--no-auto-boot] [--no-pace]
+            [--memory-timing <r>,<w>[,<o>]] [--microcycle-ns <ns>]
+            [--no-auto-boot] [--no-pace]
             [--pace] [--prom <file>] [--resume <file>]
             [--rtc <unix-seconds>|host] [--stop-after <microcycles>]
             [--stop-at <pc>] [--stop-at-prom <pc>]
@@ -1767,9 +1769,19 @@ const HELP: &[(Whose, &str)] = &[
     ),
     (
         Whose::Quux,
-        "  --memory-timing <r>,<w>      rtl, QUUX: main memory's line fill and write
-                               in ns, or arty or de25, the boards' own.
-                               [default: 380,290]",
+        "  --memory-timing <r>,<w>[,<o>]
+                               rtl, QUUX: main memory's line fill and write
+                               in ns, or arty or de25, the boards' own; on
+                               revision 15 the occupancy between two
+                               writes too, <r>,<w>,<o>, or kria, arty or
+                               de25. [default: 380,290; revision 15: kria,
+                               247,130,10]",
+    ),
+    (
+        Whose::Quux,
+        "  --microcycle-ns <ns>         QUUX revision 15: the clock's period, the
+                               microcycle, 5 to 40 in steps of 0.5, on both
+                               engines. [default: 8.5, the Kria KR260's]",
     ),
     (
         Whose::Quux,
@@ -5422,6 +5434,10 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     // Revision 14's TLB, `--tlb` (A14.4).
     let mut tlb: Option<usize> = None;
     let mut memory_timing: Option<crate::cache::MemoryTiming> = None;
+    // Revision 15's: the period, `--microcycle-ns`, in units of 0.5 ns,
+    // and the port's timing with its occupancy (MP2b rulings Q6, Q15, Q17).
+    let mut microcycle: Option<u64> = None;
+    let mut port_timing: Option<crate::pipeline::PortTiming> = None;
     // QUUX's real-time clock: live unless `--rtc` gives a second to count
     // from.
     let mut rtc = crate::machine::Rtc::Host;
@@ -5678,8 +5694,27 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 }
                 _ => usage("--tlb wants its entries, a power of two from 1024 to 32768"),
             },
+            (None, "--memory-timing") if geometry.extended() => {
+                // Revision 15's port: three numbers, the occupancy third, or
+                // a board's preset (MP2b rulings Q6, Q17).
+                let t = args.next();
+                port_timing = t.as_deref().and_then(crate::pipeline::PortTiming::parse);
+                if port_timing.is_none() {
+                    usage(
+                        "--memory-timing wants <read>,<write>,<occupancy> in ns, or kria, arty or de25, on QUUX revision 15",
+                    );
+                }
+            }
             (None, "--memory-timing") => {
                 let t = args.next();
+                if t.as_deref() == Some("kria")
+                    || t.as_deref().is_some_and(|v| v.split(',').count() == 3)
+                {
+                    usage(&format!(
+                        "--memory-timing {} is QUUX revision 15's, with its occupancy: MUIR_QUUX_REVISION=15",
+                        t.as_deref().unwrap_or_default()
+                    ));
+                }
                 memory_timing = match t.as_deref() {
                     Some("arty") => Some(crate::cache::MemoryTiming::ARTY_Z7_20),
                     Some("de25") => Some(crate::cache::MemoryTiming::DE25_NANO),
@@ -5710,6 +5745,20 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                     },
                     None => usage(WANTS),
                 };
+            }
+            (None, "--microcycle-ns") => {
+                if !geometry.extended() {
+                    usage("--microcycle-ns is QUUX revision 15's: MUIR_QUUX_REVISION=15");
+                }
+                microcycle = args.next().as_deref().and_then(crate::clock::parse_microcycle_ns);
+                if microcycle.is_none() {
+                    usage("--microcycle-ns wants the period in ns, 5 to 40 in steps of 0.5");
+                }
+            }
+            (None, "--sync-cycle-ticks") if geometry.extended() => {
+                usage(
+                    "--sync-cycle-ticks is refused on QUUX revision 15, whose clock is --microcycle-ns's",
+                );
             }
             (None, "--sync-cycle-ticks") => {
                 match args.next().as_deref().and_then(|v| v.parse::<u8>().ok()).filter(|&k| k > 0) {
@@ -6000,16 +6049,11 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     // model, which is `cadr`'s alone.
     let block_disk = geometry != crate::machine::Geometry::CADR;
     // QUUX's main memory is on its own port and `rtl` times it.
-    if memory_timing.is_some() && which != Which::Rtl {
+    if (memory_timing.is_some() || port_timing.is_some()) && which != Which::Rtl {
         usage(&format!(
             "--memory-timing is rtl's, and this run is {}",
             if which == Which::Micro { "micro" } else { "chip" }
         ));
-    }
-    // Revision 15 runs on `micro` alone: `rtl`'s model of it is the
-    // pipeline's, which it does not have.
-    if geometry.extended() && which != Which::Micro {
-        usage("QUUX revision 15 runs on --micro alone");
     }
     // The TLB is revision 14's.
     if tlb.is_some() && !geometry.paged() {
@@ -6585,14 +6629,44 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         // QUUX's main memory is behind its own port, through its cache
         // (contract Q6): `rtl` times both.
         let quux_rtl = geometry.machine_id.is_some() && which == Which::Rtl;
-        if quux_rtl {
+        let rtl_15 = quux_rtl && geometry.extended();
+        if rtl_15 {
+            // Revision 15's port, in ns and in clocks of the period (MP2b
+            // ruling Q17).
+            let t = port_timing.unwrap_or(crate::pipeline::PortTiming::KRIA);
+            let period = microcycle.unwrap_or(crate::clock::PERIOD_15);
+            let c = t.clocks(crate::clock::TimeBase::half_ns(period));
+            writeln!(
+                s,
+                "memory port: a line fill in {} ns, {} clocks; a write answered in {} ns, {}; writes accepted {} ns apart, {}; a queue of {} and {} in flight",
+                t.read_ns,
+                c.read,
+                t.write_ns,
+                c.write,
+                t.occupancy_ns,
+                c.occupancy,
+                crate::pipeline::port::QUEUE,
+                crate::pipeline::port::IN_FLIGHT
+            )
+            .unwrap();
+            let words = cache.map_or(crate::pipeline::CACHE_WORDS, |c| c.words);
+            writeln!(
+                s,
+                "cache: {words} words, lines of {}, 2-way, a hit in two clocks",
+                crate::pipeline::port::LINE_WORDS
+            )
+            .unwrap();
+        } else if quux_rtl {
             let t = memory_timing.unwrap_or(crate::cache::MemoryTiming::NOMINAL);
             writeln!(s, "memory port: a line fill in {} ns, a write in {}", t.read_ns, t.write_ns)
                 .unwrap();
         }
         // The cache the memory port fits: QUUX keeps its 8-word line
         // whatever `--cache` asks for.
-        if let Some(c) = cache.or(quux_rtl.then_some(crate::cache::CacheConfig::QUUX)) {
+        if let Some(c) = cache
+            .or(quux_rtl.then_some(crate::cache::CacheConfig::QUUX))
+            .filter(|_| !rtl_15 && !geometry.extended())
+        {
             let c = if quux_rtl { crate::memory_port::fitted(c) } else { c };
             writeln!(
                 s,
@@ -6604,7 +6678,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         if geometry.revision() == Some(15) {
             writeln!(
                 s,
-                "machine: quux, revision 15: revision 14 with a 64-bit microinstruction, MIT's 48 bits and an extension, the OA registers read through a word's OA select in place of IMOD, and its own .mcr; on micro alone"
+                "machine: quux, revision 15: revision 14 with a 64-bit microinstruction, MIT's 48 bits and an extension, the OA registers read through a word's OA select in place of IMOD, and its own .mcr; rtl is its four-stage pipeline"
             )
             .unwrap();
         }
@@ -6818,7 +6892,15 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         }
         // What a microcycle takes: the board's delay lines on the CADR,
         // muir-fpga's grid under them, or QUUX's `sync`, which has none.
-        if which != Which::Chip {
+        if geometry.extended() {
+            let period = microcycle.unwrap_or(crate::clock::PERIOD_15);
+            writeln!(
+                s,
+                "timing: revision 15's clock, {} ns a microcycle ({period} units of 0.5 ns)",
+                crate::clock::microcycle_ns_text(period)
+            )
+            .unwrap();
+        } else if which != Which::Chip {
             let per = timing_model.cycle_ns(crate::clock::Speed::Normal, false);
             let timing = match timing_model {
                 TimingModel::Cadr => {
@@ -6921,8 +7003,11 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             m.chaos = chaos.clone();
             m.plug_chaos(0);
             let mut e = Micro::new(m);
-            // QUUX's microcycle is `sync`'s ticks, on this engine's clock too.
-            if let TimingModel::Sync { cycle_ticks, .. } = timing_model {
+            // QUUX's microcycle is `sync`'s ticks, on this engine's clock too;
+            // revision 15's is its period (MP2b ruling Q15).
+            if geometry.extended() {
+                e.period = microcycle.unwrap_or(crate::clock::PERIOD_15);
+            } else if let TimingModel::Sync { cycle_ticks, .. } = timing_model {
                 e.sync_cycle_ns = cycle_ticks as u64 * crate::clock::GRID_NS;
             }
             if auto_boot {
@@ -6958,6 +7043,56 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 serial.as_mut(),
                 run,
             );
+        }
+        Which::Rtl if geometry.extended() => {
+            // Revision 15's `rtl` is its pipeline (contract G3 revision 15,
+            // §12.1): the Kria's period, memory timing and cache unless the
+            // flags say otherwise (MP2b ruling Q14).
+            let mut m = machine(
+                &prom,
+                packs,
+                boards,
+                (tv_board, video_size),
+                color_tv,
+                (geometry, block_disk, rtc, &file_roots),
+            );
+            if let Some(n) = tlb {
+                m.set_tlb_entries(n);
+            }
+            m.chaos = chaos.clone();
+            m.plug_chaos(0);
+            let mut e = crate::pipeline::Pipeline::new(m);
+            e.configure(
+                microcycle.unwrap_or(crate::clock::PERIOD_15),
+                port_timing.unwrap_or(crate::pipeline::PortTiming::KRIA),
+                cache.map_or(crate::pipeline::CACHE_WORDS, |c| c.words),
+            );
+            if auto_boot {
+                e.boot();
+            }
+            if let Some(p) = &resume {
+                resume_engine(
+                    "rtl",
+                    &mut e,
+                    (tv_board, video_size),
+                    color_tv,
+                    (geometry, rtc),
+                    p,
+                    go_on,
+                );
+            }
+            let run = Run {
+                stop,
+                capture,
+                color_capture,
+                checkpoint,
+                setup: &setup,
+                hold: !auto_boot,
+                pace,
+                clocks: capture_tv_time,
+                color: color_screen.as_mut(),
+            };
+            time_engine("rtl", Alone(e), terminal.as_mut(), Some(&mut glass), serial.as_mut(), run);
         }
         Which::Rtl => {
             let mut m = machine(

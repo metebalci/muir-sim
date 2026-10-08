@@ -961,6 +961,7 @@ const QUUX_ONLY: &[&str] = &[
     "--file-root",
     "--main-memory-size",
     "--memory-timing",
+    "--microcycle-ns",
     "--rtc",
     "--sync-cycle-ticks",
     "--tlb",

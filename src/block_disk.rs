@@ -80,8 +80,13 @@ pub struct BlockDisk {
     /// When the transfer in flight is done.
     done_at: u64,
     now: u64,
-    /// A block's time.
+    /// A block's time, in ns.
     pub block_ns: u64,
+    /// Units of the machine's time a nanosecond: 1, or 2 on QUUX revision
+    /// 15, which counts 0.5 ns ([`crate::clock::TimeBase`]). The machine
+    /// sets it as it hands the disk a register's write; not kept in a
+    /// checkpoint, being the machine's.
+    pub unit: u64,
     past_end: bool,
     nxm: bool,
     bad_command: bool,
@@ -101,6 +106,7 @@ impl BlockDisk {
             done_at: 0,
             now: 0,
             block_ns,
+            unit: 1,
             past_end: false,
             nxm: false,
             bad_command: false,
@@ -292,7 +298,10 @@ impl BlockDisk {
         // The last block moved, or the one that failed.
         self.da = block;
         self.disk = Some(disk);
-        self.done_at = self.now + moved * self.block_ns;
+        // On revision 15 DONE is START's clock plus ⌈blocks·200,000/P⌉
+        // clocks (MP2b ruling Q2): START is at a clock, and the status is
+        // read at clocks, so the exact end is enough.
+        self.done_at = self.now + moved * self.block_ns * self.unit;
     }
 
     /// `-XBUS INIT`: the command and the errors cleared, as a reset does.

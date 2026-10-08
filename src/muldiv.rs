@@ -71,6 +71,17 @@ const DVS1: u64 = 0o51 << 3;
 /// contract that changes the microcycle to recount.
 pub const DIV_CYCLES: u64 = 9;
 
+/// **Revision 15's divider and multiplier, in clocks** (contract G3
+/// revision 15, A15b.3's row DIV, MUL; its MP2b ruling Q3): a `DIV` stays in
+/// EX 18 clocks from the clock its operands are ready, 17 of them held, and
+/// a `MUL` 5, 4 held, at every period. The counts are the stage fit's core
+/// (M8e), whose divider is the fabric's: two quotient steps a clock, the
+/// words there 17 clocks after the load. A register operand is ready at
+/// once; an operand from `MD` when the wait for `MD` ends. Revisions 13 and
+/// 14 keep [`DIV_CYCLES`].
+pub const DIV_CLOCKS_15: u64 = 18;
+pub const MUL_CLOCKS_15: u64 = 5;
+
 /// Which of the two `ir` asks for, on a machine that has them: an ALU-class
 /// instruction, `IR<44:43>` 0, with `IR<8>` set and `IR<4:3>` 2 or 3.
 pub fn decode(ir: u64) -> Option<Op> {

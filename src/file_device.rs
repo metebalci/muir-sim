@@ -164,8 +164,20 @@ pub mod status {
 /// length past [`MAX_BUFFER`], which answers bad buffer, is charged as
 /// [`MAX_BUFFER`].
 pub fn due(start: u64, a: u32, b: u32) -> u64 {
+    due_on(crate::clock::TimeBase::NS, start, a, b)
+}
+
+/// [`due`] in the machine's time `time` ([`crate::machine::Machine::time_base`]):
+/// on revision 15 the duration is reckoned exactly, rounded up to its
+/// units of 0.5 ns, and the completion falls at the first clock at or after
+/// it, so the whole duration is rounded up to clocks once, from its own
+/// start, never per term or via whole ns (contract G3 revision 15, §9; MP2b
+/// ruling Q2): 20 µs and 100 µs a KiB is ⌈(40,000·1,024 + 200,000·bytes) /
+/// (1,024·P)⌉ clocks at a period of P units.
+pub fn due_on(time: crate::clock::TimeBase, start: u64, a: u32, b: u32) -> u64 {
     let bytes = a.min(MAX_BUFFER) as u64 + b.min(MAX_BUFFER) as u64;
-    start + COMMAND_NS + (bytes * KIB_NS).div_ceil(1024)
+    let units = (COMMAND_NS * 1024 + bytes * KIB_NS) * time.per_ns;
+    time.grid(start + units.div_ceil(1024))
 }
 
 // --- mounts -------------------------------------------------------------------------
@@ -720,7 +732,7 @@ impl FileDevice {
         &mut self,
         word: u32,
         v: u32,
-        now: u64,
+        (now, time): (u64, crate::clock::TimeBase),
         drained_at: u64,
         main: &[W],
     ) {
@@ -764,7 +776,7 @@ impl FileDevice {
                     self.index_fault = true;
                 } else {
                     self.cmd_prod = new;
-                    self.take(now.max(drained_at), main);
+                    self.take(now.max(drained_at), main, time);
                 }
             }
             RESP_CONS if on => {
@@ -773,7 +785,7 @@ impl FileDevice {
                     self.index_fault = true;
                 } else {
                     self.resp_cons = new;
-                    self.take(now, main);
+                    self.take(now, main, time);
                 }
             }
             _ => {}
@@ -806,7 +818,7 @@ impl FileDevice {
     /// Takes the command at the head of the ring, if there is one and the
     /// response ring has room, from `start`: its due time from the lengths
     /// its entry names.
-    fn take<W: MemoryWord>(&mut self, start: u64, main: &[W]) {
+    fn take<W: MemoryWord>(&mut self, start: u64, main: &[W], time: crate::clock::TimeBase) {
         if self.head_due.is_some() || !self.enabled || self.queued() == 0 {
             return;
         }
@@ -814,18 +826,23 @@ impl FileDevice {
             return;
         }
         let e = self.cmd_base as usize + 8 * (self.cmd_cons % self.cmd_entries()) as usize;
-        self.head_due = Some(due(start, main[e + 3].low(), main[e + 5].low()));
+        self.head_due = Some(due_on(time, start, main[e + 3].low(), main[e + 5].low()));
     }
 
     /// Runs every command due by `now`, each at its own due time, and takes
     /// the next. Whether main memory was written.
-    pub fn advance<W: MemoryWord>(&mut self, now: u64, main: &mut [W]) -> bool {
+    pub fn advance<W: MemoryWord>(
+        &mut self,
+        now: u64,
+        main: &mut [W],
+        time: crate::clock::TimeBase,
+    ) -> bool {
         let mut wrote = false;
         while let Some(at) = self.head_due.filter(|&d| d <= now) {
             self.head_due = None;
             self.execute(main);
             wrote = true;
-            self.take(at, main);
+            self.take(at, main, time);
         }
         wrote
     }

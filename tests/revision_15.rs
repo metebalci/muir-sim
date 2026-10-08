@@ -214,24 +214,25 @@ fn expect(m: &Machine, rows: &[(u64, Word, &str)]) {
 // --- identity (A15b.1) --------------------------------------------------------
 
 /// **Feature word 0 says revision 15, and word 25 the microcycle in units
-/// of 0.5 ns** (A15b.1): `micro`'s QUUX microcycle is 40 ns, so 80; 60 ns
-/// gives 120. On revision 14 word 25 reads 0, as every unassigned feature
-/// word does (the control). **Fails** a MACHINE-ID left at 14, and a word 25
-/// that is not the engine's period.
+/// of 0.5 ns** (A15b.1): `micro`'s period is the Kria's 8.5 ns when nothing
+/// says otherwise (MP2b ruling Q14), so 17; 40 ns gives 80 (Q15). On
+/// revision 14 word 25 reads 0, as every unassigned feature word does (the
+/// control). **Fails** a MACHINE-ID left at 14, a word 25 that is not the
+/// engine's period, and one in whole ns doubled, which cannot say 17.
 #[test]
 fn feature_words_0_and_25_say_revision_15_and_its_period() {
     let mut p = Prog::default();
     p.read(REGISTER_PAGE, 0o20).read(REGISTER_PAGE | 0o25, 0o21).stop();
     let m = run(&p);
-    expect(&m, &[(0o20, 0x5155_00f4, "MACHINE-ID"), (0o21, 80, "word 25 at 40 ns")]);
+    expect(&m, &[(0o20, 0x5155_00f4, "MACHINE-ID"), (0o21, 17, "word 25 at 8.5 ns")]);
     let mut u = Micro::new(machine(&p, REV15, &|_| {}));
-    u.sync_cycle_ns = 60;
+    u.period = 80;
     u.boot();
     while u.machine().opc != STOP as u16 {
         u.step().unwrap();
     }
     u.run(16);
-    expect(u.machine(), &[(0o21, 120, "word 25 at 60 ns")]);
+    expect(u.machine(), &[(0o21, 80, "word 25 at 40 ns")]);
     let m = run_on(&p, Geometry::QUUX_14, &|_| {}).ok().unwrap();
     expect(m.machine(), &[(0o20, 0x5155_00e4, "revision 14"), (0o21, 0, "no word 25")]);
 }
@@ -692,12 +693,12 @@ fn prom_file(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// **`MUIR_QUUX_REVISION=15` runs revision 15 on `micro`** with a
-/// revision-15 PROM: the start names it, and the checkpoint records it.
-/// Refused: `--rtl`, and a run without `--prom`, since no revision-15 PROM
-/// is built in and PROM 2001 is MIT's sections. **Fails** a switch that
-/// builds revision 14, or lets `rtl` run revision 15 as 14.
+/// revision-15 PROM: the start names it, and the checkpoint records it; and
+/// on `rtl`, its pipeline. Refused: a run without `--prom`, since no
+/// revision-15 PROM is built in and PROM 2001 is MIT's sections. **Fails**
+/// a switch that builds revision 14, or an `rtl` that is not the pipeline.
 #[test]
-fn the_switch_runs_revision_15_on_micro() {
+fn the_switch_runs_revision_15_on_both_engines() {
     use support::{Run, quux, scratch, text};
     let dir = scratch("revision-15");
     let prom = prom_file(&dir);
@@ -715,14 +716,15 @@ fn the_switch_runs_revision_15_on_micro() {
     let c = muir::checkpoint::read(&chk).unwrap();
     let g = Machine::checkpointed_geometry_at(&c.body, c.word_bits).unwrap();
     assert_eq!(g, REV15);
+    // `rtl` runs it too: its pipeline (MP2b).
     let out = quux()
         .env("MUIR_QUUX_REVISION", "15")
         .args(["--rtl", "--stop-after", "10", "--prom"])
         .arg(&prom)
         .run();
     let t = text(&out);
-    assert_eq!(out.status.code(), Some(2), "{t}");
-    assert!(t.contains("QUUX revision 15 runs on --micro alone"), "{t}");
+    assert!(out.status.success(), "the rtl run failed:\n{t}");
+    assert!(t.contains("rtl is its four-stage pipeline"), "{t}");
     let out = quux().env("MUIR_QUUX_REVISION", "15").args(["--micro", "--stop-after", "10"]).run();
     let t = text(&out);
     assert_eq!(out.status.code(), Some(2), "{t}");
