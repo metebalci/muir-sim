@@ -449,9 +449,15 @@ pub enum Mutation {
     /// The words behind a `WRITE-I-MEM` fetched again from the write's own
     /// address + 1, not from the word after it in execution order.
     ImemRefetchAfterItsAddress,
-    /// A write carries `MD` as its start left it, whatever the microcycle
-    /// after loads.
-    WriteMdAtStart,
+    /// A write carries `MD` as the microcycle after its start leaves it
+    /// when that one loads `MD` and starts nothing: the single-edge rule,
+    /// which revision 15 leaves (the MD-after-write ruling).
+    WriteMdOfNextWord,
+    /// A write started right after a read start carries `MD` as the word
+    /// left it before the read's word landed: its own `MD` load, or the
+    /// `MD` from before the read (rule (A) undone; the MD-after-read
+    /// ruling).
+    WriteWordBeforeTheRead,
     /// The word right after a read start waits for the read's word, as
     /// every later word that uses `MD` does.
     SuccessorWaitsForMd,

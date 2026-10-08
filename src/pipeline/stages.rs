@@ -57,8 +57,9 @@ pub(crate) struct Back {
     pub write_back: WalkStep,
     pub write_back_bits: u32,
     pub write_back_page: u32,
-    /// A write granted whose word the next microcycle fixes.
-    pub pending_word: Option<PendingWord>,
+    /// The planted fault `Mutation::WriteMdOfNextWord`: where the write
+    /// granted last went, by its start's sequence.
+    pub mutant_to: Option<(u64, WordTo)>,
     /// A register's write, taken the clock after its grant.
     pub register_write: Option<RegisterWrite>,
     /// CMD_PROD's write, waiting for every earlier write (A15b.5): the
@@ -183,28 +184,33 @@ pub(crate) enum WalkStep {
     Page,
 }
 
-/// Where a write's word goes once it is fixed.
+/// Where a granted write went: the port's queue at a bus address, a
+/// device register, the PDL buffer. Kept for the planted fault
+/// `Mutation::WriteMdOfNextWord` alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WordTo {
-    Port(u64),
+    Port(u32),
     Register,
     Pdl(u16),
 }
 
-/// A write granted whose word the next microcycle fixes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PendingWord {
-    pub seq: u64,
-    pub to: WordTo,
-}
-
-/// A device register's write, taken the clock after its grant.
+/// A device register's write, taken the clock after its grant and no
+/// sooner than the clock after the word right after its start has left EX
+/// (`released`; MP2b rulings 2, Q1). `seq` is its start's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RegisterWrite {
     pub bus: u32,
-    pub word: Option<Word>,
+    pub word: Word,
     pub mc: u64,
     pub at_clock: u64,
+    pub seq: u64,
+    pub released: bool,
+}
+
+/// The word a write start carries from EX's commit (the MD-after-write
+/// ruling): every write start has one by the time WB grants it.
+fn written(s: &Start) -> Word {
+    s.word.expect("a write start carries its word from EX")
 }
 
 /// The functional destination code of an ALU or BYTE word, 34-37 decoding
@@ -316,18 +322,10 @@ impl Pipeline {
             self.begin_drain();
         }
         let ending = self.draining || self.stepping;
-        if ending
-            && self.ex.is_none()
-            && self.rd.is_none()
-            && self.cs.is_none()
-            && let Some((seq, _)) = self.x.write_pending.take()
-        {
-            // A write whose word the next microcycle would fix, and the
-            // halt squashed it: the word is `MD` as it stands. MIT's
-            // microcode never loads `MD` in the word after a write start
-            // (the contract's §5 table), so that is the word it writes.
-            let md = self.m.md;
-            self.fix_write(seq, md);
+        if ending && self.ex.is_none() && self.rd.is_none() && self.cs.is_none() {
+            // The word after a register write's start squashed by the halt:
+            // nothing is left to see the interrupt before the write.
+            self.release_register_write(u64::MAX);
         }
         if ending && self.drained_now() {
             self.draining = false;
@@ -844,10 +842,18 @@ impl Pipeline {
                 // Inside the PDL buffer: no memory cycle, and one held clock
                 // (A14.7).
                 if s.write {
-                    match s.word {
-                        Some(word) => self.m.pdl[i as usize] = word,
-                        None => self.b.pending_word = Some(PendingWord { seq, to: WordTo::Pdl(i) }),
+                    // The buffer takes the word at the grant, and the words
+                    // behind the start that read it there read it, as on
+                    // `micro`, where the write lands as its start's
+                    // microcycle ends.
+                    let word = written(&s);
+                    self.m.pdl[i as usize] = word;
+                    for w in [&mut self.ex, &mut self.rd, &mut self.cs].into_iter().flatten() {
+                        if w.pdl_addr == i {
+                            w.pdl_val = word;
+                        }
                     }
+                    self.mutant_granted(seq, WordTo::Pdl(i));
                 } else {
                     self.b.md_old = Some((seq, self.m.md));
                     self.b.md = Some((now + 3, self.m.pdl[i as usize]));
@@ -871,7 +877,7 @@ impl Pipeline {
             return false;
         }
         // The write-back, ahead of the reference's own cycle (A14.6).
-        let md = s.word.unwrap_or(self.m.md);
+        let md = if s.write { written(&s) } else { self.m.md };
         if self.write_back_at_wb(va, entry, s.write, md) == Some(false) {
             return false;
         }
@@ -882,16 +888,13 @@ impl Pipeline {
         match responder {
             crate::busint::Responder::Memory(_) => {
                 if s.write {
-                    let Some(tag) = self.port.write(now, bus) else { return false };
+                    if !self.port.write(now, bus, written(&s)) {
+                        return false;
+                    }
                     if self.b.prefetched.is_some_and(|p| p.1 == bus) {
                         self.drop_prefetch();
                     }
-                    match s.word {
-                        Some(word) => self.port.word(tag, word),
-                        None => {
-                            self.b.pending_word = Some(PendingWord { seq, to: WordTo::Port(tag) })
-                        }
-                    }
+                    self.mutant_granted(seq, WordTo::Port(bus));
                     self.b.ack_at = now + 2;
                 } else {
                     match self.port.read(now, bus, Reader::Processor) {
@@ -909,11 +912,18 @@ impl Pipeline {
                 // A device register: taken the clock after its grant, its
                 // word in MD two clocks after it (A15b.3; MP2b ruling Q4).
                 if s.write {
-                    self.b.register_write =
-                        Some(RegisterWrite { bus, word: s.word, mc: s.mc, at_clock: now + 1 });
-                    if s.word.is_none() {
-                        self.b.pending_word = Some(PendingWord { seq, to: WordTo::Register });
-                    }
+                    // Released at once when the word after the start has
+                    // left EX already, the start having waited in WB.
+                    let released = self.b.last_seq > seq;
+                    self.b.register_write = Some(RegisterWrite {
+                        bus,
+                        word: written(&s),
+                        mc: s.mc,
+                        at_clock: now + 1,
+                        seq,
+                        released,
+                    });
+                    self.mutant_granted(seq, WordTo::Register);
                 } else {
                     let keep = self.m.ns;
                     let at = if self.neutral { self.instant(s.mc) } else { self.instant(now + 1) };
@@ -1122,31 +1132,49 @@ impl Pipeline {
         self.m.memory_words.refused = self.m.memory_words.refused.wrapping_add(1);
     }
 
-    /// **A write's word, fixed** by the microcycle after its start
-    /// (A15b.5): the start's, if WB has not granted it, or the queue's
-    /// entry, the register's write, the PDL buffer's word.
-    pub(crate) fn fix_write(&mut self, seq: u64, word: Word) {
+    /// A register write started before the microcycle of sequence `seq`
+    /// may be taken: that microcycle, the one right after the start or a
+    /// later one, has left EX (MP2b rulings 2, Q1).
+    pub(crate) fn release_register_write(&mut self, seq: u64) {
+        if let Some(r) = self.b.register_write.as_mut()
+            && r.seq < seq
+        {
+            r.released = true;
+        }
+    }
+
+    /// The planted fault [`Mutation::WriteMdOfNextWord`]: a granted
+    /// write's destination, for the next word to rewrite.
+    fn mutant_granted(&mut self, seq: u64, to: WordTo) {
+        if self.mutation == Mutation::WriteMdOfNextWord {
+            self.b.mutant_to = Some((seq, to));
+        }
+    }
+
+    /// The planted fault [`Mutation::WriteMdOfNextWord`]: the write of
+    /// sequence `seq` rewritten with `word`, the next word's `MD`, the
+    /// single-edge rule the deferred fix kept: in WB if not granted yet,
+    /// and otherwise where it went.
+    pub(crate) fn mutant_rewrite(&mut self, seq: u64, word: Word) {
         if let Some(w) = self.wb.as_mut().filter(|w| w.seq == seq)
             && let Some(st) = w.start.as_mut().filter(|s| s.write)
         {
             st.word = Some(word);
             return;
         }
-        if let Some(st) = self.b.starts.iter_mut().find(|s| s.write && s.word.is_none()) {
+        if let Some(st) = self.b.starts.iter_mut().find(|s| s.write) {
             st.word = Some(word);
             return;
         }
-        match self.b.pending_word.take() {
-            Some(PendingWord { seq: s, to }) if s == seq => match to {
-                WordTo::Port(tag) => self.port.word(tag, word),
-                WordTo::Register => {
-                    if let Some(r) = self.b.register_write.as_mut() {
-                        r.word = Some(word);
-                    }
+        match self.b.mutant_to.take() {
+            Some((s, WordTo::Port(bus))) if s == seq => self.port.rewrite(bus, word),
+            Some((s, WordTo::Register)) if s == seq => {
+                if let Some(r) = self.b.register_write.as_mut() {
+                    r.word = word;
                 }
-                WordTo::Pdl(i) => self.m.pdl[i as usize] = word,
-            },
-            other => self.b.pending_word = other,
+            }
+            Some((s, WordTo::Pdl(i))) if s == seq => self.m.pdl[i as usize] = word,
+            _ => {}
         }
     }
 
@@ -1288,12 +1316,29 @@ impl Pipeline {
             _ => None,
         };
         let done = self.execute(&e, mc, vmaok);
+        let own_md = self.m.md;
         if let Some(w) = landed {
             self.m.md = w;
         }
         if let Err(h) = done {
             self.ex = Some(e);
             return Err(h);
+        }
+        // **A write carries `MD` as its start's microcycle leaves it**
+        // (revision 15, the MD-after-write ruling): right after a read start,
+        // the read's word, which stands after anything the word wrote to `MD`
+        // (rule (A), the MD-after-read ruling). The word goes with the start
+        // to WB, and the queue's entry, the register's write or the PDL
+        // buffer takes it at the grant.
+        let written_md = match self.mutation {
+            Mutation::WriteWordBeforeTheRead => own_md,
+            _ => self.m.md,
+        };
+        for st in self.x.starts.iter_mut().filter(|s| s.write) {
+            st.word = Some(written_md);
+            if self.mutation == Mutation::WriteMdOfNextWord {
+                self.x.mutant_write = Some((e.seq, written_md));
+            }
         }
         if self.b.md_old.is_some_and(|(s, _)| e.seq > s) {
             self.b.md_old = None;
@@ -1425,7 +1470,10 @@ impl Pipeline {
         if r.at_clock > self.clock {
             return;
         }
-        let Some(word) = r.word else { return };
+        if !r.released {
+            return;
+        }
+        let word = r.word;
         self.b.register_write = None;
         let page = crate::tlb::REGISTER_PAGE_BUS;
         let (on_page, off) = (r.bus & !0o377 == page, r.bus & 0o377);

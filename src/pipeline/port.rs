@@ -273,15 +273,13 @@ impl Cache15 {
     }
 }
 
-/// A write the queue holds: its bus address and its word, the word `None`
-/// until the microcycle after the start has fixed it (A15b.5).
+/// A write the queue holds: its bus address and its word, which a write
+/// start carries from its own microcycle (A15b.5; the MD-after-write
+/// ruling); `None` once block-disk's START has landed it early.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Queued {
     bus: u32,
     word: Option<Word>,
-    /// The start's own write, rather than a write-back's: what the
-    /// processor's acknowledgment waits on.
-    tag: u64,
 }
 
 /// An accepted write until its response.
@@ -393,8 +391,6 @@ pub struct Port {
     pub meters: PortMeters,
     /// Errors answered, for register-page word 225, taken by the machine.
     errors: u32,
-    /// Tags for the queue's entries.
-    next_tag: u64,
     /// The line the last fill installed: a test aid, for a sweep planted
     /// to miss its set.
     pub last_filled: Option<u32>,
@@ -425,7 +421,6 @@ impl Port {
             window_words: u32::MAX,
             meters: PortMeters::default(),
             errors: 0,
-            next_tag: 1,
             last_filled: None,
         }
     }
@@ -496,8 +491,7 @@ impl Port {
                 self.errors += 1;
             }
         }
-        let ready =
-            self.inflight.len() < IN_FLIGHT && self.queue.front().is_some_and(|q| q.word.is_some());
+        let ready = self.inflight.len() < IN_FLIGHT && !self.queue.is_empty();
         if ready && now < self.next_accept && now >= self.occupancy_ends {
             // Held by the last write's second beat alone.
             self.meters.beat_delay_clocks += 1;
@@ -610,25 +604,25 @@ impl Port {
         self.fill.is_some_and(|f| f.reader == reader)
     }
 
-    /// **A write start to `bus`** granted at `now`: `None` when it must
-    /// wait --- its line's fill in flight, or a full queue --- and
-    /// otherwise the entry's tag. The entry is queued now and takes its
-    /// word from [`Port::word`]; the start is acknowledged two clocks after
-    /// the grant (A15b.5).
-    pub fn write(&mut self, now: u64, bus: u32) -> Option<u64> {
+    /// **A write start to `bus`** granted at `now`, carrying `word`:
+    /// `false` when it must wait --- its line's fill in flight, or a full
+    /// queue. The entry is queued now with its word, the cache's line, if
+    /// it holds the word, taking it with it as the memory will hold it; the
+    /// start is acknowledged two clocks after the grant (A15b.5).
+    pub fn write(&mut self, now: u64, bus: u32, word: Word) -> bool {
         let behind_fill =
             self.fill.is_some_and(|f| line_of(f.bus) == line_of(bus)) && self.write_waits_for_fill;
         if behind_fill || self.sweep_until > now {
-            return None;
+            return false;
         }
         if self.queue.len() >= QUEUE {
             self.meters.queue_full_clocks += 1;
-            return None;
+            return false;
         }
-        let tag = self.next_tag;
-        self.next_tag += 1;
-        self.queue.push_back(Queued { bus, word: None, tag });
-        Some(tag)
+        let held = self.as_held(bus, word);
+        self.cache.write(bus, held);
+        self.queue.push_back(Queued { bus, word: Some(word) });
+        true
     }
 
     /// A write-back's write, posted ahead of its reference's (A14.6): its
@@ -640,18 +634,21 @@ impl Port {
         }
         let held = self.as_held(bus, word);
         self.cache.write(bus, held);
-        let tag = self.next_tag;
-        self.next_tag += 1;
-        self.queue.push_back(Queued { bus, word: Some(word), tag });
+        self.queue.push_back(Queued { bus, word: Some(word) });
         true
     }
 
-    /// The word of the queued write `tag`, fixed: the cache's line, if it
-    /// holds the word, takes it with it, as the memory will hold it.
-    pub fn word(&mut self, tag: u64, word: Word) {
-        if let Some(q) = self.queue.iter_mut().find(|q| q.tag == tag) {
-            q.word = Some(word);
-            let bus = q.bus;
+    /// The planted fault `Mutation::WriteMdOfNextWord`: the newest write to
+    /// `bus`, queued or in flight, rewritten with `word`, and the cache's
+    /// line with it.
+    pub(crate) fn rewrite(&mut self, bus: u32, word: Word) {
+        let queued = self.queue.iter_mut().rev().find(|q| q.bus == bus).map(|q| &mut q.word);
+        let slot = match queued {
+            Some(w) => Some(w),
+            None => self.inflight.iter_mut().rev().find(|f| f.bus == bus).map(|f| &mut f.word),
+        };
+        if let Some(w) = slot.filter(|w| w.is_some()) {
+            *w = Some(word);
             let held = self.as_held(bus, word);
             self.cache.write(bus, held);
         }

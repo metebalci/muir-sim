@@ -60,8 +60,7 @@ impl Pipeline {
         self.npc_after = None;
         self.port.drain_now(&mut self.m);
         self.b = super::stages::Back::default();
-        self.x.write_pending = None;
-        self.x.write_new = false;
+        self.x.mutant_write = None;
         self.x.map_write = None;
         self.x.map_write_d = None;
         self.x.spc_write = None;

@@ -30,9 +30,8 @@ pub(crate) struct Start {
     pub mc: u64,
     /// An instruction fetch's (`IFETCH`).
     pub fetch: bool,
-    /// A write's word, once the microcycle after the start has fixed it
-    /// (`docs/quux.md`'s single-edge contract: the `MD` of the microcycle
-    /// after the start).
+    /// A write's word, from EX's commit on: `MD` as the start's own
+    /// microcycle leaves it (the MD-after-write ruling; `docs/quux.md`).
     pub word: Option<Word>,
 }
 
@@ -70,11 +69,10 @@ pub(crate) struct Exec {
     pub d_m31: Option<Word>,
     pub opc: [u16; 8],
     pub halted: bool,
-    /// A write started in the microcycle before, whose word this one fixes:
-    /// the start's sequence and `MD` as that microcycle left it.
-    pub write_pending: Option<(u64, Word)>,
-    /// A write this microcycle starts.
-    pub write_new: bool,
+    /// The planted fault [`super::Mutation::WriteMdOfNextWord`]: a write
+    /// started in the microcycle before, its sequence and `MD` as its start
+    /// left it, which the next word's `MD` load replaces.
+    pub mutant_write: Option<(u64, Word)>,
     /// The interrupt as a planted mutation samples it off the clock's own.
     pub interrupt_sample: Option<bool>,
     // Set and used within one microcycle, as `micro`'s.
@@ -324,13 +322,11 @@ impl Pipeline {
 
     /// A memory start: `VMA` as it stands, for WB to translate and the
     /// port to take (A15b.3). A read's `MD` is the port's to land; a write
-    /// waits for its word ([`Pipeline::fix_write`]).
+    /// takes its word as the microcycle ends, `MD` as the microcycle leaves
+    /// it (EX's commit, `Pipeline::ex_stage`; MD-after-write ruling).
     fn start(&mut self, write: bool, fetch: bool) {
         let va = self.m.vma as u32;
         self.x.starts.push(Start { write, va, mc: self.x.mc, fetch, word: None });
-        if write {
-            self.x.write_new = true;
-        }
     }
 
     /// The interrupt as a word in EX samples it (A15b.3; MP2b ruling Q13):
@@ -790,7 +786,6 @@ impl Pipeline {
         self.x.pdl_w = None;
         self.x.wrote_imem = false;
         self.x.d_fused = false;
-        self.x.write_new = false;
         self.x.pc = slot.pc;
         self.x.lc_adder = None;
         self.x.inhibit = false;
@@ -891,9 +886,9 @@ impl Pipeline {
     }
 
     /// **The microcycle's end** (`micro`'s `fetch_and_clock`): an operand
-    /// address armed by the microcycle before loads, and M 31's word; the
-    /// write started before takes its word; LC steps and fetches; the map
-    /// store's write moves to the next microcycle.
+    /// address armed by the microcycle before loads, and M 31's word; a
+    /// register write started before is released; LC steps and fetches; the
+    /// map store's write moves to the next microcycle.
     fn end_of_microcycle(&mut self, executed: bool, loads_md: bool) {
         if let Some(o) = self.m.macro_dispatch.operand.take() {
             let adr = self.m.macro_dispatch.operand_address(o);
@@ -904,21 +899,20 @@ impl Pipeline {
             self.x.am.push(AmWrite { a: Some(0o31), m: Some(0o31), word: w, seq: self.x.seq });
         }
         self.m.macro_dispatch.m31 = self.x.d_m31.take();
-        // A write started in the microcycle before: its word is `MD` as
-        // this microcycle leaves it when it loads `MD` and starts nothing,
-        // and otherwise `MD` as the start left it (`micro`'s
-        // `next_microcycle_holds_the_write`).
-        let starts = !self.x.starts.is_empty() || (self.x.next_instrd && self.needfetch());
-        if let Some((seq, md)) = self.x.write_pending.take() {
-            let next_s =
-                executed && loads_md && !starts && self.mutation != super::Mutation::WriteMdAtStart;
-            let word = if next_s { self.m.md } else { md };
-            self.fix_write(seq, word);
-        }
-        if std::mem::take(&mut self.x.write_new) {
-            // Fixed by the next microcycle, `MD` as this one leaves it
-            // standing for the word unless that one loads `MD`.
-            self.x.write_pending = Some((self.x.seq, self.m.md));
+        // A device register's write started before is taken no sooner than
+        // the clock after this microcycle, so that this word's conditions
+        // see the interrupt as it stood (MP2b rulings 2, Q1).
+        self.release_register_write(self.x.seq);
+        if self.mutation == super::Mutation::WriteMdOfNextWord {
+            let starts = !self.x.starts.is_empty() || (self.x.next_instrd && self.needfetch());
+            if let Some((seq, _)) = self.x.mutant_write.take()
+                && executed
+                && loads_md
+                && !starts
+            {
+                let md = self.m.md;
+                self.mutant_rewrite(seq, md);
+            }
         }
         if self.x.next_instrd {
             self.step_lc();

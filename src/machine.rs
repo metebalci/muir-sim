@@ -1159,6 +1159,13 @@ pub enum Halt {
     /// WRITE-I-MEM outside MIT's form, `IR<9:0>` 1647 without POPJ, or run
     /// as a delay slot (`in_slot`).
     WriteImemRefused { pc: u16, in_slot: bool },
+    /// **The MD-after-start check** (revision 15; the MD-after-read and
+    /// MD-after-write rulings), under `Micro::oa_select_check`: the word at
+    /// `pc` writes `MD` (an ALU or BYTE word with `IR<25>` clear and
+    /// functional destination 30-33, 34-37 decoding as those) in the
+    /// microcycle right after a memory start or an instruction fetch's
+    /// start, where the write is given way to or never carried.
+    MdAfterStart { pc: u16 },
 }
 
 /// The location counter itself, `LC<25:0>`: the 74S169 counters on page LC

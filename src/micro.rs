@@ -98,7 +98,8 @@ pub struct Micro {
     /// shadow of IMOD's pending flags, [`Micro::oa_shadow`], and halts on a
     /// select whose register the word executed before did not write, and on
     /// a write the next executed word does not select
-    /// (`Halt::OaSelectWithoutWrite`, `Halt::OaWriteWithoutSelect`). Always
+    /// (`Halt::OaSelectWithoutWrite`, `Halt::OaWriteWithoutSelect`); the
+    /// WRITE-I-MEM check and the MD-after-start check run under it. Always
     /// on in a run; tests turn it off to run a pair it would halt on. Not
     /// kept in a checkpoint.
     pub oa_select_check: bool,
@@ -216,6 +217,15 @@ pub struct Micro {
     /// write at it, whenever it goes out (MP2b rulings 1, Q12(c)). Not in a
     /// checkpoint, which is taken halted, the write gone out.
     write_ns: u64,
+    /// Revision 15: that write's word, `MD` as its start's microcycle left
+    /// it, a read's word due at the next head counted as landed (the
+    /// MD-after-write ruling; rule (A) of the MD-after-read ruling), taken
+    /// at the end of that microcycle ([`Micro::fetch_and_clock`]). Not in a
+    /// checkpoint: a write that waits past its start's microcycle is a
+    /// register write, and no word may load `MD` right after a start (the
+    /// MD-after-start check), so the word is `MD` as it stands until the
+    /// write goes out.
+    write_word: Option<Word>,
     /// Revision 14: the virtual address of that write, for its write-back
     /// as it goes out, which carries the setter's bit from the word written
     /// (A14.6, A14.8). Kept in a checkpoint of revision 14 alone.
@@ -338,6 +348,7 @@ impl Micro {
             memop: false,
             write_out: None,
             write_ns: 0,
+            write_word: None,
             write_va: None,
             write_pdl: None,
             redirect: None,
@@ -455,6 +466,7 @@ impl Micro {
             self.m.macro_dispatch.reset();
             // `-RESET` clears `MEMSTART` (`Rtl::reset`).
             self.write_out = None;
+            self.write_word = None;
             self.write_va = None;
             self.write_pdl = None;
             // Revision 14's TLB is swept, at once here, and its memory
@@ -779,6 +791,32 @@ impl Micro {
         Ok(())
     }
 
+    /// **The MD-after-start check** (MD-after-read and MD-after-write
+    /// rulings), under [`Micro::oa_select_check`] on revision 15: the word
+    /// about to run writes `MD` --- an ALU or BYTE word with `IR<25>` clear
+    /// and functional destination 30 to 33, 34 to 37 decoding as those
+    /// ([`Micro::write_functional`]) --- and the microcycle before started a
+    /// memory cycle or an instruction fetch (`MEMSTART`). It halts before
+    /// the word does anything. Right after a read or fetch start the write
+    /// gives way to the read's word, and right after a write start the
+    /// write is not carried; the micro-assembler refuses both in assembled
+    /// code, and this catches a word made at run time.
+    fn md_after_start_check(&self) -> Result<(), Halt> {
+        if !self.oa_select_check || !self.memstart {
+            return Ok(());
+        }
+        let ir = self.p0.raw();
+        let field = |pos: u32, len: u32| ((ir >> pos) & ((1u64 << len) - 1)) as u32;
+        let writes_md = matches!(self.p0.op(), Op::Alu | Op::Byte) && field(25, 1) == 0 && {
+            let code = field(19, 5);
+            (0o30..=0o33).contains(&if code & 0o20 != 0 { code & !0o4 } else { code })
+        };
+        if writes_md {
+            return Err(Halt::MdAfterStart { pc: self.p0_pc });
+        }
+        Ok(())
+    }
+
     /// `-RESET` clears revision 15's OA registers (A15b.15), and the shadow
     /// with them. The CADR's and revisions 13 and 14's IMOD registers keep
     /// their words; their pending flags are the boot's to drop.
@@ -961,6 +999,14 @@ impl Micro {
         }
         self.m.macro_dispatch.m31 = self.d_m31.take();
         if let Some((physical, WriteOut::Started)) = self.write_out {
+            if self.m.geometry.extended() {
+                // Revision 15: the word is fixed here, as the start's
+                // microcycle leaves `MD`, with a read's word due at the next
+                // head, which stands after anything this word wrote to `MD`
+                // (MD-after-write ruling; MD-after-read ruling, rule (A)).
+                let landing = self.new_md_delay == 1;
+                self.write_word = Some(if landing { self.new_md } else { self.m.md });
+            }
             if self.next_microcycle_holds_the_write() || self.register_write_waits(physical) {
                 self.write_out = Some((physical, WriteOut::Next));
             } else {
@@ -1493,6 +1539,7 @@ impl Micro {
         let lost = self.memstart && self.m.geometry.unibus;
         if lost {
             self.write_out = None;
+            self.write_word = None;
             self.write_va = None;
             self.write_pdl = None;
             self.new_md_delay = 0;
@@ -1551,7 +1598,13 @@ impl Micro {
     /// register write's speed bits are taken a microcycle after the start
     /// on both (`micro_keeps_the_machines_periods`, `tests/cosim.rs`). One
     /// right after a start, on the CADR, goes out at the end of its own
-    /// microcycle ([`Micro::start_cycle`]). **Not modelled**: `VMA<7:0>`
+    /// microcycle ([`Micro::start_cycle`]).
+    ///
+    /// **Revision 15 leaves the rule** (the MD-after-write ruling): its
+    /// write carries `MD` as the start's own microcycle leaves it, a read's
+    /// word due at the next head counted as landed, fixed at the end of that
+    /// microcycle (`write_word`), and only a register write waits for the
+    /// next. **Not modelled**: `VMA<7:0>`
     /// is also taken at the edge the cycle goes out on, so a `VMA` written
     /// in the microcycle after the start moves the word on the board and
     /// `rtl`, and not here.
@@ -1583,13 +1636,15 @@ impl Micro {
         }
     }
 
-    /// The write waiting to go out goes out, with `MD` as it stands.
+    /// The write waiting to go out goes out, with `MD` as it stands, or on
+    /// revision 15 with the word its start's microcycle fixed.
     ///
     /// On revision 14 its write-back goes first, with the word it writes
     /// (A14.6).
     fn write_goes_out(&mut self) {
+        let word = self.write_word.take();
         if let Some((physical, _)) = self.write_out.take() {
-            let md = self.m.md;
+            let md = word.unwrap_or(self.m.md);
             // Revision 14: a write redirected into the PDL buffer (A14.7).
             if let Some(i) = self.write_pdl.take() {
                 self.m.pdl[i as usize] = md;
@@ -1647,6 +1702,9 @@ impl Micro {
     /// what starts a cycle is destinations 21, 22, 31 and 32, and an
     /// instruction fetch, `NEXT INSTRD`'s or a `DISPATCH`'s with `IR<24>`,
     /// when `NEEDFETCH` is up (`IFETCH`, page VCTL1).
+    ///
+    /// Revision 15's write has its word already, so nothing the next
+    /// microcycle does to `MD` holds it.
     fn next_microcycle_holds_the_write(&self) -> bool {
         let nopped = self.inhibit || self.m.clock_control.nop11;
         let mut ir =
@@ -1674,7 +1732,15 @@ impl Micro {
                     && field(24, 1) != 0
                     && field(10, 2) != 2));
         let starts = fetches || matches!(dest, 0o21 | 0o22 | 0o31 | 0o32);
-        if self.m.geometry.unibus { loads_md || starts } else { loads_md && !starts }
+        if self.m.geometry.unibus {
+            loads_md || starts
+        } else if self.m.geometry.extended() {
+            // Revision 15: the word is fixed at the start's own microcycle,
+            // whatever the next does to `MD` (MD-after-write ruling).
+            false
+        } else {
+            loads_md && !starts
+        }
     }
 
     /// A read cycle starts at `VMA`: the cycle's bookkeeping as
@@ -2380,6 +2446,7 @@ impl Engine for Micro {
         // `-RESET` clears `MEMSTART` (`Rtl::reset`): a write not yet gone
         // out never does.
         self.write_out = None;
+        self.write_word = None;
         self.write_va = None;
         self.write_pdl = None;
         // Revision 14's TLB swept and its memory system's words cleared.
@@ -2445,6 +2512,7 @@ impl Engine for Micro {
             memop,
             write_out,
             write_ns: _,
+            write_word: _,
             write_va,
             write_pdl,
             // Set and used within one start.
@@ -2760,6 +2828,7 @@ impl Engine for Micro {
             let word = self.p0;
             self.p0 = self.oa_selected(word)?;
             self.write_imem_check()?;
+            self.md_after_start_check()?;
             if matches!(word.op(), Op::Alu | Op::Byte) {
                 pdl_field = word.pdl_field().map(|f| self.pdl_field_index(f));
             }
