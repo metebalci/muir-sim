@@ -32,6 +32,12 @@
 //! with `MUIR_PROFILE_MICROCODE=<version> <sha256 of ucadr.mcr> <commit>`
 //! naming the microcode in its header.
 //!
+//! `MUIR_STRIP=predictions`, `pdl` or `predictions,pdl` clears those parts
+//! of the profile pass's work from the control store after the
+//! definitions, before the workloads: the jumps' hints and the dispatches'
+//! predicted entries, the PDL address fields; a measurement aid for the
+//! pass's split.
+//!
 //! `MUIR_BUBBLES=2` gives the pipeline a wrong prediction's two bubbles,
 //! A15b.14's fallback, in place of the contract's one.
 //! `MUIR_TIME_NEUTRAL=1` is the time-neutral harness (MP2b ruling Q12,
@@ -1492,6 +1498,12 @@ fn measure<E: Profiled>(
         .map(|o| (0..32).map(|k| (e.machine().dmem[(o + k) as usize] & 0o37777) as u16).collect())
         .unwrap_or_default();
 
+    // `MUIR_STRIP=<parts>`: the profile pass's parts taken out again, for
+    // its split (A15b.8).
+    if let Ok(parts) = std::env::var("MUIR_STRIP") {
+        let n = strip(&mut e.machine_mut().imem, &parts);
+        println!("== stripped {parts}: {n} control store words changed");
+    }
     // `MUIR_PROFILE_OUT=<file>`: the profile (A15b.8), over the workloads,
     // their typing included, on the pipeline alone.
     let profile_out = std::env::var_os("MUIR_PROFILE_OUT").map(PathBuf::from);
@@ -1565,6 +1577,37 @@ fn measure<E: Profiled>(
         }
         println!("== the profile: written to {}", path.display());
     }
+}
+
+/// **The profile pass's parts, taken out** of the control store `imem`,
+/// a measurement aid for the pass's split (A15b.8): `predictions`, a
+/// JUMP's H `IR<48>` and a transferring dispatch's predicted entry
+/// `IR<63:48>`; `pdl`, an ALU or BYTE word's PDL address field
+/// `IR<58:48>`; comma-separated. The selects stay. The words changed.
+fn strip(imem: &mut [Insn], parts: &str) -> usize {
+    let (mut predictions, mut pdl) = (false, false);
+    for part in parts.split(',') {
+        match part {
+            "predictions" => predictions = true,
+            "pdl" => pdl = true,
+            _ => panic!("MUIR_STRIP={parts}: predictions, pdl, or both"),
+        }
+    }
+    let mut changed = 0;
+    for w in imem.iter_mut() {
+        let ir = w.raw();
+        let clear = match w.op() {
+            Op::Jump if predictions => 1 << 48,
+            Op::Dispatch if predictions && (ir >> 10) & 3 != 2 => 0xffff << 48,
+            Op::Alu | Op::Byte if pdl => 0o3777 << 48,
+            _ => 0,
+        };
+        if ir & clear != 0 {
+            *w = Insn::extended(ir & !clear);
+            changed += 1;
+        }
+    }
+    changed
 }
 
 /// **The profile's file** (A15b.8; its format in `docs/quux.md`): the
