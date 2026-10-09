@@ -2231,6 +2231,77 @@ harness's switch; and, on the pipeline, closes with the starts made right
 after a start, by the two starts' kinds, and the write channel's writes,
 two-beat writes and accepts delayed by a second beat.
 
+### The profile
+
+**The profile** (A15b.8) is the file the micro-assembler's profile pass
+reads to set each conditional jump's hint, `IR<48>`, and each dispatch's
+predicted entry, `IR<63:48>` (A15b.2). `examples/profile.rs` makes it on
+the pipeline with `MUIR_PROFILE_OUT=<file>`: the pipeline records, from the
+first workload's typing to the last workload's end, what every predicted
+site did (`Pipeline::outcomes`), and `muir::pipeline::profile` writes one
+record a site with the majority outcome. `MUIR_PROFILE_MICROCODE` names the
+microcode for the header, its version, its `ucadr.mcr`'s SHA-256 and its
+commit, as the caller knows them. A program whose branches
+are known gives the lines it should, and a hint, an offset, a kind or a
+count written wrong is caught
+(`the_profile_of_a_program_whose_branches_are_known` in
+`tests/revision_15_rtl.rs`).
+
+**The sites.** A conditional jump that RD predicts: a JUMP whose condition
+is not "always", that is not a WRITE-I-MEM (P and R), carries no POPJ
+(`IR<42>`) and no SL (`IR<60>`); and a DISPATCH that is not a
+dispatch-memory write (`IR<11:10>` = 2). A site no word executed has no
+line.
+
+**The format**, exactly, as the profile pass reads it. The file is ASCII
+text, one record a line, its words separated by spaces. A line whose first
+character is `;` is a comment. The header's lines come first; the pass
+reads their words and ignores them:
+
+```text
+profile 1
+microcode <version> <sha256 of ucadr.mcr>
+muir-sim <the commit that made it>
+workloads <the workloads' names>
+```
+
+`profile 1` is the format, version 1. Comments after them give the
+microcode's commit, the machine and the coverage. Then one record a site,
+in the order of the sites' addresses:
+
+```text
+jump KEY H EXECUTIONS
+dispatch KEY KIND TARGET EXECUTIONS
+```
+
+- A `KEY` is `LABEL+OFFSET`: the nearest control store label at or below
+  the address in the microcode's symbol table, `ucadr.sym`'s `I-MEM`
+  names, the alphabetically first where several name that address; and
+  the address's offset from it, in octal, always written, `+0` included,
+  so that a label ending in `+` reads as one. The pass resolves a key as
+  the label's location plus the offset.
+- A jump's `H` is `1` when the jump transferred in more than half its
+  executions, and `0` otherwise, a tie included.
+- A dispatch's `KIND` is its majority entry's kind by P and R: `drop` (P
+  and R), `jump` (neither), `call` (P) or `return` (R). `TARGET` is the
+  entry's address as a key for a jump or a call, and `-` for a drop-through
+  or a return. The majority is the entry, by kind and address, taken most
+  often; a tie goes to the first in the order drop, jump, call, return and
+  then by address.
+- `EXECUTIONS` is the site's executions, in decimal. Every executed site
+  has a record, a jump whose `H` is 0 and a dispatch whose `KIND` is `drop`
+  among them, so that the pass's shares of the executions it applies mean
+  what A15b.8 says.
+- The pass sets H for `H` 1, and for a dispatch sets `<61:48>` to the
+  target's address (0 for `drop` and `return`), `<62>` to P inverted and
+  `<63>` to R inverted: `drop` 00, `jump` 11, `call` 01, `return` 10
+  (A15b.2's table). A key it does not find, or finds on a word of another
+  class, leaves the word's extension zero.
+
+The coverage comments give, for each class, the sites in the control store
+the run loaded and those executed, which the file keys, and the share of
+their executions whose outcome is the one the record predicts.
+
 ## Not modeled
 
 `chip` is the CADR's boards, netlist for netlist, and QUUX has none:
