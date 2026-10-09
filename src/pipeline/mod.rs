@@ -49,6 +49,7 @@
 mod control;
 mod exec;
 pub mod port;
+pub mod profile;
 mod stages;
 
 use crate::clock::TimeBase;
@@ -389,8 +390,51 @@ pub struct Pipeline {
     pub registers: Option<Vec<[u64; 8]>>,
     /// What happened at which clock, when a test asks ([`Event`]).
     pub events: Option<Vec<(u64, Event)>>,
+    /// What each site RD predicts did, when a measurement asks by setting it
+    /// to `Some` ([`Outcomes`]): the profile's record (A15b.8).
+    pub outcomes: Option<Outcomes>,
     /// WB's and the port's state ([`stages::Back`]).
     pub(crate) b: stages::Back,
+}
+
+/// **What each predicted site did** (A15b.8), by its control store address,
+/// over the words committed: the record the profile is made from. A site is
+/// a word RD predicts: a conditional jump with neither POPJ nor SL, and not
+/// a WRITE-I-MEM, whose hint is `IR<48>`; and a dispatch that is not a
+/// dispatch-memory write, whose predicted entry is `IR<63:48>` (A15b.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Outcomes {
+    /// Each conditional jump's executions with its condition false, and
+    /// true: the times it did not transfer, and did.
+    pub jumps: std::collections::BTreeMap<u16, [u64; 2]>,
+    /// Each dispatch's executions by the entry it took: its kind, and its
+    /// address for a jump or a call, 0 for a drop-through or a return.
+    pub dispatches: std::collections::BTreeMap<u16, std::collections::BTreeMap<(Kind, u16), u64>>,
+}
+
+/// A dispatch entry's kind by its P and R (A15b.2's table).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Kind {
+    /// P and R: on to the next word in sequence.
+    Drop,
+    /// Neither: a jump to the entry's address.
+    Jump,
+    /// P alone: a call of the entry's address.
+    Call,
+    /// R alone: a return.
+    Return,
+}
+
+impl Kind {
+    /// The kind of an entry with `p` and `r`.
+    pub fn of(p: bool, r: bool) -> Kind {
+        match (p, r) {
+            (true, true) => Kind::Drop,
+            (false, false) => Kind::Jump,
+            (true, false) => Kind::Call,
+            (false, true) => Kind::Return,
+        }
+    }
 }
 
 /// What [`Pipeline::events`] records, with the clock it happened in.
@@ -546,6 +590,7 @@ impl Pipeline {
             operands: None,
             registers: None,
             events: None,
+            outcomes: None,
             b: stages::Back::default(),
         };
         p.m.period = if p.m.geometry.extended() { period } else { 0 };

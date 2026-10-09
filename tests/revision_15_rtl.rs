@@ -5314,3 +5314,81 @@ fn a_data_push_keeps_the_stack_s_19_bits() {
         assert_eq!(u64::from(m.spc[ptr]), low, "{what}: the stack's word");
     }
 }
+
+// --- The profile (A15b.8) ------------------------------------------------------
+
+/// **The profile's lines for a program whose branches are known** (A15b.8;
+/// `muir::pipeline::profile`, its format in `docs/quux.md`): on the
+/// pipeline,
+/// - a loop's conditional jump back at LOOP+1, three times, transferring
+///   twice: hint 1;
+/// - a conditional jump at TWO+10 that never transfers: hint 0;
+/// - a dispatch at DLOOP, three times, calling SUB twice and jumping to OUT
+///   once: a call of SUB, keyed AAA (below);
+/// - a dispatch at SUB, also labelled AAA, whose entry returns, twice: a
+///   return, keyed by the alphabetically first of the two labels.
+///
+/// The unconditional jumps and the stop are no sites. The coverage counts
+/// the four sites, all executed, and the executions the lines predict.
+#[test]
+fn the_profile_of_a_program_whose_branches_are_known() {
+    use muir::isa::asm::INVERT;
+    use muir::pipeline::profile;
+    const M_MINUS_1: u64 = 0o23 << 3;
+    const SUB: u64 = 0o600;
+    let mut p = Prog::default();
+    p.set(3, 0o20);
+    let lp = p.at();
+    p.op(ALU | M_MINUS_1 | m_src(0o20) | m_dest(0o20));
+    p.op(jcond(3) | INVERT | m_src(0o20) | a_src(ZERO) | target(lp) | N);
+    p.fill(1);
+    // TWO labels the word eight before the jump: the offset is octal.
+    let two = p.at();
+    p.fill(8);
+    p.op(jcond(3) | m_src(M_ONE) | a_src(ZERO) | target(STOP) | N);
+    p.fill(1);
+    p.set(2, 0o22);
+    let dloop = p.at();
+    // M 22's low two bits: 2 and 1 call SUB, 0 jumps to OUT.
+    p.op(disp(0o100) | 2 << 5 | m_src(0o22));
+    p.op(ALU | M_MINUS_1 | m_src(0o22) | m_dest(0o22));
+    p.op(JUMP | ALWAYS | N | target(dloop));
+    p.fill(1);
+    let out = p.at();
+    p.stop();
+    p.dmem.push((0o102, SUB as u32 | 1 << 15));
+    p.dmem.push((0o101, SUB as u32 | 1 << 15));
+    p.dmem.push((0o100, out as u32));
+    p.dmem.push((0o104, 1 << 16));
+    while p.at() < SUB {
+        p.fill(1);
+    }
+    p.op(disp(0o104));
+    p.fill(1);
+    let e = pipeline_with(&p, |e| e.outcomes = Some(Default::default()));
+    let o = e.outcomes.clone().expect("the record");
+    let syms = muir::sym::parse(&format!(
+        "-2 START I-MEM 0\nLOOP I-MEM {lp:o}\nTWO I-MEM {two:o}\nDLOOP I-MEM {dloop:o}\n\
+         OUT I-MEM {out:o}\nSUB I-MEM {SUB:o}\nAAA I-MEM {SUB:o}\n-1\n"
+    ))
+    .unwrap();
+    let (lines, unkeyed) = profile::lines(&o, &syms);
+    assert!(unkeyed.is_empty(), "every site has a label at or below it");
+    assert_eq!(
+        lines,
+        [
+            "jump LOOP+1 1 3",
+            "jump TWO+10 0 1",
+            "dispatch DLOOP+0 call AAA+0 3",
+            "dispatch AAA+0 return - 2",
+        ]
+    );
+    let c = profile::coverage(&o, &e.machine().imem);
+    assert_eq!((c.jump_sites, c.jump_sites_executed), (2, 2), "{c:?}");
+    assert_eq!((c.jump_executions, c.jumps_predicted), (4, 3), "{c:?}");
+    assert_eq!((c.dispatch_sites, c.dispatch_sites_executed), (2, 2), "{c:?}");
+    assert_eq!((c.dispatch_executions, c.dispatches_predicted), (5, 4), "{c:?}");
+    // The program ran as micro runs it.
+    let u = micro(&p);
+    assert_eq!(state(e.machine()), state(u.machine()));
+}

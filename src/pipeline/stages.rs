@@ -1390,6 +1390,33 @@ impl Pipeline {
         if !e.nop && class(ir) == Op::Jump && self.m.geometry.extended() && e.word.oa_low_select() {
             self.meters.sl_jumps += 1;
         }
+        if !e.nop
+            && let Some(o) = self.outcomes.as_mut()
+        {
+            let word = crate::isa::Insn::new(ir);
+            match class(ir) {
+                Op::Jump
+                    if unconditional(ir).is_none()
+                        && field(ir, 8, 2) != 3
+                        && !word.popj()
+                        && !e.word.oa_low_select() =>
+                {
+                    o.jumps.entry(e.pc).or_default()[self.x.taken as usize] += 1;
+                }
+                Op::Dispatch if field(ir, 10, 2) != 2 => {
+                    let (p, r) = self.x.entry_pr;
+                    let kind = super::Kind::of(p, r);
+                    // A jump's or a call's address is where it went.
+                    let addr = if matches!(kind, super::Kind::Jump | super::Kind::Call) {
+                        self.x.npc
+                    } else {
+                        0
+                    };
+                    *o.dispatches.entry(e.pc).or_default().entry((kind, addr)).or_insert(0) += 1;
+                }
+                _ => {}
+            }
+        }
         let kind = match class(ir) {
             Op::Jump => 0,
             Op::Dispatch => 1,

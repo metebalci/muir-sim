@@ -26,6 +26,12 @@
 //! by default, `MUIR_CACHE` its cache's words, and `MUIR_SYNC_TICKS` is
 //! refused.
 //!
+//! `MUIR_PROFILE_OUT=<file>` writes the profile (A15b.8) of the pipeline's
+//! run, revision 15's `rtl`, over the workloads named: each predicted
+//! site's majority outcome, one line a site, in `docs/quux.md`'s format,
+//! with `MUIR_PROFILE_MICROCODE=<version> <sha256 of ucadr.mcr> <commit>`
+//! naming the microcode in its header.
+//!
 //! `MUIR_BUBBLES=2` gives the pipeline a wrong prediction's two bubbles,
 //! A15b.14's fallback, in place of the contract's one.
 //! `MUIR_TIME_NEUTRAL=1` is the time-neutral harness (MP2b ruling Q12,
@@ -211,6 +217,15 @@ trait Profiled: Engine {
     fn run_lines(&self) -> Vec<String> {
         Vec::new()
     }
+    /// The pipeline's record of what each predicted site does, for the
+    /// profile (A15b.8): started, where the engine keeps one.
+    fn record_outcomes(&mut self) -> bool {
+        false
+    }
+    /// That record.
+    fn outcomes(&self) -> Option<&muir::pipeline::Outcomes> {
+        None
+    }
 }
 
 impl Profiled for Micro {
@@ -252,6 +267,12 @@ impl<E: Profiled + support::macro_dispatch::Executes> Profiled
     fn run_lines(&self) -> Vec<String> {
         self.engine.run_lines()
     }
+    fn record_outcomes(&mut self) -> bool {
+        self.engine.record_outcomes()
+    }
+    fn outcomes(&self) -> Option<&muir::pipeline::Outcomes> {
+        self.engine.outcomes()
+    }
 }
 
 /// Revision 15's `rtl`, its pipeline: no stall of its own in the bus's
@@ -259,6 +280,13 @@ impl<E: Profiled + support::macro_dispatch::Executes> Profiled
 impl Profiled for Pipeline {
     fn executed_pc(&self) -> Option<u16> {
         self.executed()
+    }
+    fn record_outcomes(&mut self) -> bool {
+        self.outcomes = Some(Default::default());
+        true
+    }
+    fn outcomes(&self) -> Option<&muir::pipeline::Outcomes> {
+        self.outcomes.as_ref()
     }
     fn span(&self) -> Span {
         Span::of_pipeline(self)
@@ -328,6 +356,12 @@ impl<E: Profiled + Neutral + support::macro_dispatch::Executes> Profiled for Dig
     }
     fn run_lines(&self) -> Vec<String> {
         self.engine.run_lines()
+    }
+    fn record_outcomes(&mut self) -> bool {
+        self.engine.record_outcomes()
+    }
+    fn outcomes(&self) -> Option<&muir::pipeline::Outcomes> {
+        self.engine.outcomes()
     }
 }
 
@@ -1458,6 +1492,12 @@ fn measure<E: Profiled>(
         .map(|o| (0..32).map(|k| (e.machine().dmem[(o + k) as usize] & 0o37777) as u16).collect())
         .unwrap_or_default();
 
+    // `MUIR_PROFILE_OUT=<file>`: the profile (A15b.8), over the workloads,
+    // their typing included, on the pipeline alone.
+    let profile_out = std::env::var_os("MUIR_PROFILE_OUT").map(PathBuf::from);
+    if profile_out.is_some() {
+        assert!(e.record_outcomes(), "MUIR_PROFILE_OUT: the profile is made on revision 15's rtl");
+    }
     // A marker of its own for every run, so that a workload named twice is
     // run twice.
     let mut total: Option<Span> = None;
@@ -1516,4 +1556,73 @@ fn measure<E: Profiled>(
     for line in e.run_lines() {
         println!("== the whole run: {line}");
     }
+    if let (Some(path), Some(o)) = (profile_out, e.outcomes()) {
+        let names: Vec<&str> = wanted.iter().map(|(n, _)| *n).collect();
+        let text = profile_text(o, syms, &e.machine().imem, &names);
+        std::fs::write(&path, &text).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        for line in text.lines().filter(|l| l.starts_with("; coverage")) {
+            println!("== the profile: {}", line.trim_start_matches("; "));
+        }
+        println!("== the profile: written to {}", path.display());
+    }
+}
+
+/// **The profile's file** (A15b.8; its format in `docs/quux.md`): the
+/// header, `profile 1`, the microcode (`MUIR_PROFILE_MICROCODE`, its
+/// version, its `ucadr.mcr`'s SHA-256 and its commit, as the caller knows
+/// them), this build's muir-sim commit and the workloads, with the machine
+/// and the coverage as comments; then the site records.
+fn profile_text(
+    o: &muir::pipeline::Outcomes,
+    syms: &Symbols,
+    imem: &[Insn],
+    names: &[&str],
+) -> String {
+    use muir::pipeline::profile;
+    let microcode = std::env::var("MUIR_PROFILE_MICROCODE").expect(
+        "MUIR_PROFILE_MICROCODE=<version> <sha256 of ucadr.mcr> <commit>, for the profile's header",
+    );
+    let words: Vec<&str> = microcode.split_whitespace().collect();
+    let [version, sha, commit] = words[..] else {
+        panic!("MUIR_PROFILE_MICROCODE={microcode:?}: <version> <sha256 of ucadr.mcr> <commit>")
+    };
+    let (records, unkeyed) = profile::lines(o, syms);
+    let c = profile::coverage(o, imem);
+    let pct = |a: u64, b: u64| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
+    let mut out = String::new();
+    out.push_str("; The profile (contract G3 revision 15, A15b.8): one record a site.\n");
+    out.push_str("profile 1\n");
+    out.push_str(&format!("microcode {version} {sha}\n"));
+    out.push_str(&format!("; microcode {version} from muir-sys {commit}\n"));
+    out.push_str(&format!("muir-sim {}\n", option_env!("MUIR_GIT").unwrap_or("unknown")));
+    out.push_str(&format!("workloads {}\n", names.join(" ")));
+    out.push_str(&format!(
+        "; run: rtl, QUUX revision 15, {} of main memory\n",
+        std::env::var("MUIR_MAIN_MEMORY_SIZE").unwrap_or_else(|_| "2MW".into())
+    ));
+    out.push_str(&format!(
+        "; coverage: conditional jumps {} of {} sites executed, {} executions, {} ({:.2}%) as the record predicts\n",
+        c.jump_sites_executed,
+        c.jump_sites,
+        c.jump_executions,
+        c.jumps_predicted,
+        pct(c.jumps_predicted, c.jump_executions)
+    ));
+    out.push_str(&format!(
+        "; coverage: dispatches {} of {} sites executed, {} executions, {} ({:.2}%) as the record predicts\n",
+        c.dispatch_sites_executed,
+        c.dispatch_sites,
+        c.dispatch_executions,
+        c.dispatches_predicted,
+        pct(c.dispatches_predicted, c.dispatch_executions)
+    ));
+    if !unkeyed.is_empty() {
+        let at: Vec<String> = unkeyed.iter().map(|a| format!("{a:o}")).collect();
+        out.push_str(&format!("; no label at or below, so no record: {}\n", at.join(" ")));
+    }
+    for l in records {
+        out.push_str(&l);
+        out.push('\n');
+    }
+    out
 }
