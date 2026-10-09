@@ -5392,3 +5392,98 @@ fn the_profile_of_a_program_whose_branches_are_known() {
     let u = micro(&p);
     assert_eq!(state(e.machine()), state(u.machine()));
 }
+
+/// **A transferring dispatch takes no OA select** (A15b.2): its `<61:60>`
+/// are its predicted address's `<13:12>`. A dispatch predicting a jump to
+/// 10000, 20000 or 37777 octal, wrong each time, after OA-REG-HIGH was
+/// written and spent by an SH word, runs on `micro` with the OA select
+/// check on, and the pipeline ends as `micro` does: neither reads the bits
+/// as SL or SH, which would halt `micro` at OA-SELECT-WITHOUT-WRITE and OR
+/// OA-REG-HIGH into the pipeline's M source, a dispatch on another word. A
+/// dispatch-memory write's SL still selects.
+#[test]
+fn a_dispatch_predicting_an_address_above_7777_takes_no_select() {
+    use muir::isa::asm::{ADD, OA_HIGH_SELECT, OA_LOW_SELECT, predicted};
+    for addr in [0o10000u64, 0o20000, 0o37777] {
+        let mut p = Prog::default();
+        p.set(1, 0o20);
+        // OA-REG-HIGH 3: M source 3 more, were it ORed into a word.
+        let three = p.k(3);
+        p.op(ALU | SETA | a_src(three) | fd(0o17));
+        p.op(ALU | ADD | a_src(ZERO) | m_src(0o20) | m_dest(0o25) | OA_HIGH_SELECT);
+        p.fill(3);
+        // M 20's low two bits: 1 jumps to ONE_AT, 3 to THREE_AT.
+        p.op(disp(0o100) | 2 << 5 | m_src(0o20) | predicted(addr, false, false));
+        p.fill(1);
+        let back = p.at();
+        p.stop();
+        let (one_at, three_at) = (0o600u64, 0o640u64);
+        p.dmem.push((0o101, one_at as u32));
+        p.dmem.push((0o103, three_at as u32));
+        while p.at() < one_at {
+            p.fill(1);
+        }
+        p.set(0o111, 0o26);
+        p.op(JUMP | ALWAYS | N | target(back));
+        p.fill(1);
+        while p.at() < three_at {
+            p.fill(1);
+        }
+        p.set(0o333, 0o26);
+        p.op(JUMP | ALWAYS | N | target(back));
+        p.fill(1);
+        let e = same(&p);
+        assert_eq!(e.machine().mmem[0o26], 0o111, "predicted {addr:o}: the entry M 20 names");
+    }
+    // A dispatch-memory write with SL still takes OA-REG-LOW into its
+    // address: entry 101 | 6 = 107 written.
+    let mut p = Prog::default();
+    let (six, word) = (p.k(6 << 12), p.k(0o4321));
+    p.op(ALU | SETA | a_src(six) | fd(0o16));
+    p.op(disp(0o101) | 2 << 10 | a_src(word) | OA_LOW_SELECT);
+    p.fill(1);
+    p.stop();
+    let e = same(&p);
+    assert_eq!(e.machine().dmem[0o107], 0o4321, "the dispatch-memory write's SL");
+}
+
+/// **A PDL address field reads M-AP and A-LOCALP as the word finds them**
+/// (A15b.2), the word right before it having written them: the register's
+/// M-AP is M 0 and its A-LOCALP A 0 after the boot, written 40 and 60 and
+/// read at once, and a word later, by a field whose index is 40 + 5 and
+/// 60 − 3, and the PDL buffer read through the index in the next word. The
+/// check holds the formed index to the index written on both engines; one
+/// formed from the base copies before the word in WB lands halts the
+/// pipeline at PDL-FIELD-MISMATCH where `micro` runs on.
+#[test]
+fn a_pdl_field_reads_a_base_the_word_before_wrote() {
+    use muir::isa::asm::pdl_field;
+    for gap in [0, 1] {
+        let mut p = Prog::default();
+        let (k40, k60, k45, k55) = (p.k(0o40), p.k(0o60), p.k(0o45), p.k(0o55));
+        // The PDL buffer's words 45 and 55, to read through the index.
+        for (at, v) in [(k45, 0o4545), (k55, 0o5555)] {
+            let kv = p.k(v);
+            p.op(ALU | SETA | a_src(at) | fd(0o13));
+            p.op(ALU | SETA | a_src(kv) | fd(0o12));
+        }
+        p.fill(2);
+        p.op(ALU | SETA | a_src(k40) | m_dest(0));
+        p.fill(gap);
+        p.op(ALU | SETA | a_src(k45) | fd(0o13) | pdl_field(0, 5));
+        p.op(ALU | SETM | src(0o5) | m_dest(0o26));
+        p.op(ALU | SETA | a_src(k60) | a_dest(0));
+        p.fill(gap);
+        p.op(ALU | SETA | a_src(k55) | fd(0o13) | pdl_field(1, -3));
+        p.op(ALU | SETM | src(0o5) | m_dest(0o27));
+        p.fill(1);
+        p.stop();
+        let e = same(&p);
+        let m = e.machine();
+        assert_eq!(
+            (m.mmem[0o26], m.mmem[0o27]),
+            (0o4545, 0o5555),
+            "gap {gap}: read through the index"
+        );
+    }
+}

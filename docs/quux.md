@@ -1841,6 +1841,9 @@ and `A-LOCALP` from the machine's copies of them ([the fused
 return](#the-fused-return)), and after the word holds PDL-INDEX to it; a
 mismatch halts the run at PDL-FIELD-MISMATCH, `Halt::PdlFieldMismatch`,
 the word committed (`a_wrong_pdl_field_halts_at_pdl_field_mismatch`). The
+pipeline forms it the same way in EX, a write of `M-AP` or `A-LOCALP` by
+the word before, still in WB, included, as the word's own operands take it
+(`a_pdl_field_reads_a_base_the_word_before_wrote`). The
 control store and the PROM hold 64-bit words.
 
 **The OA registers replace IMOD** (A15b.15). Destinations 16 and 17 load
@@ -1862,6 +1865,11 @@ fields (`each_of_the_nine_fields_is_taken_through_its_select`):
 | SL | JUMP | the address `<25:12>`: the target, or `WRITE-I-MEM`'s address |
 | SL | DISPATCH, a dispatch-memory write only | the address `<23:12>` |
 | SH | ALU, BYTE, JUMP | the A source `<41:32>`; the M source `<30:26>` when it is M memory, `IR<31>` 0 |
+
+A dispatch that transfers takes no select: its `IR<61:48>` is the
+predicted address, so `<60>` and `<61>` are that address's `<12>` and
+`<13>`, and both engines read them so whatever the address
+(`a_dispatch_predicting_an_address_above_7777_takes_no_select`).
 
 A register bit that is set neither in the word nor in its class's fields
 halts the run before the word commits, at OA-OUTSIDE-FIELDS,

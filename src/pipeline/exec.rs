@@ -765,9 +765,27 @@ impl Pipeline {
 
     /// `micro`'s `pdl_field_index`.
     fn pdl_field_index(&self, (base, displacement): (u8, i8)) -> u16 {
+        // `M-AP` and `A-LOCALP` as the word finds them: the copies, with a
+        // write of either by the word in WB, which lands at this clock's
+        // edge (d1, as the word's own operands take it).
+        let d = &self.m.macro_dispatch;
+        let (ap_at, localp_at) = (
+            crate::machine::macro_dispatch::ap_address(d.register),
+            crate::machine::macro_dispatch::localp_address(d.register),
+        );
+        let landing = |m_side: bool| {
+            self.b.landing.am.iter().rev().find_map(|w| {
+                let at = if m_side {
+                    w.m.map(usize::from) == Some(ap_at)
+                } else {
+                    w.a.map(usize::from) == Some(localp_at)
+                };
+                at.then_some(w.word as u32 & crate::machine::macro_dispatch::BASE_BITS)
+            })
+        };
         let b = match base {
-            0 => self.m.macro_dispatch.ap,
-            1 => self.m.macro_dispatch.localp,
+            0 => landing(true).unwrap_or(d.ap),
+            1 => landing(false).unwrap_or(d.localp),
             2 => u32::from(self.m.pdl_pointer),
             _ => u32::from(self.m.pdl_index),
         };

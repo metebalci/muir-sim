@@ -53,17 +53,23 @@ impl Insn {
     }
 
     /// `IR<60>` --- revision 15's `oa-low-select`, SL (A15b.2, A15b.15): on
-    /// an ALU, BYTE or JUMP word, and on a dispatch-memory write, the word
-    /// reads OA-REG-LOW into its fields.
+    /// an ALU, BYTE or JUMP word, and on a dispatch-memory write
+    /// (`IR<11:10>` = 2), the word reads OA-REG-LOW into its fields. On a
+    /// dispatch that transfers it is no select: `IR<61:48>` is the
+    /// predicted address, `<60>` its `<12>`.
     pub fn oa_low_select(self) -> bool {
-        self.field(60, 1) != 0
+        match self.op() {
+            Op::Dispatch => self.field(10, 2) == 2 && self.field(60, 1) != 0,
+            _ => self.field(60, 1) != 0,
+        }
     }
 
     /// `IR<61>` --- revision 15's `oa-high-select`, SH (A15b.2, A15b.15): on
     /// an ALU, BYTE or JUMP word, the word reads OA-REG-HIGH into its A and
-    /// M source.
+    /// M source. No dispatch takes it: on one that transfers `<61>` is the
+    /// predicted address's `<13>`.
     pub fn oa_high_select(self) -> bool {
-        self.field(61, 1) != 0
+        self.op() != Op::Dispatch && self.field(61, 1) != 0
     }
 
     /// `IR<48>` on a JUMP --- revision 15's hint bit, H (A15b.2): 1 predicts
