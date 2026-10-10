@@ -66,7 +66,6 @@ pub(crate) struct Exec {
     pub wrcyc: bool,
     pub spc_write: Option<(u8, u32)>,
     pub operand: Option<crate::machine::Operand>,
-    pub d_m31: Option<Word>,
     pub opc: [u16; 8],
     pub halted: bool,
     /// The planted fault [`super::Mutation::WriteMdOfNextWord`]: a write
@@ -112,8 +111,9 @@ pub(crate) struct Exec {
     /// The microcycle wrote the control store: the words behind it are
     /// fetched again.
     pub wrote_imem: bool,
-    /// D or a fused return on a fetched word: the word.
-    pub d_fused: bool,
+    /// A return that needs a fetch began D's wait (the D-timing ruling,
+    /// R1).
+    pub d_waits: bool,
     /// What the microcycle decided, for EX's check of RD's prediction: a
     /// conditional jump's condition, a dispatch's entry's P and R.
     pub taken: bool,
@@ -223,28 +223,22 @@ impl Pipeline {
         }
     }
 
-    /// The word D may dispatch on (`micro`'s `d_word`): main memory's word
-    /// at `LC<33:2>` as the stream's fetch will read it, every write the
-    /// processor made before it in it, when D is enabled and condition 6
-    /// is false.
-    fn d_word(&self) -> Option<Word> {
-        use crate::machine::macro_dispatch::{D_ENABLE, ENABLE};
+    /// **Whether D's wait begins** at a return that needs a fetch
+    /// (`micro`'s `d_may_wait`; the D-timing ruling, R1): D's enable, the
+    /// popped word the main loop's, and condition 6's interrupt, sampled
+    /// here, and sequence break false.
+    fn d_may_wait(&self, popped: u32) -> bool {
+        use crate::machine::macro_dispatch::{D_ENABLE, ENABLE, main};
         let register = self.m.macro_dispatch.register;
         if !self.m.geometry.extended() || register & (ENABLE | D_ENABLE) != ENABLE | D_ENABLE {
-            return None;
+            return false;
         }
         let int_enabled = self.m.interrupt_control & (1 << 27) != 0;
         let sequence_break = self.m.interrupt_control & (1 << 26) != 0;
-        if !self.m.vmaok || (int_enabled && self.interrupt_now()) || sequence_break {
-            return None;
-        }
-        let at = ((self.m.lc & self.m.geometry.lc_counter()) >> 2) as u32;
-        let t = self.m.translate(at);
-        let main = t.physical & crate::tlb::DEVICE == 0;
-        if !(t.access_permitted && main) || t.physical as usize >= self.m.main.len() {
-            return None;
-        }
-        Some(self.coherent(t.physical))
+        popped & (1 << 14) != 0
+            && popped & 0o37777 == main(register)
+            && !(int_enabled && self.interrupt_now())
+            && !sequence_break
     }
 
     fn pop_asks_for_a_fetch(&mut self, word: u32) -> u32 {
@@ -256,10 +250,8 @@ impl Pipeline {
 
     /// `micro`'s `main_loop_return`.
     fn main_loop_return(&mut self, word: u32, advance: bool) -> u32 {
-        let fetched = if self.needfetch() { self.d_word() } else { None };
         let target = self.pop_asks_for_a_fetch(word);
         if !self.m.geometry.macro_dispatch
-            || (self.needfetch() && fetched.is_none())
             || advance
             || self.x.next_instrd
             || self.x.pushed
@@ -268,12 +260,22 @@ impl Pipeline {
         {
             return target;
         }
+        // D (A15b.9; the D-timing ruling, R1): a return that needs a fetch
+        // goes to the main loop, and where D may dispatch its wait begins,
+        // D deciding at the arrival of the word the slot's fetch brings.
+        if self.needfetch() {
+            self.x.d_waits = self.d_may_wait(word);
+            if self.x.d_waits && self.mutation == super::Mutation::DKeepAtReturn {
+                self.m.spcptr = (self.m.spcptr + 1) & 0o37;
+            }
+            return target;
+        }
         let inc = if self.m.byte_mode() { 1 } else { 2 };
         let counter = self.m.geometry.lc_counter();
         let stepped = (self.m.lc & counter).wrapping_add(inc) & counter;
         let index_rotate = crate::machine::macro_dispatch::index_rotate(true);
         let rotate = self.lc_rotation(stepped, index_rotate);
-        let m31 = fetched.unwrap_or(self.m.mmem[0o31]);
+        let m31 = self.m.mmem[0o31];
         let rotated = rol40(m31, rotate);
         match self.m.macro_dispatch.fused_return(word, rotated, index_rotate) {
             Some(f) => {
@@ -283,8 +285,6 @@ impl Pipeline {
                 self.m.macro_dispatch.fused += 1;
                 self.meters.fused += 1;
                 self.x.operand = f.operand;
-                self.x.d_m31 = fetched;
-                self.x.d_fused = fetched.is_some();
                 f.handler as u32
             }
             None => target,
@@ -803,7 +803,7 @@ impl Pipeline {
         self.x.am.clear();
         self.x.pdl_w = None;
         self.x.wrote_imem = false;
-        self.x.d_fused = false;
+        self.x.d_waits = false;
         self.x.pc = slot.pc;
         self.x.lc_adder = None;
         self.x.inhibit = false;
@@ -917,7 +917,6 @@ impl Pipeline {
         if let Some(w) = self.m.macro_dispatch.m31.take() {
             self.x.am.push(AmWrite { a: Some(0o31), m: Some(0o31), word: w, seq: self.x.seq });
         }
-        self.m.macro_dispatch.m31 = self.x.d_m31.take();
         // A device register's write started before is taken no sooner than
         // the clock after this microcycle, so that this word's conditions
         // see the interrupt as it stood (MP2b rulings 2, Q1).
@@ -944,11 +943,5 @@ impl Pipeline {
             self.x.opc[0] = self.x.pc;
             self.m.opc = self.x.pc;
         }
-    }
-
-    /// The word coherent memory holds at physical `phys` for D's decision:
-    /// main memory's, as every write the processor made has left it.
-    fn coherent(&self, phys: u32) -> Word {
-        self.port.coherent(&self.m, phys)
     }
 }

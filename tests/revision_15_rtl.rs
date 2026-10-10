@@ -1641,6 +1641,44 @@ const TWOS_THREES: [u32; 10] = [
     hw(7, 0, 0),
 ];
 
+/// Opcode 11's handler: reads the PDL buffer through PDL-INDEX as its first
+/// word finds it, the operand address its fused return loaded.
+const OP_11: u64 = 0o270;
+
+/// **A fused return's operand address over a base the word before writes**
+/// (A15b.9, A15b.16): opcode 3's return, right after a word that writes
+/// A-LOCALP with its own word, fuses on opcode 11, LOCAL 2, whose handler
+/// reads the PDL buffer through the index the address loads, in its first
+/// word. Both engines run it to the stop and end alike, D off and on; RD's
+/// pending mark on its index copy, made for the operand address, clears
+/// when the address loads, where a mark that waited for a sequence nothing
+/// commits held CS for ever.
+#[test]
+fn an_operand_address_over_a_base_the_word_before_writes() {
+    for d in [false, true] {
+        let mut m = ml_machine(
+            d,
+            &[hw(3, 0, 0), hw(0o11, 5, 2), hw(1, 0, 0), hw(7, 0, 0)],
+            &[ALU | SETA | a_src(LOCALP_AT) | a_dest(LOCALP_AT)],
+            &|_| {},
+        );
+        let mut put = |at: u64, w: u64| m.imem[at as usize] = Insn::extended(w);
+        put(OP_11, ALU | SETM | src(0o5) | m_dest(0o27));
+        put(OP_11 + 1, filler().raw() | POPJ);
+        put(OP_11 + 2, ALU | SETM | m_src(0o31) | fd(0o11));
+        m.dmem[OPDTB as usize + 0o11] = OP_11 as u32;
+        for (k, e) in m.macro_dispatch.entries.iter_mut().enumerate() {
+            if k >> 3 & 0o37 == 0o11 {
+                *e = OP_11 as u32 | muir::machine::macro_dispatch::OPERAND;
+            }
+        }
+        // The PDL buffer's word at LOCALP + 2, which the handler reads.
+        m.pdl[LOCALP as usize + 2] = 0o4242;
+        let e = ml_same(m);
+        assert_eq!(e.machine().mmem[0o27], 0o4242, "D {d}: the operand read through the index");
+    }
+}
+
 /// **RD's return inputs on planted pairs** (A15b.16): a return right after
 /// the microcycle that steps LC (`NEXT INSTRD`), and right after a write of
 /// LC, with D on and off: as `micro`. RD's LC copy not stepped, or not
@@ -1648,12 +1686,16 @@ const TWOS_THREES: [u32; 10] = [
 #[test]
 fn rd_s_lc_copy_on_planted_pairs() {
     for d in [false, true] {
+        // With D on every return that needs a fetch waits for D, whose
+        // decision takes RD's copies from the committed registers: the
+        // faults are planted with D off, where RD's copy decides.
+        let caught = |m: &[Mutation]| if d { Vec::new() } else { m.to_vec() };
         let m = ml_machine(d, &TWOS_THREES, &[], &|_| {});
-        let e = ml_same_and_caught(m, &[Mutation::LcNotStepped], "a step before a return");
+        let e = ml_same_and_caught(m, &caught(&[Mutation::LcNotStepped]), "a step before a return");
         assert!(e.meters.fused > 0, "returns fused");
         // LC written by the word before the return: its value LC's own.
         let m = ml_machine(d, &TWOS_THREES, &[ALU | SETM | src(0o13) | fd(1)], &|_| {});
-        ml_same_and_caught(m, &[Mutation::LcNotMarked], "an LC write before a return");
+        ml_same_and_caught(m, &caught(&[Mutation::LcNotMarked]), "an LC write before a return");
     }
 }
 
@@ -2122,11 +2164,11 @@ fn a_squash_restores_rd_s_lc_and_stack_copies() {
     let never = JUMP | m_src(2) | R | HINT;
     for d in [false, true] {
         let m = ml_machine(d, &TWOS_THREES, &[never, filler().raw()], &|_| {});
-        let e = ml_same_and_caught(
-            m,
-            &[Mutation::NoLcRestore, Mutation::NoSpcRestore],
-            "a wrong return",
-        );
+        // With D on, D's decision takes RD's copies from the committed
+        // registers: the faults are planted with D off.
+        let mutations: &[Mutation] =
+            if d { &[] } else { &[Mutation::NoLcRestore, Mutation::NoSpcRestore] };
+        let e = ml_same_and_caught(m, mutations, "a wrong return");
         assert!(e.meters.mispredicted[0] > 0, "the hint was wrong");
     }
 }
@@ -5552,4 +5594,196 @@ fn d_s_switch_keeps_or_clears_d_s_enable() {
             assert_eq!(r & D_ENABLE != 0, want, "{what}: D's enable");
         }
     }
+}
+
+// --- D decides at its word's arrival (the D-timing ruling) ---------------------
+
+/// The main-loop machine `m` on the pipeline, a commit's clock and address
+/// each, to the stop, and the pipeline.
+fn commits_to_the_stop(m: Machine, set: &dyn Fn(&mut Pipeline)) -> (Vec<(u64, u16)>, Pipeline) {
+    let mut e = Pipeline::new(m);
+    set(&mut e);
+    e.events = Some(Vec::new());
+    e.boot();
+    e.skip_sweep();
+    for _ in 0..20_000 {
+        if e.machine().opc == OP_7 as u16 {
+            break;
+        }
+        e.tick().unwrap();
+    }
+    let commits = e
+        .events
+        .take()
+        .unwrap()
+        .into_iter()
+        .filter_map(|(c, ev)| match ev {
+            muir::pipeline::Event::Commit(Some(pc)) => Some((c, pc)),
+            _ => None,
+        })
+        .collect();
+    (commits, e)
+}
+
+/// **D decides on its fetch's own word** (the D-timing ruling, R3, R6): a
+/// store of another word into the macroinstruction word the return's fetch
+/// reads --- two opcode-7 halfwords where opcode 1's were --- started by the
+/// word before opcode 3's return, by the return itself, and by its delay
+/// slot. With D on the run ends as with D off, on both engines: the stored
+/// halfword's handler runs, the stop, and M 31 is the stored word. A D that
+/// dispatched on the word before the store went its way, ran opcode 1.
+#[test]
+fn d_decides_on_the_fetch_s_own_word() {
+    let program = [hw(1, 0, 0), hw(3, 0, 0), hw(1, 0, 0), hw(1, 0, 0), hw(7, 0, 0), hw(7, 0, 0)];
+    let sevens = Word::from(hw(7, 0, 0) | hw(7, 0, 0) << 16);
+    // The constants at A 60 and 61: the stored word, and its address, the
+    // program's second word.
+    let (word_at, addr_at) = (0o60u64, 0o61u64);
+    let setup = |m: &mut Machine| {
+        m.amem[word_at as usize] = sevens;
+        m.amem[addr_at as usize] = CODE + 1;
+    };
+    for by in ["the word before", "the return", "the slot"] {
+        let mut ends = Vec::new();
+        for d in [false, true] {
+            let body = match by {
+                "the word before" => vec![
+                    ALU | SETA | a_src(word_at) | MD,
+                    ALU | SETA | a_src(addr_at) | START_WRITE,
+                ],
+                _ => vec![ALU | SETA | a_src(word_at) | MD],
+            };
+            let mut m = ml_machine(d, &program, &body, &setup);
+            let n = body.len() as u64;
+            match by {
+                "the return" => {
+                    m.imem[(OP_3 + n) as usize] =
+                        Insn::extended(ALU | SETA | a_src(addr_at) | START_WRITE | POPJ)
+                }
+                "the slot" => {
+                    m.imem[(OP_3 + n + 1) as usize] =
+                        Insn::extended(ALU | SETA | a_src(addr_at) | START_WRITE)
+                }
+                _ => {}
+            }
+            let e = ml_same(m);
+            let m = e.machine();
+            assert_eq!(m.mmem[0o31], sevens, "{by}, D {d}: M 31 the stored word");
+            assert_eq!(m.main[0o401], sevens, "{by}, D {d}: the store landed");
+            ends.push((m.mmem[1], m.mmem[0o31], m.spcptr, m.pdl_index));
+        }
+        assert_eq!(ends[0], ends[1], "{by}: D on ends as D off");
+    }
+}
+
+/// **D's effects wait for its word** (the D-timing ruling, R3), on the
+/// pipeline clock by clock, on the machines whose returns D takes, opcode
+/// 10's operand address among them: from the return's commit, where D's wait
+/// begins, to its word's arrival, PDL-INDEX, M 31 and the micro stack's
+/// pointer keep what the return left; at the arrival all three take D's.
+#[test]
+fn d_s_effects_wait_for_its_word() {
+    let programs: [&[u32]; 2] =
+        [&ONES, &[hw(0o10, 5, 5), hw(0o10, 6, 3), hw(1, 0, 0), hw(0o10, 5, 1), hw(7, 0, 0)]];
+    for program in programs {
+        let mut e = Pipeline::new(d_machine(REV15, d_register(true), program, CODE, false, false));
+        e.boot();
+        e.skip_sweep();
+        let regs = |e: &Pipeline| {
+            let m = e.machine();
+            (m.pdl_index, m.mmem[0o31], m.spcptr)
+        };
+        let mut waits = 0;
+        let mut was: Option<(u16, Word, u8)> = None;
+        for _ in 0..20_000 {
+            if e.machine().opc == OP_7 as u16 {
+                break;
+            }
+            e.tick().unwrap();
+            match (was, e.d_waiting()) {
+                (None, true) => was = Some(regs(&e)),
+                (Some(w), true) => assert_eq!(regs(&e), w, "held from the return to the word"),
+                (Some(w), false) => {
+                    assert_ne!(regs(&e), w, "D's effects at its word's arrival");
+                    waits += 1;
+                    was = None;
+                }
+                (None, false) => {}
+            }
+        }
+        assert!(waits > 0, "D took returns");
+    }
+}
+
+/// **A faulting fetch ends D's wait** (the D-timing ruling, R4): on the
+/// machine whose code is unmapped, each return D waits on goes to the main
+/// loop at its fetch's WB, and `QMLP`'s condition 6 takes the fault, as on
+/// `micro`. A wait the fault does not end hangs the pipeline.
+#[test]
+fn a_faulting_fetch_ends_d_s_wait() {
+    let m = d_machine(REV15, d_register(true), &ONES, UNMAPPED, false, true);
+    let e = ml_same(m.clone());
+    assert_eq!(e.machine().mmem[0o10], 1, "condition 6 took the fault");
+    let hung = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut e = Pipeline::new(m);
+        e.mutation = Mutation::DWaitsForAFault;
+        e.boot();
+        e.skip_sweep();
+        for _ in 0..20_000 {
+            if e.machine().opc == OP_7 as u16 {
+                return false;
+            }
+            e.step().unwrap();
+        }
+        true
+    }));
+    assert!(hung.is_err() || hung.unwrap(), "a wait the fault does not end hangs");
+}
+
+/// **D's slot does not wait in RD** (the D-timing ruling, R5): with a hit,
+/// a return D takes commits, its slot after it, and the handler commits 7
+/// clocks after the return, with no word behind the slot committed between;
+/// a D that redirects to the main loop and restores RD's copies takes 8.
+#[test]
+fn d_s_slot_does_not_wait_in_rd() {
+    let gaps = |mutation: Mutation| {
+        let m = d_machine(REV15, d_register(true), &ONES, CODE, false, false);
+        let (commits, _) = commits_to_the_stop(m, &|e| e.mutation = mutation);
+        // Opcode 1's return at OP_1 + 1, its slot, then the next handler.
+        commits
+            .windows(3)
+            .filter(|w| w[0].1 == OP_1 as u16 + 1 && w[1].1 == OP_1 as u16 + 2)
+            .map(|w| (w[2].1, w[2].0 - w[0].0))
+            .collect::<Vec<_>>()
+    };
+    let g = gaps(Mutation::None);
+    eprintln!("return to the next word's commit, D on: {g:?}");
+    assert!(g.iter().all(|&(pc, _)| pc == OP_1 as u16 || pc == OP_7 as u16), "the handler next");
+    assert!(g.iter().any(|&(_, c)| c == 7), "7 clocks on a hit");
+    let r = gaps(Mutation::DRedirects);
+    eprintln!("with a redirect: {r:?}");
+    assert!(r.iter().any(|&(_, c)| c == 8), "8 with a redirect");
+    assert!(r.iter().all(|&(_, c)| c != 7), "and never 7");
+}
+
+/// **D's slot sees the stack popped** (the D-timing ruling, R2, R6): the
+/// slot after opcode 3's return reads the micro stack's pointer, D on and
+/// off, on both engines: popped, as the return left it. A keep made at the
+/// return is caught.
+#[test]
+fn d_s_slot_sees_the_stack_popped() {
+    let program = [hw(1, 0, 0), hw(3, 0, 0), hw(1, 0, 0), hw(7, 0, 0)];
+    let mut read = Vec::new();
+    for d in [false, true] {
+        let mut m = ml_machine(d, &program, &[], &|_| {});
+        // The slot: M 26 <- the stack's pointer and word.
+        m.imem[(OP_3 + 1) as usize] = Insn::extended(ALU | SETM | src(0o1) | m_dest(0o26));
+        let e = ml_same(m.clone());
+        read.push(e.machine().mmem[0o26] >> 24 & 0o37);
+        if d {
+            let (_, x) = commits_to_the_stop(m, &|x| x.mutation = Mutation::DKeepAtReturn);
+            assert_ne!(x.machine().mmem[0o26] >> 24 & 0o37, read[1], "a keep at the return");
+        }
+    }
+    assert_eq!(read[0], read[1], "the pointer the slot reads, D off and on");
 }

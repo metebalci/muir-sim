@@ -1891,28 +1891,41 @@ sees computed targets as they run. It is on by default, `Micro`'s
 resume between a write and its select runs on as the run would have
 (`a_halt_and_a_checkpoint_between_a_write_and_its_select_resume`).
 
-**D, the dispatch from the fetched word** (A15b.9). The MACRO-DISPATCH
-register keeps `<30>` on revision 15, D's enable, with `<31>`. A return
-that [the fused return](#the-fused-return) would fuse but for a needed
-fetch fuses on the fetched word when both are set, the word comes with
-condition 6 false --- no page fault, the fetch's own included, no interrupt
-and no sequence break --- and it is in main memory: the next PC is its
-halfword's entry's address, the popped word stays unless the entry's N is
-set, the operand address is armed as a fused return's, and M 31 takes the
-word at the end of the microcycle after the return, so that microcycle
-reads the old word and the handler the new one. The stream's step and
-fetch are as ever. Otherwise, and when the entry has R or P, the return
-goes to the main loop, `QMLP`, as today. `micro` has no fetch timing, so
-it has the word at the return and waits for nothing; the wait is a
-pipeline's. A15.2 says M 31 takes the word in the microcycle the dispatch
-is made in; A15b, which supersedes it, has `rtl` equal `micro` at every
-boundary, and `micro` loads it a microcycle after the return, as `rtl`'s
-fused return on its prefetched word does. With `<30>` clear revision 15
-runs as revision 14, microcycle
-for microcycle (`d_dispatches_a_return_that_needs_a_fetch`,
+**D, the dispatch from the fetched word** (A15b.9; the D-timing ruling).
+The MACRO-DISPATCH register keeps `<30>` on revision 15, D's enable, with
+`<31>`. A return that [the fused return](#the-fused-return) would fuse but
+for a needed fetch goes to the main loop, `QMLP`, as today, and where both
+enables are set, the popped word is the main loop's and condition 6's
+interrupt and sequence break are false, D's wait begins at the return. The
+return commits as any return does, popping the stack; its delay slot runs
+as on the single-edge machine, its end stepping LC and starting the
+stream's fetch, and it sees the stack popped
+(`d_s_slot_sees_the_stack_popped`). D decides on that fetch's own word:
+rotated by LC as stepped, its halfword's entry, with no R and no P, makes
+the next word the entry's handler, keeps the popped word unless the entry's
+N is set, loads PDL-INDEX with the operand address and M 31 with the word,
+all at once; an entry with R or P leaves `QMLP`. A fetch that faults, or
+that reads anything but main memory, ends the wait there, to `QMLP`, whose
+first word takes condition 6 (`a_faulting_fetch_ends_d_s_wait`). So a word
+stored into the next macroinstruction word by the word before the return,
+by the return or by its slot is the one D dispatches on, as `QMLP` would
+(`d_decides_on_the_fetch_s_own_word`). `micro` decides at the end of the
+slot's microcycle, on the word its fetch reads. The pipeline's return
+squashes the words behind its slot and holds CS, with no redirect, so the
+slot runs on; D decides in the clock its word is in `MD` and CS loads the
+handler at that clock's end, nothing of D's effects showing before
+(`d_s_effects_wait_for_its_word`): a return taken by D to its handler's
+commit is 7 clocks on a hit (`d_s_slot_does_not_wait_in_rd`). A halt
+once the slot has entered EX drains through D's decision; one that squashes
+the slot keeps D's wait and fetches the slot again. With `<30>` clear
+revision 15 runs as revision 14, microcycle for microcycle
+(`d_dispatches_a_return_that_needs_a_fetch`,
 `d_s_enable_clear_is_revision_14_microcycle_for_microcycle`,
 `condition_6_a_faulting_fetch_and_p_go_to_the_main_loop`,
-`m31_and_the_operand_address_after_d_are_a_fused_return_s`).
+`m31_and_the_operand_address_after_d_are_a_fused_return_s`). A fused
+return's operand address over a base the word before it writes clears RD's
+mark on its index copy as the address loads
+(`an_operand_address_over_a_base_the_word_before_writes`).
 
 **CMD_PROD** is taken once every write before it is answered (A15b.5).
 `micro` posts no writes: a write goes out by the end of the microcycle

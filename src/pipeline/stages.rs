@@ -138,8 +138,9 @@ pub(crate) enum Effect {
     PdlIndex(u16),
     /// A fused return's operand address, loaded after the next word.
     OperandAfter(Option<u16>),
-    /// The operand address armed before, loaded now.
-    OperandLoad,
+    /// The operand address armed before, loaded at the end of the
+    /// microcycle of this sequence.
+    OperandLoad(u64),
 }
 
 /// What EX did this clock.
@@ -166,6 +167,10 @@ pub(crate) struct ExResult {
     pub restore: bool,
     /// HALT-CONS under ERRSTOP: the machine halts once drained.
     pub halt: bool,
+    /// A return began D's wait: the words behind its delay slot squashed
+    /// and CS held, with no redirect and no restore (the D-timing ruling,
+    /// R5).
+    pub d_wait: bool,
 }
 
 /// The A, M and PDL buffer writes WB lands at the clock's edge.
@@ -398,9 +403,8 @@ impl Pipeline {
             if let Some((bus, va)) = self.b.fetch.take() {
                 self.prefetch_after(bus, va);
                 if self.d_wait {
-                    // D's word is here: the handler's CS after L (A15b.9).
-                    self.d_wait = false;
-                    self.cs_wait_until = self.cs_wait_until.max(now + super::L);
+                    // D's word is here (A15b.9; the D-timing ruling, R3).
+                    self.d_decides(w, now);
                 }
             }
         }
@@ -456,7 +460,7 @@ impl Pipeline {
             plan.effects.push(Effect::LcStep);
         }
         if c.operand_after.is_some() {
-            plan.effects.push(Effect::OperandLoad);
+            plan.effects.push(Effect::OperandLoad(r.seq));
         }
         if r.nop || r.pre_nop {
             for e in &plan.effects {
@@ -702,9 +706,8 @@ impl Pipeline {
         let stepped = (c.lc & counter).wrapping_add(inc) & counter;
         let index_rotate = crate::machine::macro_dispatch::index_rotate(true);
         let rotate = Self::lc_rotation_at(c.byte_mode, stepped, index_rotate);
-        // M 31 from its register, or D's armed word, never forwarded
-        // (A15b.16).
-        let m31 = md.m31.unwrap_or(self.m.mmem[0o31]);
+        // M 31 from its register, never forwarded (A15b.16).
+        let m31 = self.m.mmem[0o31];
         let rotated = {
             const RING: Word = (1 << 40) - 1;
             let v = m31 & RING;
@@ -834,11 +837,18 @@ impl Pipeline {
             self.m.vmaok = access && (!s.write || write_ok);
             self.b.fault_now = true;
             if !self.m.vmaok {
-                // A faulting start leaves nothing (A15b.3).
+                // A faulting start leaves nothing (A15b.3); D's fetch ends
+                // its wait.
+                if s.fetch && self.d_wait && self.mutation != Mutation::DWaitsForAFault {
+                    self.d_ends();
+                }
                 return true;
             }
             if let Some(crate::tlb::Redirect::Inside(i)) = redirect {
                 self.m.tlb.redirects[0] += 1;
+                if s.fetch && self.d_wait {
+                    self.d_ends();
+                }
                 // Inside the PDL buffer: no memory cycle, and one held clock
                 // (A14.7).
                 if s.write {
@@ -909,6 +919,9 @@ impl Pipeline {
                 }
             }
             crate::busint::Responder::Device => {
+                if s.fetch && self.d_wait {
+                    self.d_ends();
+                }
                 // A device register: taken the clock after its grant, its
                 // word in MD two clocks after it (A15b.3; MP2b ruling Q4).
                 if s.write {
@@ -940,6 +953,9 @@ impl Pipeline {
                 self.b.ack_at = now + 2;
             }
             _ => {
+                if s.fetch && self.d_wait {
+                    self.d_ends();
+                }
                 // Nothing there: one clock after the grant, MD zero, the
                 // NXM bit (A15b.3).
                 if !s.write {
@@ -1130,6 +1146,67 @@ impl Pipeline {
     fn refused(&mut self) {
         self.m.tlb.refusals += 1;
         self.m.memory_words.refused = self.m.memory_words.refused.wrapping_add(1);
+    }
+
+    /// **D decides** at its word's arrival in `MD` at `now` (A15b.9; the
+    /// D-timing ruling, R3): the word rotated by LC as the slot stepped it,
+    /// the MACRO DISPATCH MEMORY's entry; with no R and no P the next word
+    /// is the handler, the popped word kept unless N, PDL-INDEX the operand
+    /// address and M 31 the word; otherwise `QMLP`. RD's copies from the
+    /// committed state, and CS loads L clocks on.
+    fn d_decides(&mut self, word: Word, now: u64) {
+        use crate::machine::macro_dispatch::{index_rotate, main};
+        self.d_wait = false;
+        let register = self.m.macro_dispatch.register;
+        let index_rotate = index_rotate(true);
+        let rotate = Self::lc_rotation_at(
+            self.m.byte_mode(),
+            self.m.lc & self.m.geometry.lc_counter(),
+            index_rotate,
+        );
+        let rotated = {
+            const RING: Word = (1 << 40) - 1;
+            let v = word & RING;
+            match rotate % 40 {
+                0 => v,
+                k => (v << k | v >> (40 - k)) & RING,
+            }
+        };
+        let popped = main(register) | 1 << 14;
+        self.npc = match self.m.macro_dispatch.fused_return(popped, rotated, index_rotate) {
+            Some(f) => {
+                if f.keep && self.mutation != Mutation::DKeepAtReturn {
+                    self.m.spcptr = (self.m.spcptr + 1) & 0o37;
+                }
+                if let Some(o) = f.operand {
+                    let adr = self.m.macro_dispatch.operand_address(o);
+                    self.m.pdl_index = adr as u16 & self.m.geometry.pdl_mask();
+                }
+                self.m.mmem[0o31] = word;
+                self.m.amem[0o31] = word;
+                self.m.macro_dispatch.a_written(0o31, word);
+                self.m.macro_dispatch.m_written(0o31, word);
+                self.m.macro_dispatch.fused += 1;
+                self.meters.fused += 1;
+                f.handler
+            }
+            None => main(register) as u16,
+        };
+        // The executor's next word: the handler, or `QMLP`.
+        self.x.npc_prev = (self.npc + 1) & 0o37777;
+        self.npc_after = None;
+        self.restore_copies();
+        self.cs_wait_until = self.cs_wait_until.max(now + super::L);
+    }
+
+    /// D's wait ended by its fetch at WB (the D-timing ruling, R4): a fault,
+    /// or a word not from main memory. The main loop's `QMLP` is next, whose
+    /// first word takes condition 6.
+    fn d_ends(&mut self) {
+        self.d_wait = false;
+        self.npc = crate::machine::macro_dispatch::main(self.m.macro_dispatch.register) as u16;
+        self.npc_after = None;
+        self.restore_copies();
     }
 
     /// A register write started before the microcycle of sequence `seq`
@@ -1461,7 +1538,17 @@ impl Pipeline {
                 res.mispredicted = true;
             }
         }
-        if self.x.d_fused {
+        if self.x.d_waits && self.mutation != Mutation::DRedirects {
+            // D's wait (the D-timing ruling, R1, R5): the return goes to
+            // the main loop only if D does not take it, which its word
+            // decides; the words behind the slot are squashed and CS held,
+            // with no redirect.
+            res.redirect = None;
+            res.mispredicted = false;
+            res.restore = false;
+            res.d_wait = true;
+            self.d_wait = true;
+        } else if self.x.d_waits {
             self.d_wait = true;
         }
         if self.x.halted && self.m.mode.errstop {
@@ -1566,6 +1653,35 @@ impl Pipeline {
         }
         let mut rd_moves = false;
         let slot_seq = ex.seq + 1;
+        if ex.d_wait {
+            // D's wait: every word behind the delay slot leaves nothing;
+            // the slot runs on, or, not fetched yet, is fetched first and
+            // CS holds behind it (the D-timing ruling, R5).
+            for st in [&mut self.rd, &mut self.cs] {
+                if st.as_ref().is_some_and(|w| w.seq > slot_seq) {
+                    *st = None;
+                    self.meters.squashed += 1;
+                }
+            }
+            let slot_here = [&self.rd, &self.cs].into_iter().flatten().any(|w| w.seq == slot_seq);
+            self.b.pre_nop_next = false;
+            if !slot_here {
+                self.npc = (ex.pc + 1) & 0o37777;
+                self.b.nop_next = ex.kill_rd;
+                self.d_slot_pending = true;
+            } else if ex.kill_rd {
+                for w in [&mut self.rd, &mut self.cs].into_iter().flatten() {
+                    if w.seq == slot_seq {
+                        w.nop = true;
+                        w.pre_nop = false;
+                    }
+                }
+            }
+            self.npc_after = None;
+            self.seq =
+                [&self.rd, &self.cs].into_iter().flatten().map(|w| w.seq).max().unwrap_or(ex.seq)
+                    + 1;
+        }
         if let Some(to) = ex.redirect {
             // Every word after the delay slot leaves nothing; the delay slot
             // stays, nopped under N, wherever it is.
@@ -2127,14 +2243,17 @@ pub(crate) fn apply_effect(c: &mut Copies, e: Effect) {
             c.pdl_idx_pending = None;
         }
         Effect::OperandAfter(adr) => c.operand_after = Some(adr),
-        Effect::OperandLoad => {
+        Effect::OperandLoad(seq) => {
             if let Some(adr) = c.operand_after.take() {
                 match adr {
                     Some(a) => {
                         c.pdl_idx = a;
                         c.pdl_idx_pending = None;
                     }
-                    None => c.pdl_idx_pending = Some(u64::MAX),
+                    // Formed from a base still being written: the copy
+                    // takes PDL-INDEX as the microcycle that loads it
+                    // commits.
+                    None => c.pdl_idx_pending = Some(seq),
                 }
             }
         }

@@ -275,10 +275,19 @@ pub struct Micro {
     /// (`crate::machine::macro_dispatch`), handed to the machine at its
     /// edge. Set and used within one step.
     operand: Option<crate::machine::Operand>,
-    /// The fetched word a return D dispatched in this microcycle arms for
-    /// M 31 (revision 15, [`Micro::d_word`]), handed to the machine at its
-    /// edge as the operand address is. Set and used within one step.
-    d_m31: Option<Word>,
+    /// **D's wait** (revision 15, A15b.9; the D-timing ruling): a return
+    /// that needs a fetch, where D may dispatch, armed it in the microcycle
+    /// before, and D decides at the end of this one, its delay slot, on the
+    /// word the slot's fetch reads ([`Micro::d_decides`]). `d_arm` is set
+    /// by the return and becomes `d_wait` at its edge. Kept in a revision-15
+    /// checkpoint, which a halt between the return and its slot leaves
+    /// waiting.
+    d_arm: bool,
+    d_wait: bool,
+    /// The word the last read start read from main memory, `None` when it
+    /// faulted or read anything else: what D decides on. Set and used within
+    /// one step.
+    read_main: Option<Word>,
     /// Revision 14's LC adder's `<33:32>` for this microcycle's ALU word,
     /// when it is an arithmetic function through the ALU or the left shift
     /// (A14.11), for a write of the location counter. Set and used within
@@ -363,7 +372,9 @@ impl Micro {
             spc_popped: false,
             macro_write: None,
             operand: None,
-            d_m31: None,
+            d_arm: false,
+            d_wait: false,
+            read_main: None,
             lc_adder: None,
         }
     }
@@ -464,8 +475,9 @@ impl Micro {
             // `-RESET` clears QUUX's MACRO-DISPATCH enable, and drops an
             // armed operand address (contract H8a).
             self.m.macro_dispatch.reset();
-            // `-RESET` clears `MEMSTART` (`Rtl::reset`).
+            // `-RESET` clears `MEMSTART` (`Rtl::reset`), and D's wait.
             self.write_out = None;
+            (self.d_arm, self.d_wait) = (false, false);
             self.write_word = None;
             self.write_va = None;
             self.write_pdl = None;
@@ -857,13 +869,8 @@ impl Micro {
     /// `IR<24>`). The counter steps a microcycle later, so the halfword is
     /// chosen by it as stepped.
     fn main_loop_return(&mut self, word: u32, advance: bool) -> u32 {
-        // Revision 15's D: a return that needs a fetch fuses on the fetched
-        // word, where D's enable lets it and the word comes with condition
-        // 6 false (A15b.9).
-        let fetched = if self.needfetch() { self.d_word() } else { None };
         let target = self.pop_asks_for_a_fetch(word);
         if !self.m.geometry.macro_dispatch
-            || (self.needfetch() && fetched.is_none())
             || advance
             || self.next_instrd
             || self.pushed
@@ -872,13 +879,21 @@ impl Micro {
         {
             return target;
         }
+        // Revision 15's D (A15b.9; the D-timing ruling, R1): a return that
+        // needs a fetch goes to the main loop, as today, and where D may
+        // dispatch its wait begins; D decides at the end of the delay slot,
+        // on the word the slot's fetch reads ([`Micro::d_decides`]).
+        if self.needfetch() {
+            self.d_arm = self.d_may_wait(word);
+            return target;
+        }
         let inc = if self.m.byte_mode() { 1 } else { 2 };
         let counter = self.m.geometry.lc_counter();
         let stepped = (self.m.lc & counter).wrapping_add(inc) & counter;
         let wide = self.m.geometry.wide();
         let index_rotate = crate::machine::macro_dispatch::index_rotate(wide);
         let rotate = self.lc_rotation(stepped, index_rotate);
-        let m31 = fetched.unwrap_or(self.m.mmem[0o31]);
+        let m31 = self.m.mmem[0o31];
         let rotated = if wide { rol40(m31, rotate) } else { rol(m31 as u32, rotate).into() };
         match self.m.macro_dispatch.fused_return(word, rotated, index_rotate) {
             Some(f) => {
@@ -887,39 +902,66 @@ impl Micro {
                 }
                 self.m.macro_dispatch.fused += 1;
                 self.operand = f.operand;
-                self.d_m31 = fetched;
                 f.handler as u32
             }
             None => target,
         }
     }
 
-    /// **D, revision 15's dispatch from the fetched word** (contract G3
-    /// revision 15, A15b.9; its first contract's A15.2): for a return that
-    /// needs a fetch, the word the stream's fetch will read, `LC<33:2>`, if
-    /// D may dispatch on it: the MACRO-DISPATCH register's `<31>` and
-    /// `<30>` set, condition 6 false --- no page fault, the fetch's own
-    /// included, no interrupt and no sequence break --- and the word in
-    /// main memory. Otherwise `None`, and the return goes to the main loop,
-    /// `QMLP`, as today; so does one whose entry has R or P. This engine has
-    /// no fetch timing, so the word is had at the return, with no wait; the
-    /// stream's fetch still steps the counter and reads the word into `MD`
-    /// a microcycle later, as ever.
-    fn d_word(&self) -> Option<Word> {
-        use crate::machine::macro_dispatch::{D_ENABLE, ENABLE};
+    /// **Whether D's wait begins** at a return that needs a fetch
+    /// (revision 15, A15b.9; the D-timing ruling, R1): what the return can
+    /// know --- the MACRO-DISPATCH register's `<31>` and `<30>`, the popped
+    /// word the main loop's, and condition 6's interrupt and sequence break
+    /// false. The fetch's own page fault is D's, at the slot's end.
+    fn d_may_wait(&self, popped: u32) -> bool {
+        use crate::machine::macro_dispatch::{D_ENABLE, ENABLE, main};
         let register = self.m.macro_dispatch.register;
         if !self.m.geometry.extended() || register & (ENABLE | D_ENABLE) != ENABLE | D_ENABLE {
-            return None;
+            return false;
         }
         let int_enabled = self.m.interrupt_control & (1 << 27) != 0;
         let sequence_break = self.m.interrupt_control & (1 << 26) != 0;
-        if !self.m.vmaok || (int_enabled && self.m.interrupt()) || sequence_break {
-            return None;
+        popped & (1 << 14) != 0
+            && popped & 0o37777 == main(register)
+            && !(int_enabled && self.m.interrupt())
+            && !sequence_break
+    }
+
+    /// **D decides** (A15b.9; the D-timing ruling, R3, R4, R6), at the end
+    /// of the delay slot, after the slot's fetch has started: on the word
+    /// that fetch reads from main memory, rotated by LC as stepped, the
+    /// MACRO DISPATCH MEMORY's entry; with no R and no P, the next word is
+    /// the handler, the popped word is kept unless N, PDL-INDEX takes the
+    /// operand address and M 31 the word. A fetch that faults, that reads
+    /// anything but main memory, or an entry with R or P leaves the main
+    /// loop's `QMLP`, the return's own target.
+    fn d_decides(&mut self) {
+        use crate::machine::macro_dispatch::{index_rotate, main};
+        let Some(word) = self.read_main.take() else { return };
+        let register = self.m.macro_dispatch.register;
+        let popped = main(register) | 1 << 14;
+        let index_rotate = index_rotate(true);
+        let rotate = self.lc_rotation(self.m.lc & self.m.geometry.lc_counter(), index_rotate);
+        let rotated = rol40(word, rotate);
+        let Some(f) = self.m.macro_dispatch.fused_return(popped, rotated, index_rotate) else {
+            return;
+        };
+        if f.keep {
+            self.m.spcptr = (self.m.spcptr + 1) & 0o37;
         }
-        let at = ((self.m.lc & self.m.geometry.lc_counter()) >> 2) as u32;
-        let t = self.m.translate(at);
-        let main = t.physical & crate::tlb::DEVICE == 0;
-        (t.access_permitted && main).then(|| self.m.main.get(t.physical as usize).copied())?
+        if let Some(o) = f.operand {
+            let adr = self.m.macro_dispatch.operand_address(o);
+            self.m.pdl_index = adr as u16 & self.m.geometry.pdl_mask();
+        }
+        self.m.mmem[0o31] = word;
+        self.m.amem[0o31] = word;
+        self.m.macro_dispatch.a_written(0o31, word);
+        self.m.macro_dispatch.m_written(0o31, word);
+        self.m.macro_dispatch.fused += 1;
+        // The word after the slot: the handler's, in place of `QMLP`'s.
+        self.p1 = self.m.fetch(f.handler);
+        self.p1_pc = f.handler;
+        self.npc = if f.handler == 0o37777 { 0 } else { f.handler + 1 };
     }
 
     /// A pop by a jump with R, fused as [`Micro::main_loop_return`] says
@@ -997,7 +1039,6 @@ impl Micro {
             self.m.macro_dispatch.a_written(0o31, w);
             self.m.macro_dispatch.m_written(0o31, w);
         }
-        self.m.macro_dispatch.m31 = self.d_m31.take();
         if let Some((physical, WriteOut::Started)) = self.write_out {
             if self.m.geometry.extended() {
                 // Revision 15: the word is fixed here, as the start's
@@ -1013,9 +1054,16 @@ impl Micro {
                 self.write_goes_out();
             }
         }
+        self.read_main = None;
         if self.next_instrd {
             self.step_lc();
         }
+        // D's wait, armed by the return before this microcycle, its slot:
+        // decided on the word this microcycle's fetch reads (A15b.9).
+        if std::mem::take(&mut self.d_wait) {
+            self.d_decides();
+        }
+        self.d_wait = std::mem::take(&mut self.d_arm);
         self.next_instrd = std::mem::take(&mut self.next_instr);
         self.clock_map_write();
         match self.write_out {
@@ -1785,7 +1833,10 @@ impl Micro {
         }
         self.m.write_back(va, e, false, 0);
         self.m.vmaok = true;
-        let w = self.m.bus_read(crate::tlb::bus_address(va, e));
+        let bus = crate::tlb::bus_address(va, e);
+        let w = self.m.bus_read(bus);
+        let main = bus & crate::tlb::DEVICE == 0 && (bus as usize) < self.m.main.len();
+        self.read_main = main.then_some(w);
         self.pend_md(w);
     }
 
@@ -2444,8 +2495,9 @@ impl Engine for Micro {
         self.oal = false;
         self.oah = false;
         // `-RESET` clears `MEMSTART` (`Rtl::reset`): a write not yet gone
-        // out never does.
+        // out never does. D's wait with it.
         self.write_out = None;
+        (self.d_arm, self.d_wait) = (false, false);
         self.write_word = None;
         self.write_va = None;
         self.write_pdl = None;
@@ -2530,7 +2582,9 @@ impl Engine for Micro {
             spc_popped: _,
             macro_write: _,
             operand: _,
-            d_m31: _,
+            d_arm: _,
+            d_wait,
+            read_main: _,
             lc_adder: _,
         } = self;
         m.save(w);
@@ -2609,6 +2663,8 @@ impl Engine for Micro {
             w.bool(oa_shadow[0]);
             w.bool(oa_shadow[1]);
             w.u64(*period);
+            // D's wait, armed by a return whose slot has not run.
+            w.bool(*d_wait);
         }
     }
 
@@ -2693,6 +2749,7 @@ impl Engine for Micro {
                     crate::clock::microcycle_ns_text(period)
                 )));
             }
+            self.d_wait = r.bool()?;
         }
         Ok(())
     }

@@ -537,6 +537,14 @@ pub enum Mutation {
     /// After a redirect the delay slot in RD plans and moves in the same
     /// clock (P2 undone).
     SlotPlansAtRedirect,
+    /// D's wait not ended by its fetch's fault (the D-timing ruling, R4).
+    DWaitsForAFault,
+    /// D's return keeps the popped word at once, so that its delay slot
+    /// sees the stack unpopped.
+    DKeepAtReturn,
+    /// D's return redirects to the main loop and restores RD's copies, in
+    /// place of squashing the words behind its slot (R5 undone).
+    DRedirects,
 }
 
 impl Pipeline {
@@ -658,6 +666,12 @@ impl Pipeline {
     pub fn stages(&self) -> [Option<Option<u16>>; 4] {
         let f = |s: &Option<Slot>| s.as_ref().map(|s| (!s.nop).then_some(s.pc));
         [f(&self.cs), f(&self.rd), f(&self.ex), f(&self.wb)]
+    }
+
+    /// Whether D waits for its word (A15b.9; the D-timing ruling): from the
+    /// return's EX to the word's arrival or its fetch's fault.
+    pub fn d_waiting(&self) -> bool {
+        self.d_wait
     }
 
     // --- The clock -------------------------------------------------------------

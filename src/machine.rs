@@ -694,9 +694,9 @@ pub struct MacroDispatch {
     /// at the end of the next microcycle.
     pub operand: Option<Operand>,
     /// The word a fused return on the fetch path arms for M 31, a register
-    /// beside M memory: `rtl`'s prefetched word (`crate::memory_port`), or
-    /// the word revision 15's D dispatched on, on `micro`; loaded into it at
-    /// the end of the next microcycle. Kept in a checkpoint.
+    /// beside M memory: `rtl`'s prefetched word (`crate::memory_port`),
+    /// loaded into it at the end of the next microcycle. Revision 15's D
+    /// writes M 31 itself, at its word's arrival. Kept in a checkpoint.
     pub m31: Option<Word>,
     /// How many returns have been fused: a count for the profile and the
     /// tests, not kept in a checkpoint.
