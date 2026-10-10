@@ -65,6 +65,8 @@ impl Pipeline {
         self.x.map_write_d = None;
         self.x.spc_write = None;
         self.d_wait = false;
+        // The port drained: no fetch in flight, any later one D's.
+        self.d_after = 0;
         self.d_slot_pending = false;
         self.cs_wait_until = 0;
         self.held_am.clear();

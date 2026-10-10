@@ -1909,7 +1909,11 @@ that reads anything but main memory, ends the wait there, to `QMLP`, whose
 first word takes condition 6 (`a_faulting_fetch_ends_d_s_wait`). So a word
 stored into the next macroinstruction word by the word before the return,
 by the return or by its slot is the one D dispatches on, as `QMLP` would
-(`d_decides_on_the_fetch_s_own_word`). `micro` decides at the end of the
+(`d_decides_on_the_fetch_s_own_word`). A fetch started before the return
+and still in flight, its word arriving during the wait, is not D's: D
+waits on for its slot's fetch, so that the halfword is the one LC as
+stepped names (`d_decides_on_its_slot_s_fetch_not_an_earlier_one`, the
+main loop's sequence-break path). `micro` decides at the end of the
 slot's microcycle, on the word its fetch reads. The pipeline's return
 squashes the words behind its slot and holds CS, with no redirect, so the
 slot runs on; D decides in the clock its word is in `MD` and CS loads the

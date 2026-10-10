@@ -42,8 +42,9 @@ pub(crate) struct Back {
     pub md: Option<(u64, Word)>,
     pub md_fill: bool,
     /// That read is the stream's fetch: its bus address and its virtual
-    /// word address.
+    /// word address; and the microcycle that started it.
     pub fetch: Option<(u32, u32)>,
+    pub fetch_mc: u64,
     /// A table read of a walk or a write-back: its address, its word, and
     /// its fill.
     pub table_at: Option<u32>,
@@ -402,8 +403,9 @@ impl Pipeline {
             self.event(super::Event::Md(w));
             if let Some((bus, va)) = self.b.fetch.take() {
                 self.prefetch_after(bus, va);
-                if self.d_wait {
-                    // D's word is here (A15b.9; the D-timing ruling, R3).
+                if self.d_wait && self.b.fetch_mc > self.d_after {
+                    // D's word is here (A15b.9; the D-timing ruling, R3):
+                    // its slot's fetch, not one started before its return.
                     self.d_decides(w, now);
                 }
             }
@@ -839,14 +841,18 @@ impl Pipeline {
             if !self.m.vmaok {
                 // A faulting start leaves nothing (A15b.3); D's fetch ends
                 // its wait.
-                if s.fetch && self.d_wait && self.mutation != Mutation::DWaitsForAFault {
+                if s.fetch
+                    && self.d_wait
+                    && s.mc > self.d_after
+                    && self.mutation != Mutation::DWaitsForAFault
+                {
                     self.d_ends();
                 }
                 return true;
             }
             if let Some(crate::tlb::Redirect::Inside(i)) = redirect {
                 self.m.tlb.redirects[0] += 1;
-                if s.fetch && self.d_wait {
+                if s.fetch && self.d_wait && s.mc > self.d_after {
                     self.d_ends();
                 }
                 // Inside the PDL buffer: no memory cycle, and one held clock
@@ -915,11 +921,12 @@ impl Pipeline {
                     self.b.md_old = Some((seq, self.m.md));
                     if s.fetch {
                         self.b.fetch = Some((bus, va));
+                        self.b.fetch_mc = s.mc;
                     }
                 }
             }
             crate::busint::Responder::Device => {
-                if s.fetch && self.d_wait {
+                if s.fetch && self.d_wait && s.mc > self.d_after {
                     self.d_ends();
                 }
                 // A device register: taken the clock after its grant, its
@@ -953,7 +960,7 @@ impl Pipeline {
                 self.b.ack_at = now + 2;
             }
             _ => {
-                if s.fetch && self.d_wait {
+                if s.fetch && self.d_wait && s.mc > self.d_after {
                     self.d_ends();
                 }
                 // Nothing there: one clock after the grant, MD zero, the
@@ -1548,8 +1555,10 @@ impl Pipeline {
             res.restore = false;
             res.d_wait = true;
             self.d_wait = true;
+            self.d_after = self.x.mc;
         } else if self.x.d_waits {
             self.d_wait = true;
+            self.d_after = self.x.mc;
         }
         if self.x.halted && self.m.mode.errstop {
             res.halt = true;

@@ -5787,3 +5787,37 @@ fn d_s_slot_sees_the_stack_popped() {
     }
     assert_eq!(read[0], read[1], "the pointer the slot reads, D off and on");
 }
+
+/// **D decides on its own slot's fetch, never on an earlier fetch still in
+/// flight** (the D-timing ruling, R3): a return that needs a fetch while
+/// the sequence break stands goes to the main loop without D, its fetch a
+/// miss still filling when condition 6's call, taken with N as microcode
+/// 2002's `QMLP` takes it, does what `SB-DEFER` does: clears the break,
+/// writes LC back with NEEDFETCH, and returns to the main loop again, where
+/// D waits. The earlier fill lands during that wait. D decides on the word
+/// its slot's fetch reads, LC stepped, as on `micro`: opcode 1, the
+/// halfword at LC + 2, runs once, then the stop. A D that decided on the
+/// earlier fill, LC not stepped, ran the halfword at LC, opcode 7's stop,
+/// at once.
+#[test]
+fn d_decides_on_its_slot_s_fetch_not_an_earlier_one() {
+    let program = [hw(1, 0, 0), hw(7, 0, 0), hw(1, 0, 0), hw(7, 0, 0)];
+    let mut m = d_machine(REV15, d_register(true), &program, CODE, true, false);
+    use muir::isa::asm::{CARRY_IN, M_PLUS_C};
+    let mut put = |at: u64, w: u64| m.imem[at as usize] = Insn::extended(w);
+    // The call with N, as microcode 2002's `QMLP` makes it: its slot, which
+    // waits for MD, does not run when the call is taken.
+    put(QMLP, JUMP | target(COND_6) | P | N | 1 << 5 | 6);
+    put(COND_6, ALU | M_PLUS_C | CARRY_IN | m_src(0o10) | m_dest(0o10));
+    // The break cleared, the call's return popped and the main loop's
+    // pushed, LC written back to the word's first halfword, NEEDFETCH set.
+    put(COND_6 + 1, ALU | SETA | a_src(ZERO) | fd(2));
+    put(COND_6 + 2, ALU | SETM | src(0o14) | m_dest(0o27));
+    put(COND_6 + 3, ALU | SETA | a_src(0o50) | fd(0o15));
+    put(COND_6 + 4, ALU | SETA | a_src(0o52) | fd(1));
+    put(COND_6 + 5, filler().raw() | POPJ);
+    let e = ml_same(m);
+    assert_eq!(e.machine().mmem[0o10], 1, "condition 6 called once");
+    assert_eq!(e.machine().mmem[1], 1, "opcode 1, at LC stepped, ran once");
+    assert!(e.machine().macro_dispatch.fused > 0, "D took the return");
+}

@@ -329,6 +329,10 @@ pub struct Pipeline {
     cs_wait_until: u64,
     /// CS loads nothing until the stream's fetch brings D's word.
     d_wait: bool,
+    /// The microcycle of the return whose wait it is: D's word is a fetch
+    /// a later microcycle started, its slot's, never a fetch started
+    /// before the return and still in flight (the D-timing ruling, R3).
+    d_after: u64,
     /// While D waits, its delay slot is still to be fetched: after a halt
     /// that squashed it, the word that makes the stream's fetch.
     d_slot_pending: bool,
@@ -574,6 +578,7 @@ impl Pipeline {
             x: exec::Exec::default(),
             cs_wait_until: 0,
             d_wait: false,
+            d_after: 0,
             d_slot_pending: false,
             committed: 0,
             srun: false,
