@@ -313,10 +313,14 @@ impl Pipeline {
             return Ok(());
         }
         let oa_high = self.x.oa_high;
+        let (d_metered, retired) = (self.d_metered, self.meters.retired);
         let plan = self.rd_plan();
         let wb_leaves = self.wb_stage();
         let ex = self.ex_stage(wb_leaves)?;
         self.front_and_edge(plan, ex, wb_leaves, oa_high);
+        if d_metered && self.meters.retired == retired {
+            self.meters.d_wait += 1;
+        }
         let (lc, action) =
             (std::mem::take(&mut self.b.boundary_now), std::mem::take(&mut self.b.action_now));
         if lc || action {
@@ -801,6 +805,9 @@ impl Pipeline {
         }
         self.m.cycles += 1;
         self.meters.retired += 1;
+        if self.d_metered && w.mc > self.d_after + 1 {
+            self.d_metered = false;
+        }
         self.last_counted = (!w.nop).then_some(w.pc);
         if w.nop && self.mutation == Mutation::NopCountedTwice {
             self.m.cycles += 1;
@@ -1556,9 +1563,13 @@ impl Pipeline {
             res.d_wait = true;
             self.d_wait = true;
             self.d_after = self.x.mc;
+            self.d_metered = true;
+            self.meters.d_waits += 1;
         } else if self.x.d_waits {
             self.d_wait = true;
             self.d_after = self.x.mc;
+            self.d_metered = true;
+            self.meters.d_waits += 1;
         }
         if self.x.halted && self.m.mode.errstop {
             res.halt = true;

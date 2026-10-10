@@ -333,7 +333,7 @@ impl Profiled for Pipeline {
             {
                 let m = &self.meters;
                 format!(
-                    "pipeline: {} bubble(s) a wrong prediction; mispredicted {:?}, squashed {}, late squashes {}; P1 holds {}, P2 holds {}, second bubbles {}; restores without a redirect {}, changed {}, under a planned word {}",
+                    "pipeline: {} bubble(s) a wrong prediction; mispredicted {:?}, squashed {}, late squashes {}; P1 holds {}, P2 holds {}, second bubbles {}; restores without a redirect {}, changed {}, under a planned word {}; D's waits {}, fused returns {}, clocks D waited and nothing retired {}",
                     self.bubbles,
                     m.mispredicted,
                     m.squashed,
@@ -343,7 +343,10 @@ impl Profiled for Pipeline {
                     m.second_bubbles,
                     m.restores_without_redirect,
                     m.restores_changed,
-                    m.restores_changed_planned
+                    m.restores_changed_planned,
+                    m.d_waits,
+                    m.fused,
+                    m.d_wait
                 )
             },
         ]

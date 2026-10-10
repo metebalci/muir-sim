@@ -259,7 +259,10 @@ pub struct Meters {
     pub late_squashes: u64,
     /// Holds, in clocks: the OA-REG-HIGH hold, RD's guard hold, the PDL
     /// address wait, the wait for `MD`, a start behind a start, the
-    /// divider and multiplier, D's wait, WB's walk and redirect.
+    /// divider and multiplier, D's wait, WB's walk and redirect. D's wait
+    /// is every clock that retires no microcycle from the return D waits on
+    /// to the first word after its slot: the wait for D's word and the
+    /// refill behind it.
     pub oa_hold: u64,
     pub guard_hold: u64,
     pub pdl_wait: u64,
@@ -267,6 +270,9 @@ pub struct Meters {
     pub start_wait: u64,
     pub muldiv: u64,
     pub d_wait: u64,
+    /// D's waits begun: returns D waited on, whether it dispatched or
+    /// went to the main loop.
+    pub d_waits: u64,
     pub wb_hold: u64,
     pub map_hold: u64,
     /// CMD_PROD's waits for the queue to drain, in clocks.
@@ -333,6 +339,9 @@ pub struct Pipeline {
     /// a later microcycle started, its slot's, never a fetch started
     /// before the return and still in flight (the D-timing ruling, R3).
     d_after: u64,
+    /// D's wait is being metered ([`Meters::d_wait`]): from its return to
+    /// the first word after its slot retiring.
+    d_metered: bool,
     /// While D waits, its delay slot is still to be fetched: after a halt
     /// that squashed it, the word that makes the stream's fetch.
     d_slot_pending: bool,
@@ -579,6 +588,7 @@ impl Pipeline {
             cs_wait_until: 0,
             d_wait: false,
             d_after: 0,
+            d_metered: false,
             d_slot_pending: false,
             committed: 0,
             srun: false,

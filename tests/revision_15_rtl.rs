@@ -5821,3 +5821,35 @@ fn d_decides_on_its_slot_s_fetch_not_an_earlier_one() {
     assert_eq!(e.machine().mmem[1], 1, "opcode 1, at LC stepped, ran once");
     assert!(e.machine().macro_dispatch.fused > 0, "D took the return");
 }
+
+/// **D's wait is metered** (the contract's §12.1): on the main-loop
+/// machine of opcode 1 eleven times, D on, the boot's return and the five
+/// returns that need a fetch each begin a wait, `Meters::d_waits`, six, and
+/// D dispatches each: six fused returns more than D off. `Meters::d_wait`
+/// is the clocks with no commit between each such return's slot and the
+/// next word, the handler: the gap from the return's commit to the
+/// handler's less the two words, 59 on the first, a miss, and 5 on each
+/// hit (`d_s_slot_does_not_wait_in_rd`), 84 in all. D off, neither counts.
+#[test]
+fn d_s_wait_is_metered() {
+    let run = |d: bool| ml_same(d_machine(REV15, d_register(d), &ONES, CODE, false, false)).meters;
+    let (off, on) = (run(false), run(true));
+    assert_eq!((off.d_waits, off.d_wait), (0, 0), "no wait with D off");
+    assert_eq!(on.d_waits, 6, "the boot's return and the five that need a fetch");
+    assert_eq!(on.fused - off.fused, on.d_waits, "D dispatched each");
+    let m = d_machine(REV15, d_register(true), &ONES, CODE, false, false);
+    let (commits, e) = commits_to_the_stop(m, &|_| {});
+    // Each return D waits on, its slot, and the next word committed.
+    let gaps: Vec<u64> = commits
+        .windows(3)
+        .filter(|w| {
+            (w[0].1 == 6 && w[1].1 == 7)
+                || (w[0].1 == OP_1 as u16 + 1 && w[1].1 == OP_1 as u16 + 2 && w[2].0 - w[0].0 > 2)
+        })
+        .map(|w| w[2].0 - w[0].0 - 2)
+        .collect();
+    assert_eq!(gaps.len(), 6, "the six waits: {gaps:?}");
+    assert_eq!(gaps.iter().filter(|&&g| g == 5).count(), 5, "5 clocks on a hit: {gaps:?}");
+    assert_eq!(e.meters.d_wait, gaps.iter().sum::<u64>(), "the meter, against the commits");
+    assert_eq!(on.d_wait, e.meters.d_wait, "the same run");
+}
