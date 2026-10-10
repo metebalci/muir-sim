@@ -32,11 +32,25 @@
 //! with `MUIR_PROFILE_MICROCODE=<version> <sha256 of ucadr.mcr> <commit>`
 //! naming the microcode in its header.
 //!
-//! `MUIR_STRIP=predictions`, `pdl` or `predictions,pdl` clears those parts
-//! of the profile pass's work from the control store after the
-//! definitions, before the workloads: the jumps' hints and the dispatches'
-//! predicted entries, the PDL address fields; a measurement aid for the
-//! pass's split.
+//! `MUIR_STRIP=predictions`, `returns`, `pdl`, or several comma-separated,
+//! clears those parts of the profile pass's work from the control store
+//! after the definitions, before the workloads: the jumps' hints and the
+//! dispatches' predicted entries, only those predicted as returns, the PDL
+//! address fields; a measurement aid for the pass's split.
+//!
+//! `MUIR_MUTATION=<name>` plants that fault in the pipeline
+//! (`muir::pipeline::Mutation`: `NoD3`, `NoSpcRestore`, `SquashedStart`,
+//! `NopCountedTwice`), for the time-neutral harness's comparison to catch
+//! (MP2b ruling Q12). `MUIR_OUTCOMES_OUT=<file>` writes every predicted
+//! site's outcomes over the workloads, every entry a dispatch took, with
+//! `MUIR_PROFILE_OUT`'s record.
+//!
+//! `MUIR_D=off` holds revision 15's D off (MP2b ruling Q12(d)): D's enable,
+//! the MACRO-DISPATCH register's `<30>`, is never kept, on either engine,
+//! whatever the microcode writes; `MUIR_D=on` sets it with the register's
+//! enable, `<31>`, for a microcode that does not (`MacroDispatch::d`,
+//! `DSwitch`). Unset, `<30>` is as the microcode writes it. The pipeline's
+//! fused returns use no prefetched word either way.
 //!
 //! `MUIR_BUBBLES=2` gives the pipeline a wrong prediction's two bubbles,
 //! A15b.14's fallback, in place of the contract's one.
@@ -1037,6 +1051,19 @@ fn main() {
                 let p = period.unwrap_or(e.period());
                 e.configure(p, timing, cache);
                 e.bubbles = bubbles;
+                // `MUIR_MUTATION`: a planted fault, for the harness to catch.
+                if let Ok(v) = std::env::var("MUIR_MUTATION") {
+                    use muir::pipeline::Mutation;
+                    e.mutation = match v.as_str() {
+                        "NoD3" => Mutation::NoD3,
+                        "NoSpcRestore" => Mutation::NoSpcRestore,
+                        "SquashedStart" => Mutation::SquashedStart,
+                        "NopCountedTwice" => Mutation::NopCountedTwice,
+                        _ => panic!(
+                            "MUIR_MUTATION={v}: NoD3, NoSpcRestore, SquashedStart or NopCountedTwice"
+                        ),
+                    };
+                }
                 e
             };
             if neutral {
@@ -1178,7 +1205,7 @@ fn configuration(
         "none".to_string()
     };
     format!(
-        "configuration: engine {engine}; machine {machine}; band {}; PROM {}; microcode {}; main memory {}; period {clock}; memory timing {}; cache {}; prefetch {prefetch}; MUIR_H8A {}; time-neutral {neutral}; RTC {}",
+        "configuration: engine {engine}; machine {machine}; band {}; PROM {}; microcode {}; main memory {}; period {clock}; memory timing {}; cache {}; prefetch {prefetch}; MUIR_H8A {}; D {}; time-neutral {neutral}; RTC {}",
         env("MUIR_BAND"),
         std::env::var("MUIR_PROM").unwrap_or_else(|_| "built in".into()),
         std::env::var("MUIR_UCODE").unwrap_or_else(|_| "the pack's".into()),
@@ -1190,6 +1217,11 @@ fn configuration(
         }),
         std::env::var("MUIR_CACHE").unwrap_or_else(|_| "default".into()),
         env("MUIR_H8A"),
+        match std::env::var("MUIR_D").as_deref() {
+            Ok("off") => "held off (MUIR_D=off)",
+            Ok("on") => "on with the enable (MUIR_D=on)",
+            _ => "as the microcode writes it",
+        },
         std::env::var("MUIR_RTC").unwrap_or_else(|_| if neutral {
             "counted from the fixed date".into()
         } else {
@@ -1381,6 +1413,13 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
         support::machine_with_pack(&copy)
     };
     m.geometry = geometry;
+    // `MUIR_D=off`: D held off (MP2b ruling Q12(d)).
+    m.macro_dispatch.d = match std::env::var("MUIR_D").as_deref() {
+        Ok("off") => muir::machine::DSwitch::Off,
+        Ok("on") => muir::machine::DSwitch::On,
+        Err(_) => muir::machine::DSwitch::AsWritten,
+        Ok(v) => panic!("MUIR_D={v}: on or off"),
+    };
     if support::neutral::on() {
         // The time-neutral harness's dates: the RTC counted, never the
         // host's, and the file device's dates its own.
@@ -1507,7 +1546,8 @@ fn measure<E: Profiled>(
     // `MUIR_PROFILE_OUT=<file>`: the profile (A15b.8), over the workloads,
     // their typing included, on the pipeline alone.
     let profile_out = std::env::var_os("MUIR_PROFILE_OUT").map(PathBuf::from);
-    if profile_out.is_some() {
+    let outcomes_out = std::env::var_os("MUIR_OUTCOMES_OUT").map(PathBuf::from);
+    if profile_out.is_some() || outcomes_out.is_some() {
         assert!(e.record_outcomes(), "MUIR_PROFILE_OUT: the profile is made on revision 15's rtl");
     }
     // A marker of its own for every run, so that a workload named twice is
@@ -1568,6 +1608,22 @@ fn measure<E: Profiled>(
     for line in e.run_lines() {
         println!("== the whole run: {line}");
     }
+    if let (Some(path), Some(o)) = (outcomes_out, e.outcomes()) {
+        let key =
+            |a: u16| muir::pipeline::profile::key(syms, a).unwrap_or_else(|| format!("{a:o}"));
+        let mut out = String::new();
+        for (&pc, c) in &o.jumps {
+            out.push_str(&format!("jump {} {pc:o} transferred {} not {}\n", key(pc), c[1], c[0]));
+        }
+        for (&pc, entries) in &o.dispatches {
+            for (&(kind, addr), &n) in entries {
+                let target = if addr == 0 { "-".to_string() } else { key(addr) };
+                let kind = muir::pipeline::profile::kind_name(kind);
+                out.push_str(&format!("dispatch {} {pc:o} {kind} {target} {n}\n", key(pc)));
+            }
+        }
+        std::fs::write(&path, out).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+    }
     if let (Some(path), Some(o)) = (profile_out, e.outcomes()) {
         let names: Vec<&str> = wanted.iter().map(|(n, _)| *n).collect();
         let text = profile_text(o, syms, &e.machine().imem, &names);
@@ -1582,15 +1638,18 @@ fn measure<E: Profiled>(
 /// **The profile pass's parts, taken out** of the control store `imem`,
 /// a measurement aid for the pass's split (A15b.8): `predictions`, a
 /// JUMP's H `IR<48>` and a transferring dispatch's predicted entry
-/// `IR<63:48>`; `pdl`, an ALU or BYTE word's PDL address field
-/// `IR<58:48>`; comma-separated. The selects stay. The words changed.
+/// `IR<63:48>`; `returns`, the predicted entry of the dispatches the pass
+/// predicts as returns, P̄R̄ 10 (A15b.15's returning dispatches); `pdl`, an
+/// ALU or BYTE word's PDL address field `IR<58:48>`; comma-separated. The
+/// selects stay. The words changed.
 fn strip(imem: &mut [Insn], parts: &str) -> usize {
-    let (mut predictions, mut pdl) = (false, false);
+    let (mut predictions, mut returns, mut pdl) = (false, false, false);
     for part in parts.split(',') {
         match part {
             "predictions" => predictions = true,
+            "returns" => returns = true,
             "pdl" => pdl = true,
-            _ => panic!("MUIR_STRIP={parts}: predictions, pdl, or both"),
+            _ => panic!("MUIR_STRIP={parts}: predictions, returns, pdl, comma-separated"),
         }
     }
     let mut changed = 0;
@@ -1599,6 +1658,7 @@ fn strip(imem: &mut [Insn], parts: &str) -> usize {
         let clear = match w.op() {
             Op::Jump if predictions => 1 << 48,
             Op::Dispatch if predictions && (ir >> 10) & 3 != 2 => 0xffff << 48,
+            Op::Dispatch if returns && (ir >> 10) & 3 != 2 && ir >> 62 == 0b10 => 0xffff << 48,
             Op::Alu | Op::Byte if pdl => 0o3777 << 48,
             _ => 0,
         };
