@@ -870,9 +870,10 @@ impl Pipeline {
             self.x.npc = (t & 0o37777) as u16;
         }
         if let Some((code, data)) = self.x.macro_write.take() {
-            self.m.macro_dispatch.write(code, data);
             if code == 5 && self.m.geometry.extended() {
-                self.m.macro_dispatch.register |= data & crate::machine::macro_dispatch::D_ENABLE;
+                self.m.macro_dispatch.write_register_15(data);
+            } else {
+                self.m.macro_dispatch.write(code, data);
             }
         }
         let mismatch = pdl_field.filter(|&formed| formed != self.m.pdl_index).map(|formed| {

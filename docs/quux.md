@@ -2219,7 +2219,15 @@ files were made
 the pipeline halts after the schedule's microcycle and drains, its posted
 writes landed, before the harness looks at the screen or presses a key, and
 `micro` sends out a write still waiting
-(`the_harness_acts_between_two_microcycles_on_both_engines`). At every 65,536th step of LC the pipeline
+(`the_harness_acts_between_two_microcycles_on_both_engines`). With
+`MUIR_D=off` the harness holds D off on both engines: a write of the
+MACRO-DISPATCH register keeps its enable and never D's, `<30>`, so that no
+return dispatches on a fetched word; with `MUIR_D=on` it sets D's enable
+with the register's, for a microcode that does not
+(`MacroDispatch::d`, `d_s_switch_keeps_or_clears_d_s_enable`); held off,
+the main-loop machines whose microcode sets D's enable run as those whose
+microcode leaves it clear (`d_held_off_runs_the_main_loop_machines_as_d_off`). The
+pipeline's fused returns use no prefetched word either way. At every 65,536th step of LC the pipeline
 halts after the word that stepped it, the word in EX not yet run squashed
 with RD's and CS's, and drains (`Pipeline::boundary_at`); a digest of
 `Machine::cycles`, the step count, the registers, A, M, the PDL buffer, the

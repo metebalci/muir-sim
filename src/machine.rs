@@ -701,6 +701,24 @@ pub struct MacroDispatch {
     /// How many returns have been fused: a count for the profile and the
     /// tests, not kept in a checkpoint.
     pub fused: u64,
+    /// **D's switch**, `MUIR_D` (MP2b ruling Q12(d)): a measurement aid
+    /// for revision 15's D enable, `<30>`. The run's say, not kept in a
+    /// checkpoint.
+    pub d: DSwitch,
+}
+
+/// **D's switch** ([`MacroDispatch::d`]): what revision 15 keeps of D's
+/// enable, `<30>`, when destination 5 writes the register.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DSwitch {
+    /// `<30>` as the word writes it.
+    #[default]
+    AsWritten,
+    /// Never: no return dispatches on a fetched word (`MUIR_D=off`).
+    Off,
+    /// Set with the enable, `<31>`, whatever the word writes in `<30>`
+    /// (`MUIR_D=on`): D on for a microcode that does not set it.
+    On,
 }
 
 impl Default for MacroDispatch {
@@ -714,11 +732,26 @@ impl Default for MacroDispatch {
             operand: None,
             m31: None,
             fused: 0,
+            d: DSwitch::AsWritten,
         }
     }
 }
 
 impl MacroDispatch {
+    /// Revision 15's write of the register, destination 5, with `data`:
+    /// [`MacroDispatch::write`], and D's enable, `<30>`, kept as written,
+    /// or as D's switch says (A15b.9; [`DSwitch`]).
+    pub fn write_register_15(&mut self, data: u32) {
+        self.write(5, data);
+        let d = match self.d {
+            DSwitch::AsWritten => data & macro_dispatch::D_ENABLE,
+            DSwitch::Off => 0,
+            DSwitch::On if data & macro_dispatch::ENABLE != 0 => macro_dispatch::D_ENABLE,
+            DSwitch::On => 0,
+        };
+        self.register |= d;
+    }
+
     /// -RESET, and every control-store write: the enable cleared, the rest
     /// kept.
     pub fn disable(&mut self) {

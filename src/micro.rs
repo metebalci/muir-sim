@@ -2886,10 +2886,11 @@ impl Engine for Micro {
             self.npc = (t & 0o37777) as u16;
         }
         if let Some((code, data)) = self.macro_write.take() {
-            self.m.macro_dispatch.write(code, data);
             // Revision 15 keeps D's enable, `<30>` (A15b.9).
             if code == 5 && self.m.geometry.extended() {
-                self.m.macro_dispatch.register |= data & crate::machine::macro_dispatch::D_ENABLE;
+                self.m.macro_dispatch.write_register_15(data);
+            } else {
+                self.m.macro_dispatch.write(code, data);
             }
         }
         // The PDL address field's index against the index written (A15b.2),

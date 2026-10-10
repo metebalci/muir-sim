@@ -1180,6 +1180,36 @@ fn the_main_loop_s_paths_end_as_on_micro() {
     }
 }
 
+/// **D held off on the main-loop machines** (MP2b ruling Q12(d),
+/// `MUIR_D=off`): the machines whose microcode writes D's enable run, D
+/// held off, as the machines whose microcode leaves it clear, microcycle for
+/// microcycle and state for state, on both engines, where D on runs
+/// otherwise; D's enable stays clear.
+#[test]
+fn d_held_off_runs_the_main_loop_machines_as_d_off() {
+    use muir::machine::DSwitch;
+    let e_cycles = |e: &Pipeline| e.machine().cycles;
+    let programs: [&[u32]; 2] =
+        [&ONES, &[hw(0o10, 5, 5), hw(0o10, 6, 3), hw(1, 0, 0), hw(0o10, 5, 1), hw(7, 0, 0)]];
+    for program in programs {
+        let mut held = d_machine(REV15, d_register(true), program, CODE, false, false);
+        held.macro_dispatch.d = DSwitch::Off;
+        let off = d_machine(REV15, d_register(false), program, CODE, false, false);
+        let (eh, eo) = (ml_same(held), ml_same(off));
+        let fused = |e: &Pipeline| e.machine().macro_dispatch.fused;
+        assert_eq!(e_cycles(&eh), e_cycles(&eo), "the microcycles, D held off and D off");
+        assert_eq!(fused(&eh), fused(&eo), "the fused returns, D held off and D off");
+        // The end: all but A memory's constant, the register's word.
+        let end = |m: &Machine| (m.mmem, m.pdl_index, m.spcptr, m.lc, m.macro_dispatch.register);
+        assert_eq!(end(eh.machine()), end(eo.machine()), "the end, D held off and D off");
+        let d = muir::machine::macro_dispatch::D_ENABLE;
+        assert_eq!(eh.machine().macro_dispatch.register & d, 0, "D's enable clear");
+        // The control: D on, as written, runs other microcycles.
+        let on = ml_same(d_machine(REV15, d_register(true), program, CODE, false, false));
+        assert!(fused(&on) > fused(&eo), "D on fuses more: {} {}", fused(&on), fused(&eo));
+    }
+}
+
 // --- Time (A15b.12; MP2b rulings Q1-Q4, Q9, Q10) -------------------------------
 
 /// Runs `p` on the pipeline at the period `period`, the TLB's sweep
@@ -5485,5 +5515,41 @@ fn a_pdl_field_reads_a_base_the_word_before_wrote() {
             (0o4545, 0o5555),
             "gap {gap}: read through the index"
         );
+    }
+}
+
+/// **D's switch, `MUIR_D`** (MP2b ruling Q12(d)): a write of the
+/// MACRO-DISPATCH register keeps D's enable `<30>` as written; held off
+/// (`MUIR_D=off`) it stays clear though the word sets it; on (`MUIR_D=on`)
+/// it is set with the enable `<31>` though the word leaves it clear, and
+/// not without `<31>`. On both engines.
+#[test]
+fn d_s_switch_keeps_or_clears_d_s_enable() {
+    use muir::machine::DSwitch;
+    use muir::machine::macro_dispatch::{D_ENABLE, ENABLE};
+    for (written, d, want) in [
+        (ENABLE | D_ENABLE, DSwitch::AsWritten, true),
+        (ENABLE, DSwitch::AsWritten, false),
+        (ENABLE | D_ENABLE, DSwitch::Off, false),
+        (ENABLE, DSwitch::On, true),
+        (0, DSwitch::On, false),
+    ] {
+        let mut p = Prog::default();
+        let v = p.k(Word::from(written));
+        p.op(ALU | SETA | a_src(v) | fd(5));
+        p.fill(2);
+        p.stop();
+        let mut m = machine(&p, REV15);
+        m.macro_dispatch.d = d;
+        let u = run_engine(Micro::new(m.clone())).unwrap_or_else(|(h, _)| panic!("micro: {h:?}"));
+        let e = ends_on(m, &|_| {});
+        for (what, r) in [
+            ("micro", u.machine().macro_dispatch.register),
+            ("rtl", e.machine().macro_dispatch.register),
+        ] {
+            let what = format!("{what}, {written:o} written, {d:?}");
+            assert_eq!(r & ENABLE, written & ENABLE, "{what}: the enable");
+            assert_eq!(r & D_ENABLE != 0, want, "{what}: D's enable");
+        }
     }
 }
