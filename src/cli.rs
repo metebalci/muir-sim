@@ -382,14 +382,23 @@ struct Pace {
     /// The wall clock where the machine's own clock was last set against
     /// it.
     from: Instant,
-    /// The machine's nanoseconds there.
+    /// The machine's time there, in its units.
     ns: u64,
+    /// The machine's units a nanosecond: 1, but 2 on QUUX revision 15,
+    /// whose clock counts units of 0.5 ns ([`Machine::time_base`]).
+    per_ns: u64,
 }
 
 impl Pace {
-    /// The anchor the run begins at.
+    /// The anchor the run begins at, on a clock that counts nanoseconds.
     fn new(now: Instant, ns: u64) -> Pace {
-        Pace { from: now, ns }
+        Pace { from: now, ns, per_ns: 1 }
+    }
+
+    /// The anchor the run begins at, on `m`'s own clock: [`Machine::ns`]
+    /// in the units of its time base, which every later instant is in too.
+    fn of_machine(now: Instant, m: &Machine) -> Pace {
+        Pace { from: now, ns: m.ns, per_ns: m.time_base().per_ns }
     }
 
     /// The anchor moved to here, for time the machine spent standing
@@ -405,7 +414,7 @@ impl Pace {
     /// than [`PACE_FLOOR`]; behind, the anchor moves to `now`, so that the
     /// time lost is not a debt to be run off afterwards.
     fn owed(&mut self, now: Instant, ns: u64) -> Option<Duration> {
-        let machine = Duration::from_nanos(ns.saturating_sub(self.ns));
+        let machine = Duration::from_nanos(ns.saturating_sub(self.ns) / self.per_ns);
         let wall = now.saturating_duration_since(self.from);
         let Some(ahead) = machine.checked_sub(wall) else {
             self.anchor(now, ns);
@@ -3414,7 +3423,7 @@ impl Hold {
                 Ok(Some(Command::EndCapture)) => match writes {
                     Writes::Alone { capture, .. } => match capture.take() {
                         Some((path, mut rec)) => {
-                            rec.sample(&e.machine().tv, e.machine().ns, wall_clock());
+                            rec.sample(&e.machine().tv, e.machine().device_ns(), wall_clock());
                             write_capture(&path, &rec);
                         }
                         None => println!("capture: none is going; startcapture begins one"),
@@ -3521,7 +3530,7 @@ fn time_engine<S: Stepper>(
     let mut last_serial = Instant::now();
     // `--pace`: the machine's own clock against the host's, anchored where
     // the run begins.
-    let mut pace = paced.then(|| Pace::new(Instant::now(), s.engine().machine().ns));
+    let mut pace = paced.then(|| Pace::of_machine(Instant::now(), s.engine().machine()));
     let mut capture = capture.map(|(path, time)| (path, Recorder::new(time)));
     let mut color_capture = color_capture.map(|(path, time)| (path, ColorRecorder::new(time)));
     let mut hold = Hold::open(held);
@@ -3561,13 +3570,13 @@ fn time_engine<S: Stepper>(
             let now = wall_clock();
             let m = s.engine().machine();
             if let Some((_, rec)) = capture.as_mut() {
-                rec.sample(&m.tv, m.ns, now);
+                rec.sample(&m.tv, m.device_ns(), now);
             }
             // The color screen, when the board is fitted.
             if let Some((_, rec)) = color_capture.as_mut()
                 && let Some(tv) = m.color_tv.as_ref()
             {
-                rec.sample(tv, m.ns, now);
+                rec.sample(tv, m.device_ns(), now);
             }
         }
         if last_poll.elapsed() >= TERMINAL_INTERVAL {
@@ -3665,13 +3674,13 @@ fn time_engine<S: Stepper>(
     }
     if let Some((path, rec)) = capture.as_mut() {
         let m = s.engine().machine();
-        rec.sample(&m.tv, m.ns, wall_clock());
+        rec.sample(&m.tv, m.device_ns(), wall_clock());
         write_capture(path, rec);
     }
     if let Some((path, rec)) = color_capture.as_mut() {
         let m = s.engine().machine();
         if let Some(tv) = m.color_tv.as_ref() {
-            rec.sample(tv, m.ns, wall_clock());
+            rec.sample(tv, m.device_ns(), wall_clock());
         }
         write_color_capture(path, rec);
     }
@@ -3784,7 +3793,8 @@ fn interrupted(seen: &mut u32) -> bool {
 fn say_pc<E: Engine>(e: &E, ran: u64) {
     let m = e.machine();
     let prom = if m.in_prom(e.pc()) { " in the PROM" } else { "" };
-    println!("PC {:o}{prom}; {} microcycles, {} ns; {ran} this run", e.pc(), m.cycles, m.ns);
+    let ns = m.device_ns();
+    println!("PC {:o}{prom}; {} microcycles, {ns} ns; {ran} this run", e.pc(), m.cycles);
 }
 
 /// Whether the machine is halted: `RUN` is clear, so the clock does not
@@ -7589,6 +7599,24 @@ mod tests {
         assert_eq!(endpoint_at(Some("0.0.0.0"), base), "0.0.0.0:5900".parse().ok());
         assert_eq!(endpoint_at(Some("127.0.0.1:7"), base), "127.0.0.1:7".parse().ok());
         assert_eq!(endpoint_at(Some("x"), base), None);
+    }
+
+    /// **A paced run on revision 15 counts the machine's units of 0.5 ns as
+    /// half nanoseconds**: anchored on the machine, 4 ms of its units at
+    /// the anchor's instant is 2 ms ahead, and 2 ms is what it waits. On
+    /// the CADR's clock a unit is a nanosecond. **Fails** a pace that takes
+    /// the units for nanoseconds, which runs revision 15 at half speed.
+    #[test]
+    fn the_pace_counts_revision_15_s_units() {
+        let t = Instant::now();
+        let mut m = Machine::with_geometry(crate::machine::Geometry::QUUX_15, 1);
+        m.ns = 1_000;
+        let mut pace = Pace::of_machine(t, &m);
+        assert_eq!(pace.owed(t, 1_000 + 4_000_000), Some(Duration::from_millis(2)));
+        let mut m = Machine::with_geometry(crate::machine::Geometry::CADR, 1);
+        m.ns = 1_000;
+        let mut pace = Pace::of_machine(t, &m);
+        assert_eq!(pace.owed(t, 1_000 + 4_000_000), Some(Duration::from_millis(4)));
     }
 
     /// **A paced run waits when it is ahead of the machine's clock, and at

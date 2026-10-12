@@ -1741,6 +1741,100 @@ fn a_resume_on_revision_15_says_its_time_in_nanoseconds() {
     assert_eq!(r3 - r2, s3 - s2, "the resumed clock's rate, microcycles {c2} to {c3}");
 }
 
+/// **The prompt's `pc` on revision 15 says the machine's time in
+/// nanoseconds**: held, checkpointed and asked, it gives half the units the
+/// checkpoint holds. **Fails** a `pc` that prints the units as nanoseconds.
+#[test]
+fn the_prompt_s_pc_on_revision_15_says_nanoseconds() {
+    use std::io::Write;
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-prompt-pc");
+    let prom = memory_loop_prom(&dir);
+    let held = dir.join("held.chk");
+    let mut c = quux_15("rtl", &[]);
+    c.args(["--stop-after", "1000000000", "--prom"]).arg(&prom);
+    c.stdin(std::process::Stdio::piped());
+    let mut child = c.start();
+    let mut stdin = child.stdin();
+    write!(stdin, "hold\nstep 3000\ncheckpoint {}\npc\nq\n", held.display()).unwrap();
+    drop(stdin);
+    let out = child.wait();
+    let t = text(&out);
+    assert!(out.status.success(), "rtl:\n{t}");
+    let (cycles, _, units) = clock_of(&held);
+    let says = format!("; {cycles} microcycles, {} ns;", units / 2);
+    assert!(
+        t.lines().any(|l| l.starts_with("PC ") && l.contains(&says)),
+        "no `pc` line says `{says}`:\n{t}"
+    );
+}
+
+/// The delays of a GIF's frames, in hundredths of a second, from its
+/// graphic control extensions.
+fn gif_delays(g: &[u8]) -> Vec<u64> {
+    let mut i = 13 + if g[10] & 0x80 != 0 { 3 << ((g[10] & 7) + 1) } else { 0 };
+    let mut delays = Vec::new();
+    let skip = |mut i: usize| {
+        while g[i] != 0 {
+            i += g[i] as usize + 1;
+        }
+        i + 1
+    };
+    loop {
+        match g[i] {
+            0x21 => {
+                if g[i + 1] == 0xf9 {
+                    delays.push(u16::from_le_bytes([g[i + 4], g[i + 5]]) as u64);
+                }
+                i = skip(i + 2);
+            }
+            0x2c => {
+                let packed = g[i + 9];
+                i += 10 + if packed & 0x80 != 0 { 3 << ((packed & 7) + 1) } else { 0 };
+                i = skip(i + 1);
+            }
+            0x3b => return delays,
+            b => panic!("unexpected block {b:#x} at {i}"),
+        }
+    }
+}
+
+/// **`--tv-capture` on revision 15 times its frames in nanoseconds**: a
+/// screen that never changes is one frame, up for the run's time and the
+/// second the recorder adds after the last frame; the run's time is half
+/// the units its checkpoint holds. **Fails** a recording timed by the units
+/// as nanoseconds, twice the run.
+#[test]
+fn a_capture_on_revision_15_is_timed_in_nanoseconds() {
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-capture-time");
+    let prom = memory_loop_prom(&dir);
+    let (gif, chk) = (dir.join("c.gif"), dir.join("c.chk"));
+    let out = quux_15("rtl", &[])
+        .args(["--stop-after", "3000000", "--prom"])
+        .arg(&prom)
+        .arg("--tv-capture-no-time")
+        .arg("--tv-capture")
+        .arg(&gif)
+        .arg("--checkpoint")
+        .arg(&chk)
+        .run();
+    let t = text(&out);
+    assert!(out.status.success(), "the run failed:\n{t}");
+    let delays = gif_delays(&std::fs::read(&gif).unwrap());
+    assert_eq!(delays.len(), 1, "one frame of a screen that never changes:\n{t}");
+    let ns = clock_of(&chk).2 / 2;
+    assert!(ns > 40_000_000, "the run is long enough to tell: {ns} ns");
+    // The frame is taken in the run's first moments, so it is up a little
+    // less than the whole run: within a hundredth of a second.
+    let up = (ns + 1_000_000_000) / 10_000_000;
+    assert!(
+        delays[0].abs_diff(up) <= 1,
+        "the frame is up {} hundredths, and the run and a second are {up}",
+        delays[0]
+    );
+}
+
 /// **The prompt's `checkpoint` on revision 15's `rtl` drains the pipeline
 /// first, and the run goes on**: held, stepped, checkpointed, stepped again
 /// and quit with `--checkpoint`; both files digest as `micro`'s at the
