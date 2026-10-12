@@ -836,7 +836,18 @@ impl Interface {
     /// its source, is ready to go [`TSR_READY_NS`] on, and goes at the
     /// turn timer's next rising edge of bit 7 with the cable idle
     /// ([`Turn`]).
+    ///
+    /// **Transmit Done falls at the read if it is up**, which it is when no
+    /// word was written since the last frame or a Reset. On the netlist
+    /// board the read raises `TRESET`, the 74S00s at LMTBFC 0C15, only
+    /// while `-TDONE` is low (the 74S32 at 0D15), and `TRESET` clears
+    /// `TDONE`, the 74S74 at LMMODU 0D08, as `-MSYN*` falls; it rises with
+    /// the frame's end like any other, [`TDONE_BEFORE_END_NS`] before it
+    /// (`an_empty_start_lowers_transmit_done_until_its_frame_ends` in
+    /// `tests/chaos_netlist.rs`). On revision 15 the fall is at the read's
+    /// own clock, `now`, with no delay to round.
     fn start(&mut self, now: u64) {
+        self.transmit_done = false;
         let buffer = std::mem::take(&mut self.xmit);
         if self.trace {
             eprintln!(

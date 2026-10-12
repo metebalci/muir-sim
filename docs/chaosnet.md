@@ -136,7 +136,12 @@ starting transmission may seem strange, but it makes it easier for the
 hardware to get the source address into the packet" --- and the value read
 is the interface's own address, which is the very thing the hardware is
 appending. The hardware adds the source and the check word itself; the
-software never writes either.
+software never writes either. A read of `764152` with Transmit Done up ---
+no word written since the last frame or a Reset --- lowers it until that
+frame ends, the source word and its check word alone: the read raises
+`TRESET` (LMTBFC `0C15`, only while `-TDONE` is low through `0D15`), which
+clears `TDONE`, the 74S74 at LMMODU `0D08`, as `-MSYN*` falls
+(`tests/chaos_netlist.rs::an_empty_start_lowers_transmit_done_until_its_frame_ends`).
 
 ## The cable
 

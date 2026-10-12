@@ -1685,3 +1685,222 @@ fn the_models_instants_are_the_boards() {
         }
     }
 }
+
+/// One register cycle on the netlist board and the same on the
+/// behavioral interface at the instant the board's cycle ended; the words
+/// read, the board's first.
+fn on_both(
+    b: &mut UnibusMaster,
+    m: &mut muir::chaos::board::Interface,
+    uaddr: u32,
+    write: Option<u16>,
+) -> (u16, u16) {
+    let (_, wb) = b.cycle(uaddr, write);
+    let wm = match write {
+        Some(v) => {
+            m.write(uaddr, v, b.now);
+            0
+        }
+        None => m.read(uaddr, b.now),
+    };
+    (wb, wm)
+}
+
+/// **A START read with Transmit Done up lowers it until the frame ends.**
+/// AIM-628 §7 has Transmit Done "cleared to 0 when a word is written into
+/// the outgoing packet buffer", and that is the one way software reaches
+/// a START with it down. With no word written since the last frame, or
+/// since a Reset, it is up when START is read, and the board lowers it.
+///
+/// Measured: `TDONE`, the 74S74 at LMMODU 0D08, is cleared by `TRESET`
+/// out of the 74S00s at LMTBFC 0C15, which `UB>TSR` raises for a read of
+/// START or a write of the buffer only while `-TDONE` is low, through the
+/// 74S32 at 0D15 --- so it falls as `-MSYN*` of the START read falls,
+/// asynchronously, and `TRESET` holds it, with the transmit counter and
+/// the transmit 9401 cleared, until `-MSYN*` lifts. The source word and
+/// its check word go in, and the frame --- those two words and the zero,
+/// 33 cells --- goes at the turn timer's next count, as any frame does.
+/// `TDONE` rises when `-TBUSY` does, clocking 0D08: one `FCLK^` period
+/// after `-TODN`, the borrow of the 25LS193 at LMTBUF 0C13, and
+/// [`muir::chaos::board::TDONE_BEFORE_END_NS`] before the frame's nominal
+/// end, the same instant a frame of words gets. A START read after words
+/// were written finds Transmit Done down already, `TRESET` is not raised,
+/// and nothing changes.
+///
+/// The behavioral interface lowers it at the read and raises it at the
+/// same instant: Transmit Done at the read's answer, the frame's first
+/// edge, the instant before `TDONE` rises and that instant, on both.
+#[test]
+fn an_empty_start_lowers_transmit_done_until_its_frame_ends() {
+    use muir::chaos::board::{Interface, TDONE_BEFORE_END_NS};
+    use muir::chaos::packet::frame;
+    let n = cadrio();
+    let mut b = board(&n);
+    let mut m = Interface::new(MY_ADDRESS, None, 0, false);
+    on_both(&mut b, &mut m, chaos::CSR, Some(csr::RESET));
+    b.run(b.now + 2_000);
+    m.advance(b.now);
+    on_both(&mut b, &mut m, chaos::CSR, Some(csr::LOOP_BACK | csr::CLEAR_RECEIVER));
+    let (cb, cm) = on_both(&mut b, &mut m, chaos::CSR, None);
+    assert!(cb & csr::TRANSMIT_DONE != 0, "Transmit Done up after the reset: {cb:#08o}");
+    assert_eq!(cm, cb, "the CSR before START");
+    let (me, _) = on_both(&mut b, &mut m, chaos::START, None);
+    assert_eq!(me, MY_ADDRESS, "START reads the interface's own address");
+    // Transmit Done on both, at instants of the board's own: once START
+    // is answered, at the frame's first edge, the last instant before
+    // `TDONE` rises, and that instant.
+    let mut samples: Vec<(&str, u64, bool)> = vec![("START answered", b.now, false)];
+    let tdone = |b: &UnibusMaster| b.level("TDONE") == Level::High;
+    samples[0].2 = tdone(&b);
+    let (mut first, mut before) = (None, b.now);
+    let mut was = b.level("-TTL.D.OUT");
+    let deadline = b.now + 3_000_000;
+    while !tdone(&b) {
+        before = b.now;
+        let next = b.chip.next_tap().map_or(b.now + 50, |t| t.max(b.now + 1)).min(b.now + 500);
+        b.run(next);
+        let d = b.level("-TTL.D.OUT");
+        if d != was && first.is_none() {
+            first = Some(b.now);
+            samples.push(("the frame's first edge", b.now, tdone(&b)));
+        }
+        was = d;
+        assert!(b.now < deadline, "Transmit Done never came back");
+    }
+    let first = first.expect("a frame went out");
+    let rise = b.now;
+    samples.push(("before TDONE rose", before, false));
+    samples.push(("TDONE rose", rise, true));
+    let end = first + frame(&[], MY_ADDRESS).len() as u64 * CELL_NS;
+    eprintln!(
+        "the frame from {first}, its nominal end {end}; TDONE up at {rise}, {} ns before it",
+        end - rise
+    );
+    assert_eq!(end - rise, TDONE_BEFORE_END_NS, "TDONE before the empty frame's nominal end");
+    let board: Vec<bool> = samples.iter().map(|s| s.2).collect();
+    assert_eq!(board, [false, false, false, true], "the board's Transmit Done: {samples:?}");
+    let model: Vec<bool> = samples
+        .iter()
+        .map(|&(_, t, _)| {
+            m.advance(t);
+            m.csr() & csr::TRANSMIT_DONE != 0
+        })
+        .collect();
+    assert_eq!(model, board, "the model's Transmit Done at {samples:?}");
+}
+
+/// **A START read with no word written sends the same frame from both:
+/// the source and its check word.** The board's transmit counter and its
+/// 9401 are cleared by the START read itself (above), and the frame is
+/// the source word and its CRC-16, then the zero: 33 cells, which is
+/// `chaos::packet::frame` of an empty buffer, and the check word is the
+/// right one for the source. The behavioral interface puts the same
+/// frame on the cable.
+///
+/// Neither interface's receiver takes it. The ether reads it back as two
+/// words, which `chaos::packet::unframe_any` does not call a good packet
+/// --- fewer than the three hardware words. The board's own receiver,
+/// under Spy, which takes its own frames of words off the cable, sets
+/// neither Receive Done nor CRC Error for it, and Lost Count stays 0; and
+/// the behavioral interface at 3060, under Spy on the same cable as the
+/// board, does the same.
+#[test]
+fn an_empty_start_sends_the_source_and_its_check_word_from_both() {
+    use muir::chaos::board::Interface;
+    use muir::chaos::packet::{Framed, check_word, frame};
+    let n = cadrio();
+    let mut b = board(&n);
+    b.cycle(chaos::CSR, Some(csr::RESET));
+    b.run(b.now + 2_000);
+    b.cycle(chaos::CSR, Some(csr::SPY | csr::CLEAR_RECEIVER));
+    let mut ether = Ether::new();
+    ether.keep_log(true);
+    ether.attach(Box::new(Capture::new(0o3060)));
+    b.plug_chaos(ether);
+    b.cycle(chaos::START, None);
+    let mut tx = b.chaos.as_ref().unwrap().board_tx(&b.chip);
+    let mut edges = Vec::new();
+    let deadline = b.now + 3_000_000;
+    loop {
+        let next = b.chip.next_tap().map_or(b.now + 25, |t| t.max(b.now + 1)).min(b.now + 25);
+        b.run(next);
+        let d = b.chaos.as_ref().unwrap().board_tx(&b.chip);
+        if d != tx {
+            edges.push((b.now, d));
+            tx = d;
+        }
+        if !edges.is_empty() && b.level("TDONE") == Level::High && b.level("-CBLBSY") == Level::High
+        {
+            break;
+        }
+        assert!(b.now < deadline, "the frame never went out");
+    }
+    b.run(b.now + 5_000);
+    let runs = muir::chaos::wire::decode(&edges);
+    assert_eq!(runs, [frame(&[], MY_ADDRESS)], "the board's line driver: the source and its check");
+    let empty = Framed {
+        buffer: Vec::new(),
+        source: MY_ADDRESS,
+        check: check_word(&[MY_ADDRESS]),
+        check_ok: false,
+    };
+    let heard = |log: &[Event]| -> Vec<Framed> {
+        log.iter()
+            .filter_map(|e| if let Event::Heard(_, f) = e { Some(f.clone()) } else { None })
+            .collect()
+    };
+    let board_heard = heard(&b.chaos.as_ref().unwrap().ether.log);
+    assert_eq!(board_heard, std::slice::from_ref(&empty), "the board's frame as the ether read it");
+    let (_, c) = b.cycle(chaos::CSR, None);
+    eprintln!("the board's CSR after its empty frame: {c:#08o}");
+    assert!(c & (csr::RECEIVE_DONE | csr::CRC_ERROR | csr::LOST_COUNT) == 0, "not taken: {c:#08o}");
+
+    let mut ether = Ether::new();
+    ether.keep_log(true);
+    ether.attach(Box::new(Capture::new(0o3060)));
+    let mut m = Interface::new(MY_ADDRESS, Some(ether), 0, false);
+    let mut now = 10_000;
+    m.write(chaos::CSR, csr::RESET, now);
+    m.write(chaos::CSR, csr::SPY | csr::CLEAR_RECEIVER, now);
+    m.read(chaos::START, now);
+    while now < 1_000_000 {
+        now += 1_000;
+        m.advance(now);
+    }
+    assert_eq!(
+        heard(&m.ether().unwrap().log),
+        std::slice::from_ref(&empty),
+        "the model's frame as the ether read it"
+    );
+
+    // The board's frame into the behavioral interface at 3060, which keeps
+    // the cable; the board reaches it through its transceiver.
+    use muir::chaos::cable::Transceiver;
+    let mut b = board(&n);
+    b.cycle(chaos::CSR, Some(csr::RESET));
+    b.run(b.now + 2_000);
+    b.cycle(chaos::CSR, Some(csr::CLEAR_RECEIVER));
+    let mut ether = Ether::new();
+    ether.keep_log(true);
+    let mut m = Interface::new(0o3060, Some(ether), 0, false);
+    m.write(chaos::CSR, csr::RESET, b.now);
+    m.write(chaos::CSR, csr::SPY | csr::CLEAR_RECEIVER, b.now);
+    let mut t = Transceiver::new(&n);
+    t.apply(&mut b.chip, m.ether_mut().unwrap(), b.now);
+    b.cycle(chaos::START, None);
+    let until = b.now + 1_000_000;
+    while b.now < until {
+        let now = b.now;
+        let cable = m.ether().unwrap().next_due().map(|x| x.max(now));
+        let next =
+            [b.chip.next_tap(), cable].into_iter().flatten().min().map_or(until, |x| x.min(until));
+        b.now = next.max(now);
+        b.chip.transition(b.now);
+        m.advance(b.now);
+        t.apply(&mut b.chip, m.ether_mut().unwrap(), b.now);
+    }
+    assert_eq!(heard(&m.ether().unwrap().log), [empty], "the board's frame on the model's cable");
+    let c = m.read(chaos::CSR, b.now);
+    eprintln!("the model's CSR after the board's empty frame: {c:#08o}");
+    assert!(c & (csr::RECEIVE_DONE | csr::CRC_ERROR | csr::LOST_COUNT) == 0, "not taken: {c:#08o}");
+}
