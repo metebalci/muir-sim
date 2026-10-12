@@ -2197,8 +2197,12 @@ pipeline's halt counts it as it drains
 `a_register_read_in_a_mispredicted_slot_holds_the_level_for_the_target`,
 `a_register_read_holds_the_level_for_the_word_after_its_start_held_in_cs`,
 `a_boundary_between_a_register_read_and_the_next_word_digests_alike`,
-`a_register_read_right_after_a_read_of_121_finds_the_key_taken`). The file
-device takes CMD_PROD once every earlier write is answered, so a command
+`a_register_read_right_after_a_read_of_121_finds_the_key_taken`). A halt
+between a register access's start and the next instruction sends the access
+out, a write taken and a read's change counted, so that instruction sees the
+interrupt level as the access leaves it, as on the CADR
+(`a_halt_between_a_register_access_s_start_and_the_next_instruction_sends_it_out`).
+The file device takes CMD_PROD once every earlier write is answered, so a command
 whose entry is still in the posted writes is read whole, and its
 completion's sweep leaves no line of what it wrote in the cache
 (`the_file_device_reads_its_entry_whole_and_the_sweep_shows_its_response`).
@@ -2211,6 +2215,10 @@ and a checkpoint taken there, run on to the same end, the state at the halt
 `micro`'s at the same `Machine::cycles`; so does a microcode single step,
 one microcycle each (`a_halt_at_every_clock_resumes_to_the_same_end`,
 `a_halt_mid_burst_loses_no_write`, `a_single_step_runs_one_microcycle`).
+The exception is a halt between a register access's start and the next
+instruction, which sends the access out, so that instruction sees it; both
+engines agree at every halt point
+(`a_halt_between_a_register_access_s_start_and_the_next_instruction_sends_it_out`).
 The squashed words are fetched again in order, the first two at the
 addresses committed words chose for them: a lone squashed word is followed
 by the address the next fetch would have taken

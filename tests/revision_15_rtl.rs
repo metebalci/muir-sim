@@ -5029,6 +5029,238 @@ fn a_boundary_between_a_register_read_and_the_next_word_digests_alike() {
     assert_eq!(state(e.machine()), state(u.engine.machine()), "the ends");
 }
 
+// --- A halt between a register access's start and the next instruction ----------
+
+/// The three register accesses: a read of 121 with a key waiting, a read of
+/// 122 with the mouse moved, each then [`two_checks`]; and the write of
+/// block-disk's command that raises word 100 `<3>`, then [`two_checks`].
+/// Each with its machine's setup, its end unhalted, and its end halted
+/// between the start and the next instruction.
+#[allow(clippy::type_complexity)]
+fn halt_accesses() -> Vec<(&'static str, Prog, fn(&mut Machine), (Word, Word), (Word, Word))> {
+    let mut write = Prog::default();
+    enable_interrupts(&mut write);
+    block_disk_command_start(&mut write, 1 << 11);
+    two_checks(&mut write);
+    write.fill(2);
+    write.stop();
+    check_handlers(&mut write);
+    vec![
+        ("read of 121", read_then_checks(0o121, 0), key_waiting, (1, 0), (0, 0)),
+        ("read of 122", read_then_checks(0o122, 0), mouse_moved, (1, 0), (0, 0)),
+        ("write of 200", write, with_block_disk, (0, 1), (1, 1)),
+    ]
+}
+
+/// What a halted access's run is compared by: [`two_checks`]' calls, the
+/// architectural state, and the input's interrupt level.
+fn access_end(m: &Machine) -> impl PartialEq + std::fmt::Debug {
+    ((m.mmem[0o26], m.mmem[0o27]), state(m), m.quux_input.interrupts())
+}
+
+/// The pipeline on `m` to its stop, halted at clock `halt` and run on, from
+/// a checkpoint taken there with `checkpoint`; settled. The microcycles
+/// completed at the halt (none if the stop came first), the state halted,
+/// and the end.
+fn pipeline_access_run(
+    m: &Machine,
+    halt: Option<u64>,
+    checkpoint: bool,
+) -> (Option<u64>, Option<Machine>, Pipeline) {
+    let mut e = Pipeline::new(m.clone());
+    e.boot();
+    e.skip_sweep();
+    let (mut at, mut halted) = (None, None);
+    for _ in 0..20_000 {
+        if e.machine().opc == STOP as u16 {
+            break;
+        }
+        if Some(e.clock() + 1) == halt {
+            e.machine_mut().clock_control.run = false;
+            for _ in 0..10_000 {
+                if e.is_halted() {
+                    break;
+                }
+                e.tick().unwrap();
+            }
+            assert!(e.is_halted(), "the halt at clock {halt:?} drained");
+            at = Some(e.machine().cycles);
+            halted = Some(e.landed());
+            if checkpoint {
+                let mut w = muir::checkpoint::Writer::new();
+                e.save(&mut w);
+                let bytes = w.finish();
+                let mut f = Pipeline::new(m.clone());
+                f.load(&mut muir::checkpoint::Reader::for_word_bits(&bytes, 40)).unwrap();
+                f.skip_sweep();
+                e = f;
+            }
+            e.machine_mut().clock_control.run = true;
+        }
+        e.tick().unwrap();
+    }
+    assert_eq!(e.machine().opc, STOP as u16, "halted at clock {halt:?}: the stop reached");
+    for _ in 0..16 {
+        e.step().unwrap();
+    }
+    let e = settled(e).unwrap_or_else(|(h, _)| panic!("halted settling: {h:?}"));
+    (at, halted, e)
+}
+
+/// `micro` on `m` to its stop, the clock control's RUN dropped once
+/// `halt` microcycles have run, so that it halts after the next, which
+/// latches it; set again a few master clock cycles later; with `checkpoint`, run on from a checkpoint taken while halted.
+/// The microcycles completed at the halt (none if the stop came first),
+/// the state halted, and the end.
+fn micro_access_run(
+    m: &Machine,
+    halt: Option<u64>,
+    checkpoint: bool,
+) -> (Option<u64>, Option<Machine>, Micro) {
+    let mut u = Micro::new(m.clone());
+    u.boot();
+    let (mut at, mut halted) = (None, None);
+    for _ in 0..20_000 {
+        if u.machine().opc == STOP as u16 {
+            break;
+        }
+        if Some(u.machine().cycles) == halt && at.is_none() {
+            u.spy_write(muir::spy::CLK, 0);
+            for _ in 0..4 {
+                u.step().unwrap();
+            }
+            let cycles = u.machine().cycles;
+            u.step().unwrap();
+            assert_eq!(u.machine().cycles, cycles, "halted after {halt:?} microcycles");
+            at = Some(cycles);
+            halted = Some(u.landed());
+            if checkpoint {
+                let mut w = muir::checkpoint::Writer::new();
+                u.save(&mut w);
+                let bytes = w.finish();
+                let mut f = Micro::new(m.clone());
+                f.load(&mut muir::checkpoint::Reader::for_word_bits(&bytes, 40)).unwrap();
+                u = f;
+            }
+            u.spy_write(muir::spy::CLK, 1);
+            continue;
+        }
+        u.step().unwrap();
+    }
+    assert_eq!(u.machine().opc, STOP as u16, "halted at {halt:?}: the stop reached");
+    for _ in 0..16 {
+        u.step().unwrap();
+    }
+    (at, halted, u)
+}
+
+/// **A halt between a register access's start and the next instruction
+/// sends the access out** (A15b.13, "The halt"; the halt-release
+/// clarification): over a read of 121, a read of 122 and a write of
+/// block-disk's command, each followed by [`two_checks`], the pipeline is
+/// halted at every clock and `micro` after every microcycle, and each run
+/// resumes to its stop. Every end is the unhalted one, (1, 0) for the
+/// reads and (0, 1) for the write, except at exactly one halt point on
+/// each engine, the one between the start and the next instruction: there
+/// the read's change counts and the write is taken at the halt, so the
+/// check right after the start sees the level as the access leaves it,
+/// (0, 0) for the reads and (1, 1) for the write. At every halt point the
+/// engines agree, halted and at the end; a checkpoint taken at that one
+/// point resumes to the same end. A halt that keeps a read's hold past the
+/// next instruction is caught at that point; one that completes before a
+/// write it started is taken, by the checkpoint taken there.
+#[test]
+fn a_halt_between_a_register_access_s_start_and_the_next_instruction_sends_it_out() {
+    let mut wrong = Vec::new();
+    for (what, p, setup, unhalted, sent) in halt_accesses() {
+        let mut m = machine(&p, REV15);
+        setup(&mut m);
+        let (_, _, e0) = pipeline_access_run(&m, None, false);
+        let (_, _, u0) = micro_access_run(&m, None, false);
+        let calls = |m: &Machine| (m.mmem[0o26], m.mmem[0o27]);
+        assert_eq!(calls(e0.machine()), unhalted, "{what}: rtl unhalted");
+        assert_eq!(calls(u0.machine()), unhalted, "{what}: micro unhalted");
+        assert_eq!(access_end(e0.machine()), access_end(u0.machine()), "{what}: unhalted ends");
+        // micro, halted after each microcycle: its end and its halted state
+        // by the microcycles completed.
+        let mut micro_at = std::collections::BTreeMap::new();
+        let mut micro_differ = Vec::new();
+        for k in 0..u0.machine().cycles {
+            let (at, halted, u) = micro_access_run(&m, Some(k), false);
+            let Some(at) = at else { continue };
+            if access_end(u.machine()) != access_end(u0.machine()) {
+                micro_differ.push((k, at, calls(u.machine())));
+            }
+            micro_at.insert(at, (halted.unwrap(), u));
+        }
+        // The pipeline, halted at each clock.
+        let mut rtl_differ = Vec::new();
+        for c in 1..e0.clock() {
+            let (at, halted, e) = pipeline_access_run(&m, Some(c), false);
+            let Some(at) = at else { continue };
+            if access_end(e.machine()) != access_end(e0.machine()) {
+                rtl_differ.push((c, at, calls(e.machine())));
+            }
+            // Halts before the first microcycle completes, ahead of the
+            // access, have no `micro` halt to match: `micro` latches RUN at
+            // the end of a microcycle.
+            if at == 0 {
+                continue;
+            }
+            match micro_at.get(&at) {
+                None => wrong.push(format!(
+                    "{what}: rtl halted at clock {c}, {at} microcycles, no micro halt there"
+                )),
+                Some((uh, u)) => {
+                    let eh = halted.unwrap();
+                    if (state(&eh), eh.quux_input.interrupts())
+                        != (state(uh), uh.quux_input.interrupts())
+                    {
+                        wrong.push(format!("{what}: halted at clock {c}, {at} microcycles: the halted states differ"));
+                    }
+                    if access_end(e.machine()) != access_end(u.machine()) {
+                        wrong.push(format!(
+                            "{what}: halted at clock {c}, {at} microcycles: rtl ends {:?}, micro {:?}",
+                            calls(e.machine()),
+                            calls(u.machine())
+                        ));
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{what}: unhalted {unhalted:?}; rtl differs at {rtl_differ:?}; micro at {micro_differ:?}"
+        );
+        match (&rtl_differ[..], &micro_differ[..]) {
+            ([(c, at, got)], [(j, k, ugot)]) => {
+                if at != k {
+                    wrong.push(format!("{what}: rtl's point at {at} microcycles, micro's at {k}"));
+                }
+                for (engine, got) in [("rtl", got), ("micro", ugot)] {
+                    if *got != sent {
+                        wrong.push(format!("{what}, {engine}: the halt's end {got:?}, not {sent:?}"));
+                    }
+                }
+                // A checkpoint taken at that point resumes to the same end.
+                let (_, _, e) = pipeline_access_run(&m, Some(*c), false);
+                let (_, _, f) = pipeline_access_run(&m, Some(*c), true);
+                if access_end(f.machine()) != access_end(e.machine()) {
+                    wrong.push(format!("{what}: rtl's checkpoint at clock {c} ends otherwise"));
+                }
+                let (_, _, u) = micro_access_run(&m, Some(*j), false);
+                let (_, _, v) = micro_access_run(&m, Some(*j), true);
+                if calls(u.machine()) != sent || access_end(v.machine()) != access_end(u.machine()) {
+                    wrong.push(format!("{what}: micro's checkpoint after {k} microcycles ends otherwise"));
+                }
+            }
+            _ => wrong.push(format!(
+                "{what}: not one differing halt point on each engine: rtl {rtl_differ:?}, micro {micro_differ:?}"
+            )),
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// **A register read right after a read of 121 finds the key word taken**
 /// (MP2b ruling Q4; A15b.3, "A start right after a start"): the second
 /// start, of word 100, is held behind the first and taken after its side
