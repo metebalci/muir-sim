@@ -177,3 +177,192 @@ fn the_cadr_has_it_on_the_unibus_only() {
     m.bus_read(NET);
     assert_eq!(m.bus_error, bus_error::UNIBUS_NXM);
 }
+
+// --- Revision 15: the network's times on the clock's grid ----------------
+
+/// Revision 15's register page, its network at words 140-147.
+const NET_15: u32 = muir::tlb::REGISTER_PAGE_BUS | 0o140;
+
+/// The bits of a three-word frame on the cable: the words, the source and
+/// the check word, sixteen bits each, and the zero after them
+/// (`muir::chaos::packet::frame`).
+const BITS: u64 = 5 * 16 + 1;
+
+/// The clocks at which a revision-15 machine's CSR, read at every clock's
+/// instant as the engines read it, first shows the cable busy (bit 14),
+/// Transmit Done back and Receive Done, for a three-word frame to itself
+/// under Loop Back: the CSR written at clock 1, the words at clocks 2-4,
+/// START read at clock `start`. The CSR is read at every clock from
+/// `start + 1` to `to`; a bit not seen by then is `None`.
+fn looped_back_15(period: u64, start: u64, to: u64) -> [Option<u64>; 3] {
+    let mut m = Machine::with_geometry(Geometry::QUUX_15, 1);
+    m.period = period;
+    let me = m.bus_read(NET_15 + 1) as u16;
+    m.ns = period;
+    m.bus_write(NET_15, u64::from(csr::LOOP_BACK));
+    for (k, w) in [0o1234u16, 0o5670, me].into_iter().enumerate() {
+        m.ns = (2 + k as u64) * period;
+        m.bus_write(NET_15 + 1, u64::from(w));
+    }
+    m.ns = start * period;
+    assert_eq!(m.bus_read(NET_15 + 5) as u16, me, "START reads the address");
+    let mut seen = [None; 3];
+    for clock in start + 1..=to {
+        m.ns = clock * period;
+        let r = m.bus_read(NET_15) as u16;
+        for (k, bit) in
+            [csr::CRC_ERROR, csr::TRANSMIT_DONE, csr::RECEIVE_DONE].into_iter().enumerate()
+        {
+            if r & bit != 0 && seen[k].is_none() {
+                seen[k] = Some(clock);
+            }
+        }
+        if seen.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    seen
+}
+
+/// MP2b ruling Q19 as written, in units of 0.5 ns at a period of `p`
+/// units: the turn timer's count whose true edge is `edge` acts at the
+/// first clock at or after it; the frame starts ⌈2·468/P⌉ clocks after
+/// that (`TURN_START_NS`); Transmit Done comes ⌈2(bits·250 − 500)/P⌉
+/// clocks after the frame's start and Receive Done ⌈2(bits·250 + 375)/P⌉
+/// (`TDONE_BEFORE_END_NS`, `CBLBSY_OFF_NS`), each rounded once from the
+/// frame's own start. The clocks at which the cable goes busy, Transmit
+/// Done and Receive Done come.
+fn by_the_rule(p: u64, edge: u64) -> [Option<u64>; 3] {
+    let after = |start: u64, units: u64| start + units.div_ceil(p) * p;
+    let acts = edge.div_ceil(p) * p;
+    let first_edge = after(acts, 2 * 468);
+    let tdone = after(first_edge, 2 * (BITS * 250 - 500));
+    let rdone = after(first_edge, 2 * (BITS * 250 + 375));
+    [first_edge / p, tdone / p, rdone / p].map(Some)
+}
+
+/// The true edge of the turn timer's `k`th count, in units of 0.5 ns, on
+/// an interface powered at 0: 4,250 ns and every 500 from there
+/// (`TURN_FIRST_TC_NS`, `TURN_TC_NS`). Bit 7 rises on counts 0, 512, 1024
+/// and so on while the cable is idle.
+fn turn_edge(k: u64) -> u64 {
+    2 * (4_250 + 500 * k)
+}
+
+/// **A frame's delivery at 8.5 ns lands at the clock the rule gives**
+/// (MP2b ruling Q19's test): START read at clock 11 (93.5 ns, an odd
+/// unit), the turn timer's first count at 4,250 ns, clock 500, the frame
+/// on the cable 56 clocks later, Transmit Done 2,324 clocks after its
+/// start and Receive Done 2,427: clocks 556, 2,880 and 2,983. **Fails**
+/// a time in whole ns, which brings both a clock early (2,879, 2,982).
+#[test]
+fn a_frame_s_delivery_at_8_5_ns_lands_at_the_rule_s_clock() {
+    let want = by_the_rule(17, turn_edge(0));
+    assert_eq!(want, [Some(556), Some(2_880), Some(2_983)], "the rule's clocks");
+    assert_eq!(looped_back_15(17, 11, 4_000), want);
+}
+
+/// **The same at 19 ns**, a period of 38 units, where the first count's
+/// edge at 4,250 ns falls between clocks 223 and 224: the frame on the
+/// cable at clock 249, Transmit Done at 1,289 and Receive Done at 1,335.
+/// **Fails** a time in whole ns (1,288 and 1,334).
+#[test]
+fn a_frame_s_delivery_at_19_ns_lands_at_the_rule_s_clock() {
+    let want = by_the_rule(38, turn_edge(0));
+    assert_eq!(want, [Some(249), Some(1_289), Some(1_335)], "the rule's clocks");
+    assert_eq!(looped_back_15(38, 5, 2_000), want);
+}
+
+/// **The turn timer acts at the first clock at or after its edge**, here
+/// one that falls between clocks: at 8.5 ns bit 7's second rise is count
+/// 512, whose edge at 260,250 ns is 6 units before clock 30,618. START
+/// read at clock 30,129 is ready 489 clocks on (`TSR_READY_NS`), at clock
+/// 30,618 itself: after the edge but not after the clock the count is
+/// acted on, so the frame goes at this count, on the cable 56 clocks
+/// later at 30,674, with Transmit Done and Receive Done from there.
+/// **Fails** a timer acting at the true edge, which finds the frame not
+/// ready and holds it a round, and a time in whole ns (the frame on the
+/// cable at 30,673).
+#[test]
+fn the_turn_timer_acts_at_the_first_clock_at_or_after_its_edge() {
+    let edge = turn_edge(512);
+    assert_eq!(edge % 17, 11, "the edge falls between clocks");
+    assert_eq!(30_129 * 17 + 489 * 17, edge.div_ceil(17) * 17, "ready at the count's clock");
+    let want = by_the_rule(17, edge);
+    assert_eq!(want, [Some(30_674), Some(32_998), Some(33_101)], "the rule's clocks");
+    assert_eq!(looped_back_15(17, 30_129, 34_000), want);
+}
+
+/// **The frame goes on the cable at the clock the rule gives**: at 8.5 ns,
+/// with a cable plugged in and no Loop Back, START read at clock 11, the
+/// turn timer's first count at clock 500, the frame's first edge 56
+/// clocks on at clock 556, 9,452 units, on the cable's own record; its
+/// Transmit Done at clock 2,880 as looped back. **Fails** a start delay
+/// added exactly from the count (9,436, between clocks), and a cable in
+/// whole ns.
+#[test]
+fn the_frame_goes_on_the_cable_at_the_rule_s_clock() {
+    use muir::chaos::ether::Event;
+    let mut m = Machine::with_geometry(Geometry::QUUX_15, 1);
+    m.period = 17;
+    m.plug_chaos(0);
+    let c = m.ioboard.chaos.as_mut().unwrap();
+    c.ether_mut().unwrap().keep_log(true);
+    let me = m.bus_read(NET_15 + 1) as u16;
+    m.ns = 17;
+    m.bus_write(NET_15, 0);
+    let words = [0o1234u16, 0o5670, me];
+    for (k, w) in words.into_iter().enumerate() {
+        m.ns = (2 + k as u64) * 17;
+        m.bus_write(NET_15 + 1, u64::from(w));
+    }
+    m.ns = 11 * 17;
+    m.bus_read(NET_15 + 5);
+    let mut transmit_done = None;
+    for clock in 12..4_000u64 {
+        m.ns = clock * 17;
+        if m.bus_read(NET_15) as u16 & csr::TRANSMIT_DONE != 0 {
+            transmit_done = Some(clock);
+            break;
+        }
+    }
+    let want = by_the_rule(17, turn_edge(0));
+    let log = &m.ioboard.chaos.as_ref().unwrap().ether().unwrap().log;
+    let sent: Vec<u64> = log
+        .iter()
+        .filter_map(|e| match e {
+            Event::Sent(at, from, buffer) if *from == me && buffer[..] == words => Some(*at),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, [want[0].unwrap() * 17], "the frame's first edge, in units");
+    assert_eq!(transmit_done, want[1], "Transmit Done");
+}
+
+/// **A delay started at an odd unit ends ⌈2d/P⌉ clocks after its start,
+/// not a clock early.** At 21.5 ns, 43 units, START's 4,150 ns
+/// (`TSR_READY_NS`) are ⌈8,300/43⌉ = 194 clocks. Bit 7 rises at count
+/// 14,848, whose edge is on a clock, 7,428,250 ns. START read 194 clocks
+/// before it is ready at the count and goes then; read 193 clocks before,
+/// at an odd unit, it is ready a clock after the count and waits for the
+/// next rise, count 15,360. **Fails** a time in whole ns, where the
+/// START at the odd unit is ready 0.5 ns early, at the count itself, and
+/// goes 512 counts too soon.
+#[test]
+fn a_delay_started_at_an_odd_unit_does_not_end_a_clock_early() {
+    let p = 43;
+    let edge = turn_edge(14_848);
+    assert_eq!(edge % p, 0, "the count's edge is on a clock");
+    let count = edge / p;
+    // Read 194 clocks before the count: the frame goes at it.
+    let early = count - 194;
+    let want = by_the_rule(p, edge);
+    let seen = looped_back_15(p, early, want[0].unwrap());
+    assert_eq!(seen[0], want[0], "START 194 clocks before the count: the frame goes at it");
+    // Read 193 clocks before, at an odd unit: it goes at the next rise.
+    let odd = count - 193;
+    assert_eq!(odd * p % 2, 1, "START at an odd unit");
+    let next = by_the_rule(p, turn_edge(15_360));
+    let seen = looped_back_15(p, odd, next[0].unwrap());
+    assert_eq!(seen[0], next[0], "START 193 clocks before the count: the frame waits a round");
+}

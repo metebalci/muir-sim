@@ -667,8 +667,16 @@ impl IoBoard {
     /// characters going out and coming in, and the mouse's lines under
     /// `KB CLK^`.
     pub fn advance(&mut self, now: u64) {
+        self.advance_at(now, now);
+    }
+
+    /// [`IoBoard::advance`] with the Chaosnet interface's time apart:
+    /// `chaos_now` in the units the interface was told
+    /// ([`crate::chaos::board::Interface::set_time_base`]), the rest of
+    /// the board at `now` in nanoseconds.
+    pub fn advance_at(&mut self, chaos_now: u64, now: u64) {
         if let Some(c) = self.chaos.as_mut() {
-            c.advance(now);
+            c.advance(chaos_now);
         }
         self.serial.advance(now);
         self.sample_mouse(now);

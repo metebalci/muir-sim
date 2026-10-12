@@ -380,6 +380,10 @@ pub struct Ether {
     logging: bool,
     /// The last [`LOG_CAP`] events on the cable, for a test to read back.
     pub log: Vec<Event>,
+    /// Units a nanosecond, which every instant here is counted in: 1, or
+    /// 2 on revision 15, where the cable's times double into units of
+    /// 0.5 ns, unchanged (MP2b ruling Q19). [`Ether::set_per_ns`].
+    per_ns: u64,
 }
 
 /// How many events [`Ether::log`] keeps; the oldest half goes when it is
@@ -418,7 +422,21 @@ impl Ether {
             // run that wants it turns it on with [`Ether::keep_log`].
             logging: false,
             log: Vec::new(),
+            per_ns: 1,
         }
+    }
+
+    /// Counts every instant in units of `1/per_ns` ns from here on: the
+    /// machine's own, which the interface on this cable keeps
+    /// ([`crate::chaos::board::Interface::set_time_base`]).
+    pub fn set_per_ns(&mut self, per_ns: u64) {
+        self.per_ns = per_ns;
+        self.decoder.set_per_ns(per_ns);
+    }
+
+    /// `ns` nanoseconds in this cable's units.
+    fn ns(&self, ns: u64) -> u64 {
+        ns * self.per_ns
     }
 
     /// Whether to keep [`Ether::log`]. Off for a normal run, which reads it
@@ -586,7 +604,7 @@ impl Ether {
     /// Whether the cable is busy: something has been on it within the
     /// idle time.
     pub fn busy(&self, now: u64) -> bool {
-        self.level || self.last_edge.is_some_and(|e| now < e + wire::IDLE_NS)
+        self.level || self.last_edge.is_some_and(|e| now < e + self.ns(wire::IDLE_NS))
     }
 
     fn set_level(&mut self, now: u64, level: bool) {
@@ -628,8 +646,8 @@ impl Ether {
         // receiver's abort signal instead, and starts nothing.
         if tx && !self.board_tx && !self.busy(now) && self.board.is_some() {
             self.from_cable = Some(FromCable {
-                ract_at: Some(now + RACT_NS),
-                dest_at: Some(now + BUSY_ABORT_NS),
+                ract_at: Some(now + self.ns(RACT_NS)),
+                dest_at: Some(now + self.ns(BUSY_ABORT_NS)),
                 ract_off: false,
             });
         }
@@ -686,6 +704,7 @@ impl Ether {
     /// `the_busy_receiver_aborts_only_what_is_addressed_to_it` in
     /// `tests/chaos_netlist.rs`.
     fn busy_receiver(&mut self, t: u64, source: u16, dest: u16, ract_off: bool) {
+        let hold = self.ns(ABORT_HOLD_NS);
         let Some(b) = self.board.as_mut() else { return };
         if !ract_off {
             return;
@@ -697,7 +716,7 @@ impl Ether {
         b.lost.push_back((t, source, abort));
         if abort {
             b.aborting = true;
-            b.abort_until = Some(t + ABORT_HOLD_NS);
+            b.abort_until = Some(t + hold);
         }
     }
 
@@ -709,6 +728,7 @@ impl Ether {
     /// board told, and the cable held high for [`ABORT_HOLD_NS`]. A
     /// transmitter whose frame, or abort signal, is over leaves the cable.
     fn play(&mut self, now: u64) {
+        let (tick, hold) = (self.ns(ABORT_NS), self.ns(ABORT_HOLD_NS));
         loop {
             let contended = self.contended();
             let due = self
@@ -738,10 +758,10 @@ impl Ether {
                     if s.tick == t && contended && !s.deaf && s.level && high >= 2 {
                         abort = true;
                     }
-                    s.tick += ABORT_NS;
+                    s.tick += tick;
                 }
                 if abort {
-                    s.waveform = VecDeque::from([(t + ABORT_HOLD_NS, false)]);
+                    s.waveform = VecDeque::from([(t + hold, false)]);
                     s.level = true;
                     s.deaf = true;
                     aborted.push((s.source, std::mem::take(&mut s.buffer)));
@@ -821,9 +841,9 @@ impl Ether {
             for (source, buffer) in aborted {
                 // The frame is over at the end of its abort signal, and
                 // its station's host starts writing again from there.
-                self.sent_until.insert(source, t + ABORT_HOLD_NS);
+                self.sent_until.insert(source, t + hold);
                 if let Some(b) = self.board.as_mut() {
-                    b.collisions.push_back((t, source, t + ABORT_HOLD_NS));
+                    b.collisions.push_back((t, source, t + hold));
                 }
                 if let Some(n) = self.nodes.iter_mut().find(|n| n.address() == source) {
                     n.aborted(t, buffer);
@@ -843,7 +863,7 @@ impl Ether {
         // after `now`, on the same grid.
         for s in &mut self.sending {
             while s.tick <= now {
-                s.tick += ABORT_NS;
+                s.tick += tick;
             }
         }
     }
@@ -854,10 +874,12 @@ impl Ether {
         if self.logging {
             self.record(Event::Sent(now, me, buffer.clone()));
         }
-        let mut waveform: VecDeque<(u64, bool)> =
-            wire::encode(&bits).into_iter().map(|(offset, level)| (now + offset, level)).collect();
+        let mut waveform: VecDeque<(u64, bool)> = wire::encode_in(&bits, self.per_ns)
+            .into_iter()
+            .map(|(offset, level)| (now + offset, level))
+            .collect();
         // The last change brings the line low; then it is idle.
-        let end = now + bits.len() as u64 * wire::CELL_NS;
+        let end = now + bits.len() as u64 * self.ns(wire::CELL_NS);
         waveform.push_back((end, false));
         if let Some(b) = self.board.as_mut() {
             b.frames.push_back((now, me, end));
@@ -869,11 +891,12 @@ impl Ether {
         // moves the end in, and moves that with it.
         self.sent_until.insert(me, end);
         let dest = buffer.last().copied().unwrap_or(0);
+        let (dest_after, ract_after) = (self.ns(BUSY_ABORT_NS), self.ns(RACT_NS));
         self.sending.push(Transmission {
             source: me,
             dest,
-            dest_at: self.board.as_ref().map(|_| now + BUSY_ABORT_NS),
-            ract_at: self.board.as_ref().map(|_| now + RACT_NS),
+            dest_at: self.board.as_ref().map(|_| now + dest_after),
+            ract_at: self.board.as_ref().map(|_| now + ract_after),
             ract_off: false,
             buffer,
             waveform,
@@ -995,7 +1018,7 @@ impl Ether {
                 self.start(now, w.source, w.buffer, w.deaf);
             } else {
                 // Someone took the cable first: wait for it to clear.
-                self.waiting.push(Waiting { at: now + 1, ..w });
+                self.waiting.push(Waiting { at: now + self.ns(1), ..w });
             }
         }
         // The first edges of what just started are at `now`.
@@ -1034,14 +1057,15 @@ impl Ether {
     /// from when the cable went idle or from when it was asked, whichever
     /// is later.
     fn turn(&self, now: u64, me: u16, station: bool, words: usize) -> u64 {
-        let idle_at = self.last_edge.map_or(now, |e| e + wire::IDLE_NS);
+        let idle_at = self.last_edge.map_or(now, |e| e + self.ns(wire::IDLE_NS));
         let slots = turn_byte(self.last_source.unwrap_or(me), me) as u64 + 1;
+        let (slot, round) = (self.ns(SLOT_NS), self.ns(ROUND_NS));
         if !station {
-            return idle_at.max(now) + slots * SLOT_NS;
+            return idle_at.max(now) + slots * slot;
         }
-        let first = idle_at + slots * SLOT_NS;
-        let ready = self.sent_until.get(&me).map_or(0, |&e| e + refill(words)).max(now);
-        if first >= ready { first } else { first + (ready - first).div_ceil(ROUND_NS) * ROUND_NS }
+        let first = idle_at + slots * slot;
+        let ready = self.sent_until.get(&me).map_or(0, |&e| e + self.ns(refill(words))).max(now);
+        if first >= ready { first } else { first + (ready - first).div_ceil(round) * round }
     }
 }
 

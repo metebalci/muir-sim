@@ -64,16 +64,24 @@ pub const IDLE_NS: u64 = 2 * CELL_NS + CELL_NS / 2;
 /// after the last, which is why [`crate::chaos::packet::frame`] ends in
 /// a zero.
 pub fn encode(bits: &[bool]) -> Vec<(u64, bool)> {
+    encode_in(bits, 1)
+}
+
+/// [`encode`] with the offsets in units of `1/per_ns` ns: nanoseconds at
+/// 1, and revision 15's 0.5 ns at 2, where every time here doubles (MP2b
+/// ruling Q19).
+pub fn encode_in(bits: &[bool], per_ns: u64) -> Vec<(u64, bool)> {
+    let cell = CELL_NS * per_ns;
     let mut out = Vec::with_capacity(bits.len() * 2);
     let mut level = false;
     let mut prev = false;
     for (k, &bit) in bits.iter().enumerate() {
-        let start = k as u64 * CELL_NS;
+        let start = k as u64 * cell;
         level = !level;
         out.push((start, level));
         if bit == prev {
             level = !level;
-            out.push((start + CELL_NS / 2, level));
+            out.push((start + cell / 2, level));
         }
         prev = bit;
     }
@@ -84,8 +92,11 @@ pub fn encode(bits: &[bool]) -> Vec<(u64, bool)> {
 /// due, it delivers a packet's bits when the line has gone idle. It does
 /// what the board's detector does with its lockout and its sample delay,
 /// which is what makes the two agree on which edges are cells.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Decoder {
+    /// Units a nanosecond, which every time here is counted in: 1, or 2
+    /// on revision 15 ([`encode`]).
+    per_ns: u64,
     level: bool,
     /// The opening edge of the current cell, if in a packet.
     cell: Option<u64>,
@@ -96,9 +107,32 @@ pub struct Decoder {
     last_edge: Option<u64>,
 }
 
+impl Default for Decoder {
+    fn default() -> Decoder {
+        Decoder {
+            per_ns: 1,
+            level: false,
+            cell: None,
+            sample: None,
+            bits: Vec::new(),
+            last_edge: None,
+        }
+    }
+}
+
 impl Decoder {
     pub fn new() -> Decoder {
         Decoder::default()
+    }
+
+    /// Counts its times in units of `1/per_ns` ns from here on.
+    pub fn set_per_ns(&mut self, per_ns: u64) {
+        self.per_ns = per_ns;
+    }
+
+    /// [`IDLE_NS`] in this decoder's units.
+    fn idle(&self) -> u64 {
+        IDLE_NS * self.per_ns
     }
 
     /// Whether a packet is in progress: the line has had an edge and has
@@ -115,12 +149,12 @@ impl Decoder {
         self.level = level;
         self.last_edge = Some(t);
         match self.cell {
-            Some(start) if t < start + LOCKOUT_NS => {
+            Some(start) if t < start + LOCKOUT_NS * self.per_ns => {
                 // The mid-cell transition: locked out.
             }
             _ => {
                 self.cell = Some(t);
-                self.sample = Some(t + SAMPLE_NS);
+                self.sample = Some(t + SAMPLE_NS * self.per_ns);
             }
         }
     }
@@ -141,7 +175,7 @@ impl Decoder {
     /// moment until it falls.
     pub fn next_due(&self) -> Option<u64> {
         let idle =
-            self.last_edge.filter(|_| self.cell.is_some() && !self.level).map(|e| e + IDLE_NS);
+            self.last_edge.filter(|_| self.cell.is_some() && !self.level).map(|e| e + self.idle());
         match (self.sample, idle) {
             (Some(s), Some(i)) => Some(s.min(i)),
             (s, i) => s.or(i),
@@ -159,7 +193,7 @@ impl Decoder {
             self.sample = None;
         }
         if let (Some(_), Some(e)) = (self.cell, self.last_edge)
-            && t >= e + IDLE_NS
+            && t >= e + self.idle()
             && !self.level
         {
             self.cell = None;

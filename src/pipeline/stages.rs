@@ -451,8 +451,7 @@ impl Pipeline {
     /// neutral time: the I/O board's clocks and the file device, whose
     /// completion sweeps the cache (A15b.6).
     pub(crate) fn advance_devices(&mut self) {
-        let ns = self.m.device_ns();
-        self.m.ioboard.advance(ns);
+        self.m.advance_ioboard();
         self.m.dma_written = false;
         self.m.advance_file_device();
         if std::mem::take(&mut self.m.dma_written) {

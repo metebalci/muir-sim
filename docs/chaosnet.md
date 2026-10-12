@@ -501,6 +501,30 @@ measured on the netlist board, and each says which.
 | `TSR_READY_NS` | 4150 | the read of `START` answered, `-SSYN`, to `TSREMPTY` | netlist board, at every phase of its clocks; the answer itself takes 350 to 2,100 ns |
 | `TDONE_AFTER_ABORT_NS` | 125 | `ABORT` setting to Transmit Done | netlist board |
 
+**On QUUX revision 15 the interface keeps the machine's time** (contract G3
+revision 15, §9; its MP2b ruling Q19), told it by `Machine::chaos_time`.
+Every constant above, the cable's with the interface's, doubles into units
+of 0.5 ns, unchanged. The turn timer's terminal counts are acted on at the
+first clock at or after each true edge, the divider keeping its phase from
+power-on. A delay the interface starts ends ⌈2d/P⌉ clocks after its start,
+P the period in units, rounded up once from its own start and its exact
+value, never per term or via whole ns: `TSR_READY_NS` from the read of
+START, `TURN_START_NS` from the count's clock, and from its own frame's
+first edge Transmit Done (the frame's length less `TDONE_BEFORE_END_NS`),
+the end of `-CBLBSY` and, looped back, Receive Done (the length and
+`CBLBSY_OFF_NS`). A delay whose start the cable sets between clocks --- a
+frame from another station, timing its Receive Done, the end of `-CBLBSY`
+and the turn counter's load, or the board's abort at its transmitter's next
+8 MHz edge, timing Transmit Done --- ends at the first clock at or after its
+exact start plus its exact value, rounded up once and not first the start
+to a clock (the ruling's clarification of a delay started off the clock's
+grid). At 8.5 ns a three-word frame read out by START at clock
+11 goes on the cable at clock 556, Transmit Done comes at 2,880 and Receive
+Done at 2,983 (`a_frame_s_delivery_at_8_5_ns_lands_at_the_rule_s_clock` in
+`tests/quux_network.rs`, with 19 ns, an edge between clocks, a START at an
+odd unit and the frame's first edge on the cable's record beside it). The
+CADR and revisions 13 and 14 keep nanoseconds with no grid.
+
 ## What each engine has
 
 **On `chip` the interface is MIT's board.** `data/CADRIO.netlist` runs as

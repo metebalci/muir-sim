@@ -25,6 +25,7 @@ use super::ether::{Ether, turn_byte};
 use super::interface::{self, csr};
 use super::packet::{Framed, Received, check_word, frame};
 use super::wire;
+use crate::clock::TimeBase;
 use std::collections::VecDeque;
 
 /// The Unibus interrupt vector, `uc-interrupt.lisp`: "JUMP-EQUAL M-B
@@ -125,30 +126,40 @@ impl Turn {
         Turn { powered_at, taken: 0, q: false, low: 0, frames: Vec::new(), ready: None }
     }
 
-    fn next_tc(&self) -> u64 {
-        self.powered_at + TURN_FIRST_TC_NS + TURN_TC_NS * self.taken
+    /// The true edge of terminal count `k`, in the machine's units.
+    fn edge(&self, k: u64, time: TimeBase) -> u64 {
+        self.powered_at + time.ns(TURN_FIRST_TC_NS + TURN_TC_NS * k)
+    }
+
+    /// When the next terminal count is acted on: its true edge, and on
+    /// revision 15 the first clock at or after it, the divider running
+    /// free from power-on and keeping its phase (MP2b ruling Q19).
+    fn next_tc(&self, time: TimeBase) -> u64 {
+        time.grid(self.edge(self.taken, time))
     }
 
     /// `-CBLBSY` down at `t`: a frame's first edge is past and its busy
     /// one-shot has not run out.
-    fn busy_at(&self, t: u64) -> bool {
-        self.frames.iter().any(|&(s, _, e)| s <= t && t < e + CBLBSY_OFF_NS)
+    fn busy_at(&self, t: u64, time: TimeBase) -> bool {
+        self.frames.iter().any(|&(s, _, e)| s <= t && t < e + time.ns(CBLBSY_OFF_NS))
     }
 
-    /// Takes the terminal count at `t`, for the interface at `me`.  Returns
-    /// the instant a frame starts, if this count starts one.
-    fn tc(&mut self, t: u64, me: u16) -> Option<u64> {
-        let prev =
-            self.taken.checked_sub(1).map(|k| self.powered_at + TURN_FIRST_TC_NS + TURN_TC_NS * k);
+    /// Takes the terminal count at `t`, for the interface at `me`: the
+    /// instant [`Turn::next_tc`] gave, where the count is acted on.
+    /// Returns the instant a frame starts, if this count starts one:
+    /// [`TURN_START_NS`] on, a delay the count starts, so on revision 15
+    /// ⌈2·468/P⌉ clocks after the count's clock (MP2b ruling Q19).
+    fn tc(&mut self, t: u64, me: u16, time: TimeBase) -> Option<u64> {
+        let prev = self.taken.checked_sub(1).map(|k| time.grid(self.edge(k, time)));
         for &(s, source, _) in &self.frames {
-            let load = s + TURN_LOAD_NS;
+            let load = s + time.ns(TURN_LOAD_NS);
             if load <= t && prev.is_none_or(|p| load > p) {
                 self.low = turn_byte(source, me);
                 self.q = true;
             }
         }
         let mut starts = None;
-        if self.busy_at(t) {
+        if self.busy_at(t, time) {
             self.q = true;
         } else {
             self.q = !self.q;
@@ -156,12 +167,12 @@ impl Turn {
                 let rises = self.low == 0;
                 self.low = self.low.wrapping_sub(1);
                 if rises && self.ready.as_ref().is_some_and(|&(at, _)| at <= t) {
-                    starts = Some(t + TURN_START_NS);
+                    starts = Some(time.after(t, time.ns(TURN_START_NS)));
                 }
             }
         }
         self.taken += 1;
-        self.frames.retain(|&(_, _, e)| e + CBLBSY_OFF_NS >= t);
+        self.frames.retain(|&(_, _, e)| e + time.ns(CBLBSY_OFF_NS) >= t);
         starts
     }
 
@@ -183,11 +194,16 @@ impl Turn {
     /// terminal count about twice every five of them whatever else is
     /// happening.  The unit tests below hold a batched run to a stepped
     /// one and hold the refusals to refusing.
-    fn idle_run(&mut self, now: u64) -> bool {
-        if !self.frames.is_empty() || self.ready.is_some() || self.next_tc() > now {
+    ///
+    /// On revision 15 a count is taken at the first clock at or after its
+    /// edge, so the counts due by `now` are those whose edges are at or
+    /// before the last clock at or before it.
+    fn idle_run(&mut self, now: u64, time: TimeBase) -> bool {
+        if !self.frames.is_empty() || self.ready.is_some() || self.next_tc(time) > now {
             return false;
         }
-        let n = (now - self.next_tc()) / TURN_TC_NS + 1;
+        let first = self.edge(self.taken, time);
+        let n = (time.grid_floor(now) - first) / time.ns(TURN_TC_NS) + 1;
         let down = if self.q { n / 2 } else { n.div_ceil(2) };
         self.low = self.low.wrapping_sub(down as u8);
         self.q ^= n % 2 == 1;
@@ -242,6 +258,12 @@ pub struct Interface {
     /// `--chaos-trace`: say what the receiver takes and drops, and when
     /// the transmitter's turn comes.
     trace: bool,
+    /// The machine's unit of time and its clock's grid, which every
+    /// instant here is counted in: nanoseconds with no grid, and on
+    /// revision 15 units of 0.5 ns on its period (MP2b ruling Q19).
+    /// [`Interface::set_time_base`]; not kept in a checkpoint, the
+    /// machine setting it before it hands the interface a time.
+    time: TimeBase,
 }
 
 impl Clone for Interface {
@@ -268,6 +290,7 @@ impl Clone for Interface {
             next_event: None,
             ether: None,
             trace: self.trace,
+            time: self.time,
         }
     }
 }
@@ -306,6 +329,37 @@ impl Interface {
             next_event: None,
             ether,
             trace,
+            time: TimeBase::NS,
+        }
+    }
+
+    /// Counts every instant in the machine's units on its clock's grid,
+    /// `time`, from here on, and its cable with it. Nanoseconds with no
+    /// grid until told otherwise, which is the CADR's and revisions 13
+    /// and 14's.
+    ///
+    /// **On revision 15** (MP2b ruling Q19) the constants above and the
+    /// cable's double into units of 0.5 ns, unchanged; the turn timer's
+    /// terminal counts are acted on at the first clock at or after each
+    /// true edge; and a delay the interface starts ends ⌈2d/P⌉ clocks
+    /// after its start, rounded up once from its own start and its exact
+    /// value ([`TimeBase::after`]): START's [`TSR_READY_NS`], the count's
+    /// [`TURN_START_NS`], and from its own frame's first edge Transmit
+    /// Done, the end of `-CBLBSY` and, looped back, Receive Done. A delay
+    /// whose start the cable sets between clocks --- a frame from another
+    /// station's Receive Done, busy window and load of the turn counter,
+    /// Transmit Done after an abort --- ends at the first clock at or
+    /// after its exact start plus its exact value, rounded up once and
+    /// not first the start to a clock (MP2b ruling Q19, its clarification
+    /// of a delay started off the clock's grid): kept here exactly, and
+    /// acted on at the first clock that reaches it.
+    pub fn set_time_base(&mut self, time: TimeBase) {
+        if self.time != time {
+            self.time = time;
+            self.invalidate();
+            if let Some(e) = self.ether.as_mut() {
+                e.set_per_ns(time.per_ns);
+            }
         }
     }
 
@@ -328,6 +382,7 @@ impl Interface {
     /// there.
     pub fn plug(&mut self, mut ether: Ether) {
         ether.attach_board(self.address);
+        ether.set_per_ns(self.time.per_ns);
         self.ether = Some(Box::new(ether));
         self.invalidate();
         self.tell_the_cable();
@@ -339,7 +394,11 @@ impl Interface {
             | if self.transmit_abort { csr::TRANSMIT_ABORT } else { 0 }
             | if self.transmit_done { csr::TRANSMIT_DONE } else { 0 }
             | ((self.lost as u16) << 9) & csr::LOST_COUNT
-            | if self.crc_error || self.turn.busy_at(self.now) { csr::CRC_ERROR } else { 0 }
+            | if self.crc_error || self.turn.busy_at(self.now, self.time) {
+                csr::CRC_ERROR
+            } else {
+                0
+            }
             | if self.receive_done { csr::RECEIVE_DONE } else { 0 }
     }
 
@@ -387,8 +446,9 @@ impl Interface {
         if self.next_event.is_some_and(|t| now < t) {
             return;
         }
+        let time = self.time;
         loop {
-            let tc = self.turn.next_tc();
+            let tc = self.turn.next_tc(time);
             let cable = self.ether.as_ref().and_then(|e| e.next_due());
             let landing = self.incoming.front().map(|&(t, _)| t);
             let due = [Some(tc), cable, landing, self.tdone_at]
@@ -404,7 +464,9 @@ impl Interface {
             // `t - 1`, before the count --- so `idle_run` refuses and the
             // arms below take the instant as they always did.
             let others = [cable, landing, self.tdone_at].into_iter().flatten().min();
-            if tc == t && self.turn.idle_run(others.map_or(now, |u| u.saturating_sub(1).min(now))) {
+            if tc == t
+                && self.turn.idle_run(others.map_or(now, |u| u.saturating_sub(1).min(now)), time)
+            {
                 continue;
             }
             if cable == Some(t)
@@ -422,13 +484,13 @@ impl Interface {
                 self.transmit_done = true;
             }
             if tc == t
-                && let Some(start) = self.turn.tc(t, self.address)
+                && let Some(start) = self.turn.tc(t, self.address, time)
             {
                 self.launch(start, t);
             }
         }
         if let Some(e) = self.ether.as_mut()
-            && now >= self.polled + POLL_NS
+            && now >= self.polled + time.ns(POLL_NS)
         {
             e.at(now);
             self.polled = now;
@@ -438,8 +500,8 @@ impl Interface {
         // them: it is how a node with a frame to send is asked, so an
         // interface with a cable is never left with nothing due.
         let cable = self.ether.as_ref().and_then(|e| e.next_due());
-        let poll = self.ether.as_ref().map(|_| self.polled + POLL_NS);
-        self.next_event = [Some(self.turn.next_tc()), cable, poll, self.tdone_at]
+        let poll = self.ether.as_ref().map(|_| self.polled + time.ns(POLL_NS));
+        self.next_event = [Some(self.turn.next_tc(time)), cable, poll, self.tdone_at]
             .into_iter()
             .flatten()
             .chain(self.incoming.front().map(|&(t, _)| t))
@@ -474,11 +536,16 @@ impl Interface {
     /// at their `RDONE`.  Under Loop Back the receiver is on the
     /// transmitter, not the cable.
     fn take_from_cable(&mut self) {
+        let time = self.time;
         let Some(e) = self.ether.as_mut() else { return };
         let loop_back = self.csr & csr::LOOP_BACK != 0;
         while let Some((start, source, end)) = e.board_cable_frame() {
             if source == self.address {
-                self.tdone_at = Some(end - TDONE_BEFORE_END_NS);
+                // From the frame's first edge, which the turn timer put
+                // on a clock: rounded once from there, never from the
+                // nominal end.
+                let d = (end - start).saturating_sub(time.ns(TDONE_BEFORE_END_NS));
+                self.tdone_at = Some(time.after(start, d));
                 if self.trace {
                     eprintln!(
                         "chaos {start:>6}: interface {:o} put its frame on the cable, to {end}",
@@ -503,7 +570,7 @@ impl Interface {
             }
             if source == self.address {
                 self.transmit_abort = true;
-                self.tdone_at = Some(t + TDONE_AFTER_ABORT_NS);
+                self.tdone_at = Some(t + time.ns(TDONE_AFTER_ABORT_NS));
                 if self.trace {
                     eprintln!(
                         "chaos {t:>6}: interface {:o}'s frame aborted on interference",
@@ -552,7 +619,7 @@ impl Interface {
                 .filter(|&&(s, source, _)| source == from && s <= at)
                 .map(|&(_, _, e)| e)
                 .max();
-            let land = end.map_or(at, |e| e + CBLBSY_OFF_NS);
+            let land = end.map_or(at, |e| e + time.ns(CBLBSY_OFF_NS));
             self.incoming.push_back((land, r));
             self.incoming.make_contiguous().sort_by_key(|&(t, _)| t);
         }
@@ -563,8 +630,10 @@ impl Interface {
     /// Back, or into the void with no cable.
     fn launch(&mut self, start: u64, t: u64) {
         let Some((ready_at, buffer)) = self.turn.ready.take() else { return };
+        let time = self.time;
         let bits = frame(&buffer, self.address).len() as u64;
-        let end = start + bits * wire::CELL_NS;
+        let length = bits * time.ns(wire::CELL_NS);
+        let end = start + length;
         if self.trace {
             eprintln!(
                 "chaos {t:>6}: interface {:o}'s turn, its frame ready since {ready_at}, {bits} bits from {start}",
@@ -573,7 +642,7 @@ impl Interface {
         }
         if self.csr & csr::LOOP_BACK != 0 || self.ether.is_none() {
             self.turn.frames.push((start, self.address, end));
-            self.tdone_at = Some(end - TDONE_BEFORE_END_NS);
+            self.tdone_at = Some(time.after(start, length - time.ns(TDONE_BEFORE_END_NS)));
             if self.csr & csr::LOOP_BACK != 0 {
                 let mut over = buffer.clone();
                 over.push(self.address);
@@ -581,7 +650,7 @@ impl Interface {
                 let bits = (buffer.len() + 2) * 16;
                 let framed = Framed { buffer, source: self.address, check, check_ok: true };
                 let r = Received { framed, bits };
-                self.incoming.push_back((end + CBLBSY_OFF_NS, r));
+                self.incoming.push_back((time.after(start, length + time.ns(CBLBSY_OFF_NS)), r));
                 self.incoming.make_contiguous().sort_by_key(|&(t, _)| t);
             }
         } else if let Some(e) = self.ether.as_mut() {
@@ -776,7 +845,7 @@ impl Interface {
                 buffer.len()
             );
         }
-        self.turn.ready = Some((now + TSR_READY_NS, buffer));
+        self.turn.ready = Some((self.time.after(now, self.time.ns(TSR_READY_NS)), buffer));
     }
 }
 
@@ -808,6 +877,7 @@ impl Interface {
             next_event: _,
             ether: _,
             trace: _,
+            time: _,
         } = self;
         w.u16(*address);
         w.u16(*csr);
@@ -923,26 +993,35 @@ mod tests {
     /// count taken exactly where the other does.  Held over both phases
     /// of `Q`, the counter values either side of its wrap, and runs from
     /// one count to a thousand --- more than the byte's own period, so
-    /// the wrap is crossed several times over.
+    /// the wrap is crossed several times over. And on revision 15's grid,
+    /// at 8.5 and 19 ns, where a count is taken at the first clock at or
+    /// after its edge: a run to the clock of its last count, and one to
+    /// the instant before the next count's clock, take the same counts.
     #[test]
     fn a_batched_run_of_terminal_counts_is_a_stepped_one() {
-        for q in [false, true] {
-            for low in [0u8, 1, 2, 127, 128, 254, 255] {
-                for n in [1u64, 2, 3, 4, 5, 17, 254, 255, 256, 257, 511, 512, 1_000] {
-                    let mut stepped = quiet(q, low);
-                    for _ in 0..n {
-                        let t = stepped.next_tc();
-                        assert_eq!(stepped.tc(t, 0o1440), None, "nothing ready, so nothing starts");
+        for time in [TimeBase::NS, TimeBase::half_ns(17), TimeBase::half_ns(38)] {
+            for q in [false, true] {
+                for low in [0u8, 1, 2, 127, 128, 254, 255] {
+                    for n in [1u64, 2, 3, 4, 5, 17, 254, 255, 256, 257, 511, 512, 1_000] {
+                        let mut stepped = quiet(q, low);
+                        for _ in 0..n {
+                            let t = stepped.next_tc(time);
+                            assert_eq!(stepped.tc(t, 0o1440, time), None, "nothing ready");
+                        }
+                        let fresh = quiet(q, low);
+                        let last = time.grid(fresh.edge(n - 1, time));
+                        let before_next = time.grid(fresh.edge(n, time)) - 1;
+                        for until in [last, before_next] {
+                            let mut batched = quiet(q, low);
+                            assert!(batched.idle_run(until, time), "{n} counts due at {until}");
+                            assert_eq!(
+                                (batched.q, batched.low, batched.taken),
+                                (stepped.q, stepped.low, stepped.taken),
+                                "{time:?}: Q {q}, counter {low}, {n} counts, to {until}"
+                            );
+                            assert!(batched.next_tc(time) > until, "and the run is over");
+                        }
                     }
-                    let mut batched = quiet(q, low);
-                    let until = batched.next_tc() + TURN_TC_NS * (n - 1);
-                    assert!(batched.idle_run(until), "{n} counts are due at {until}");
-                    assert_eq!(
-                        (batched.q, batched.low, batched.taken),
-                        (stepped.q, stepped.low, stepped.taken),
-                        "Q {q}, counter {low}, {n} counts"
-                    );
-                    assert!(batched.next_tc() > until, "and the run is over");
                 }
             }
         }
@@ -969,7 +1048,7 @@ mod tests {
         };
         for (what, start) in [("a frame on the cable", heard), ("a packet ready", ready)] {
             let mut turn = start.clone();
-            assert!(!turn.idle_run(far), "{what}: the run must be refused");
+            assert!(!turn.idle_run(far, TimeBase::NS), "{what}: the run must be refused");
             assert_eq!(
                 (turn.q, turn.low, turn.taken),
                 (start.q, start.low, start.taken),
@@ -977,8 +1056,10 @@ mod tests {
             );
         }
         // And a count that is not due yet is not taken early.
-        let mut turn = quiet(false, 0);
-        assert!(!turn.idle_run(turn.next_tc() - 1));
-        assert_eq!(turn.taken, 0);
+        for time in [TimeBase::NS, TimeBase::half_ns(17)] {
+            let mut turn = quiet(false, 0);
+            assert!(!turn.idle_run(turn.next_tc(time) - 1, time));
+            assert_eq!(turn.taken, 0);
+        }
     }
 }

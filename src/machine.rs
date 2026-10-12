@@ -1604,14 +1604,37 @@ impl Machine {
         (self.ns / self.time_base().per_us()) as u32
     }
 
-    /// The machine's time in whole nanoseconds, as the Chaosnet interface
-    /// and the displays keep it: [`Machine::ns`] itself but on revision 15,
-    /// whose units it halves, the half dropped. **Unverified** for revision
-    /// 15's network, whose times the contract has double into units and act
-    /// on the clock's grid (MP2b ruling Q19): a started delay can end a
-    /// clock early here when its start is at an odd unit.
+    /// The machine's time in whole nanoseconds, as the displays, the I/O
+    /// board's serial port and mouse lines, and the reports keep it:
+    /// [`Machine::ns`] itself but on revision 15, whose units it halves,
+    /// the half dropped. Not the Chaosnet interface's, which keeps the
+    /// machine's own units on its clock's grid
+    /// ([`Machine::chaos_time`]).
     pub fn device_ns(&self) -> u64 {
         self.ns / self.time_base().per_ns
+    }
+
+    /// The Chaosnet interface told the machine's unit of time and its
+    /// clock's grid ([`crate::chaos::board::Interface::set_time_base`]),
+    /// and the machine's time in those units, [`Machine::ns`] itself: on
+    /// revision 15 its times double into units of 0.5 ns, its turn timer
+    /// acts at the first clock at or after each edge, and the delays it
+    /// starts end ⌈2d/P⌉ clocks after their start (MP2b ruling Q19).
+    pub fn chaos_time(&mut self) -> u64 {
+        let time = self.time_base();
+        if let Some(c) = self.ioboard.chaos.as_mut() {
+            c.set_time_base(time);
+        }
+        self.ns
+    }
+
+    /// Time passes to the machine's for what on the I/O board keeps its
+    /// own: the Chaosnet interface at [`Machine::chaos_time`], the serial
+    /// port and the mouse's lines at [`Machine::device_ns`]. The engines
+    /// call it at every clock or microcycle.
+    pub fn advance_ioboard(&mut self) {
+        let (now, ns) = (self.chaos_time(), self.device_ns());
+        self.ioboard.advance_at(now, ns);
     }
 
     /// Loads the boot PROM.  Words past the end of the image stay zero.
@@ -2594,8 +2617,8 @@ impl Machine {
                 // registers (contract Q13).
                 k @ 0o140..=0o147 => match network_register(k, false) {
                     Some(r) => {
-                        let ns = self.device_ns();
-                        self.ioboard.read(r, ns) as u32
+                        let now = self.chaos_time();
+                        self.ioboard.read(r, now) as u32
                     }
                     None => 0,
                 },
@@ -2741,8 +2764,8 @@ impl Machine {
                 // other words are ignored (contract Q13).
                 k @ 0o140..=0o147 => {
                     if let Some(r) = network_register(k, true) {
-                        let ns = self.device_ns();
-                        self.ioboard.write(r, value as u16, ns);
+                        let now = self.chaos_time();
+                        self.ioboard.write(r, value as u16, now);
                     }
                 }
                 // Block-disk (contract Q13): a transfer is a bus master

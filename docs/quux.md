@@ -2047,7 +2047,14 @@ duration is turned to clocks once, rounded up, and a timer keeps true time
 over a second at every period
 (`a_command_s_time_is_rounded_to_clocks_once`,
 `a_1_us_timer_rises_at_clock_1649_the_14th_time`,
-`the_accumulators_keep_true_time_over_a_second`).
+`the_accumulators_keep_true_time_over_a_second`). The network is one of
+those devices (MP2b ruling Q19): the Chaosnet interface and its cable count
+in the same units, the turn timer acting at the first clock at or after each
+edge and the delays the interface starts ending ⌈2d/P⌉ clocks after their
+start, so that at 8.5 ns a frame looped back is delivered at the clock the
+rule gives (`a_frame_s_delivery_at_8_5_ns_lands_at_the_rule_s_clock` and
+four more in `tests/quux_network.rs`; `docs/chaosnet.md` has the
+rule's instants and what it leaves unverified).
 
 **Transfers.** Jumps, calls, POPJ and the fused return resolve in RD; a
 conditional jump is predicted by its hint and a dispatch by its predicted

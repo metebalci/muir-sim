@@ -221,6 +221,18 @@ impl TimeBase {
     pub fn clocks(self, units: u64) -> u64 {
         if self.period == 0 { 0 } else { units.div_ceil(self.period) }
     }
+
+    /// The end of a delay `units` long that a device starts at `start`:
+    /// ⌈`units`/P⌉ clocks after it, the duration rounded up once from its
+    /// own start (MP2b rulings Q2 and Q19); `start + units` with no grid.
+    pub fn after(self, start: u64, units: u64) -> u64 {
+        if self.period <= 1 { start + units } else { start + self.clocks(units) * self.period }
+    }
+
+    /// The last clock's instant at or before `t`: `t` itself with no grid.
+    pub fn grid_floor(self, t: u64) -> u64 {
+        if self.period <= 1 { t } else { t / self.period * self.period }
+    }
 }
 
 /// **Revision 15's period when no flag says**, in units of 0.5 ns: 17, the
