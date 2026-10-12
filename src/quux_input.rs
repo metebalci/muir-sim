@@ -68,6 +68,10 @@ pub struct QuuxInput {
     /// The keyboard's boot word came in and the engine has not taken it
     /// ([`QuuxInput::take_boot`]); as on the I/O board, not in a checkpoint.
     boot: bool,
+    /// Revision 15: the interrupt bits a read lowered whose side effect
+    /// does not count yet ([`QuuxInput::hold`]). Not in a checkpoint: an
+    /// engine releases it before it halts.
+    held: u32,
 }
 
 impl QuuxInput {
@@ -111,10 +115,35 @@ impl QuuxInput {
     }
 
     /// The interrupt status's bits: `<4>` the keyboard, `<5>` the mouse,
-    /// each under its enable (contract Q13).
+    /// each under its enable (contract Q13); and a bit a read lowered
+    /// while that read's side effect is held ([`QuuxInput::hold`]).
     pub fn interrupts(&self) -> u32 {
+        self.levels() | self.held
+    }
+
+    /// The interrupt bits as the device stands.
+    pub fn levels(&self) -> u32 {
         ((self.kbd_enable && !self.fifo.is_empty()) as u32) << 4
             | ((self.mouse_enable && self.mouse_changed) as u32) << 5
+    }
+
+    /// **Revision 15: a register read's lowering of an interrupt level is
+    /// held for the word right after its start** (MP2b ruling Q4; the
+    /// register read ruling). The read takes its word and makes its change
+    /// at once; `before` is [`QuuxInput::levels`] as they stood before it,
+    /// and a bit the read lowered --- `<4>` when 121 took the last key word,
+    /// `<5>` when 122 cleared 123 `<0>` --- still reads up in
+    /// [`QuuxInput::interrupts`] until the engine calls
+    /// [`QuuxInput::release`]. A key word or a move that comes in meanwhile
+    /// raises its bit as ever. A hold already standing is replaced: the read
+    /// before it counts by now.
+    pub fn hold(&mut self, before: u32) {
+        self.held = before & !self.levels();
+    }
+
+    /// The held read's side effect counts from now ([`QuuxInput::hold`]).
+    pub fn release(&mut self) {
+        self.held = 0;
     }
 
     /// Whether a key word is waiting to be read, word 120's `<0>`.

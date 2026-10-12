@@ -2181,7 +2181,23 @@ transfer clears the cache's sets of the words it writes and no others
 (`a_block_disk_transfer_clears_the_sets_it_writes_and_no_more`). A register
 access waits at WB while a register write before it is still to be taken,
 so that a read right after a write reads the device as the write left it
-(`a_register_read_right_after_a_register_write_reads_it_written`). The file
+(`a_register_read_right_after_a_register_write_reads_it_written`). A
+register read takes its word and makes its change at the grant (121's key
+word taken, 122's clear of 123 `<0>`), but an interrupt level the change
+lowers reads as it stood until the clock after the word right after the
+read's start leaves EX, as a register write is taken: that word's
+conditions see the level as before the read, however late it reaches EX
+--- behind a wrong prediction with two bubbles, or held in CS --- and the
+next word that tests the interrupt sees it lowered. No register access is
+granted in between, so word 100 and a read started right after see the
+change. `micro` counts it at the end of the microcycle after the start, or
+sooner at a start in that microcycle, a halt or a harness boundary; the
+pipeline's halt counts it as it drains
+(`a_register_read_s_side_effect_is_seen_from_the_clock_after_its_grant`,
+`a_register_read_in_a_mispredicted_slot_holds_the_level_for_the_target`,
+`a_register_read_holds_the_level_for_the_word_after_its_start_held_in_cs`,
+`a_boundary_between_a_register_read_and_the_next_word_digests_alike`,
+`a_register_read_right_after_a_read_of_121_finds_the_key_taken`). The file
 device takes CMD_PROD once every earlier write is answered, so a command
 whose entry is still in the posted writes is read whole, and its
 completion's sweep leaves no line of what it wrote in the cache

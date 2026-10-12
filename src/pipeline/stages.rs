@@ -63,6 +63,10 @@ pub(crate) struct Back {
     pub mutant_to: Option<(u64, WordTo)>,
     /// A register's write, taken the clock after its grant.
     pub register_write: Option<RegisterWrite>,
+    /// A register's read, its word taken and its change made at the grant,
+    /// whose lowering of an interrupt level counts once it is released
+    /// (the register read ruling).
+    pub register_read: Option<RegisterRead>,
     /// CMD_PROD's write, waiting for every earlier write (A15b.5): the
     /// word and its microcycle.
     pub cmd_prod: Option<(u32, u64)>,
@@ -213,6 +217,18 @@ pub(crate) struct RegisterWrite {
     pub released: bool,
 }
 
+/// **A register read granted** (the register read ruling; A15b.3, "A
+/// device register"): an interrupt level its change lowers reads as it
+/// stood until the clock after the word right after its start leaves EX,
+/// the write's release, however late that word reaches EX. No register
+/// access is granted meanwhile.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RegisterRead {
+    pub at_clock: u64,
+    pub seq: u64,
+    pub released: bool,
+}
+
 /// The word a write start carries from EX's commit (the MD-after-write
 /// ruling): every write start has one by the time WB grants it.
 fn written(s: &Start) -> Word {
@@ -314,6 +330,7 @@ impl Pipeline {
         }
         let oa_high = self.x.oa_high;
         let (d_metered, retired) = (self.d_metered, self.meters.retired);
+        self.register_read_now(false);
         let plan = self.rd_plan();
         let wb_leaves = self.wb_stage();
         let ex = self.ex_stage(wb_leaves)?;
@@ -333,9 +350,10 @@ impl Pipeline {
         }
         let ending = self.draining || self.stepping;
         if ending && self.ex.is_none() && self.rd.is_none() && self.cs.is_none() {
-            // The word after a register write's start squashed by the halt:
-            // nothing is left to see the interrupt before the write.
+            // The word after a register access's start squashed by the
+            // halt: nothing is left to see the interrupt before the access.
             self.release_register_write(u64::MAX);
+            self.register_read_now(true);
         }
         if ending && self.drained_now() {
             self.draining = false;
@@ -896,7 +914,8 @@ impl Pipeline {
             crate::busint::decode_quux_14(bus, m.main.len(), m.tv.buffer_words())
                 == crate::busint::Responder::Device
         };
-        if self.b.register_write.is_some() && device(crate::tlb::bus_address(va, entry), &self.m) {
+        let pending = self.b.register_write.is_some() || self.b.register_read.is_some();
+        if pending && device(crate::tlb::bus_address(va, entry), &self.m) {
             return false;
         }
         // The write-back, ahead of the reference's own cycle (A14.6).
@@ -958,7 +977,15 @@ impl Pipeline {
                     if !self.neutral {
                         self.advance_devices();
                     }
-                    let word = self.m.bus_read(bus);
+                    // Its change made now; the level it lowers held for the
+                    // word right after the start (the register read ruling),
+                    // released at once when that word has left EX already.
+                    let word = self.m.register_read_15(bus);
+                    self.b.register_read = Some(RegisterRead {
+                        at_clock: now + 1,
+                        seq,
+                        released: self.b.last_seq > seq,
+                    });
                     self.m.ns = keep;
                     self.event(super::Event::Register(bus));
                     self.b.md_old = Some((seq, self.m.md));
@@ -1231,6 +1258,22 @@ impl Pipeline {
             && r.seq < seq
         {
             r.released = true;
+        }
+        if let Some(r) = self.b.register_read.as_mut()
+            && r.seq < seq
+        {
+            r.released = true;
+        }
+    }
+
+    /// The register read granted before, released, counts from this clock
+    /// on: the level its change lowered reads lowered. At a halt, `now`, it
+    /// counts at once.
+    pub(crate) fn register_read_now(&mut self, now: bool) {
+        let Some(r) = self.b.register_read else { return };
+        if now || (r.released && r.at_clock <= self.clock) {
+            self.b.register_read = None;
+            self.m.register_read_counts();
         }
     }
 

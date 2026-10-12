@@ -4706,6 +4706,349 @@ fn a_boundary_between_a_register_write_and_the_next_word_digests_alike() {
     assert_eq!(state(e.machine()), state(u.engine.machine()), "the ends");
 }
 
+// --- A register read's side effect (MP2b ruling Q4) ----------------------------
+
+/// The keyboard's interrupt up: a key word waiting under 120's enable.
+fn key_waiting(m: &mut Machine) {
+    use muir::quux_input::{ENABLE, KBD_STATUS, KeyboardMouse};
+    m.quux_input.write(KBD_STATUS, ENABLE);
+    m.quux_input.press(0o101);
+}
+
+/// The mouse's interrupt up: a move under 123's enable.
+fn mouse_moved(m: &mut Machine) {
+    use muir::quux_input::{ENABLE, KeyboardMouse, MOUSE_STATUS};
+    m.quux_input.write(MOUSE_STATUS, ENABLE);
+    m.quux_input.mouse_move(1, 0);
+}
+
+/// A read of register-page word `word`, `gap` words, then [`two_checks`].
+fn read_then_checks(word: Word, gap: usize) -> Prog {
+    let mut p = Prog::default();
+    enable_interrupts(&mut p);
+    let at = p.k(REGISTER_PAGE | word);
+    p.op(ALU | SETA | a_src(at) | START_READ);
+    p.fill(gap);
+    two_checks(&mut p);
+    p.fill(2);
+    p.stop();
+    check_handlers(&mut p);
+    p
+}
+
+/// **A register read's side effect counts from the clock after its grant**
+/// (MP2b ruling Q4): with the keyboard's interrupt up, a read of 121 takes
+/// the only key word and lowers it; with the mouse's up, a read of 122
+/// clears 123 `<0>` and lowers it. The check right after the read's start
+/// still sees the level up and calls; a check one word later sees it down
+/// and does not. On both engines, plain and under neutral time. A side
+/// effect seen in the grant's own clock fails the first half; one held a
+/// clock too long, the second.
+#[test]
+fn a_register_read_s_side_effect_is_seen_from_the_clock_after_its_grant() {
+    type Setup = fn(&mut Machine);
+    let cases: [(&str, Word, Setup); 2] =
+        [("121", 0o121, key_waiting), ("122", 0o122, mouse_moved)];
+    let mut wrong = Vec::new();
+    for (what, word, setup) in cases {
+        for (gap, calls) in [(0, (1, 0)), (1, (0, 0))] {
+            let p = read_then_checks(word, gap);
+            for neutral in [false, true] {
+                let mut m = machine(&p, REV15);
+                setup(&mut m);
+                assert_ne!(m.quux_input.interrupts(), 0, "{what}: the level up before the read");
+                let u = {
+                    let mut u = Micro::new(m.clone());
+                    u.neutral = neutral;
+                    match run_engine(u) {
+                        Ok(u) => u,
+                        Err((h, _)) => panic!("micro halted: {h:?}"),
+                    }
+                };
+                let e = ends_on(m, &|e| e.neutral = neutral);
+                for (engine, m) in [("micro", u.machine()), ("rtl", e.machine())] {
+                    let got = (m.mmem[0o26], m.mmem[0o27]);
+                    if got != calls {
+                        wrong.push(format!(
+                            "read of {what}, gap {gap}, neutral {neutral}, {engine}: \
+                             calls {got:?}, not {calls:?}"
+                        ));
+                    }
+                    if m.quux_input.interrupts() != 0 {
+                        wrong.push(format!("read of {what}, {engine}: the level still up"));
+                    }
+                }
+                if state(e.machine()) != state(u.machine()) {
+                    wrong.push(format!(
+                        "read of {what}, gap {gap}, neutral {neutral}: the ends differ"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// [`two_checks`]' calls on `micro` and on the pipeline set by `set`, the
+/// machine set up by `setup`, both neutral or not; whether the ends agree;
+/// and the pipeline's events.
+#[allow(clippy::type_complexity)]
+fn read_calls(
+    p: &Prog,
+    setup: fn(&mut Machine),
+    neutral: bool,
+    set: &dyn Fn(&mut Pipeline),
+) -> ((Word, Word), (Word, Word), bool, Vec<(u64, muir::pipeline::Event)>) {
+    let mut m = machine(p, REV15);
+    setup(&mut m);
+    let mut u = Micro::new(m.clone());
+    u.neutral = neutral;
+    let u = run_engine(u).unwrap_or_else(|(h, _)| panic!("micro halted: {h:?}"));
+    let (e, ev) = {
+        let mut e = Pipeline::new(m);
+        e.neutral = neutral;
+        set(&mut e);
+        e.events = Some(Vec::new());
+        // The reset's sweep skipped, so that WB grants the read at once.
+        e.boot();
+        e.skip_sweep();
+        while e.machine().opc != STOP as u16 {
+            e.step().unwrap();
+        }
+        let mut e = settled(e).unwrap_or_else(|(h, _)| panic!("the pipeline halted: {h:?}"));
+        let ev = e.events.take().unwrap();
+        (e, ev)
+    };
+    let calls = |m: &Machine| (m.mmem[0o26], m.mmem[0o27]);
+    let same = state(e.machine()) == state(u.machine());
+    (calls(u.machine()), calls(e.machine()), same, ev)
+}
+
+/// The clock the register read at `bus` was granted, and the clock the
+/// word at `pc` first committed after it.
+fn grant_and_commit(ev: &[(u64, muir::pipeline::Event)], bus: u32, pc: u64) -> (u64, u64) {
+    use muir::pipeline::Event;
+    let grant = ev
+        .iter()
+        .find(|(_, e)| matches!(e, Event::Grant(b, false) if *b == bus))
+        .map(|&(c, _)| c)
+        .expect("the read granted");
+    let commit = ev
+        .iter()
+        .find(|(c, e)| *c >= grant && matches!(e, Event::Commit(Some(a)) if u64::from(*a) == pc))
+        .map(|&(c, _)| c)
+        .expect("the check committed");
+    (grant, commit)
+}
+
+/// A conditional jump decided in EX, taken (M 0 equals A 0), hinted by
+/// `hint`, N clear: its delay slot reads register-page word `word`; its
+/// target, [`SLOT_TARGET`], is [`two_checks`].
+fn read_in_a_slot(word: Word, hint: u64) -> Prog {
+    let mut p = Prog::default();
+    enable_interrupts(&mut p);
+    // The register page's entry in the TLB first, so that the read is
+    // granted as it reaches WB.
+    p.read(REGISTER_PAGE | 0o120, 0o25);
+    let at = p.k(REGISTER_PAGE | word);
+    p.fill(3);
+    p.op(jcond(3) | m_src(M_ZERO) | a_src(ZERO) | target(SLOT_TARGET) | hint);
+    p.op(ALU | SETA | a_src(at) | START_READ);
+    p.stop();
+    while p.at() < SLOT_TARGET {
+        p.fill(1);
+    }
+    two_checks(&mut p);
+    p.fill(2);
+    p.stop();
+    check_handlers(&mut p);
+    p
+}
+
+/// [`read_in_a_slot`]'s target.
+const SLOT_TARGET: u64 = 0o200;
+
+/// The register page's bus address of word `word`.
+fn page_bus(word: Word) -> u32 {
+    muir::tlb::REGISTER_PAGE_BUS | word as u32
+}
+
+/// **A register read's side effect is held until the word right after its
+/// start has left EX, however late that word reaches EX** (register read
+/// ruling; A15b.3, "A device register"): a read of 121 or 122 in the delay
+/// slot of a conditional jump decided in EX, its target the two checks; the
+/// first check calls and the second does not, on both engines, the hint
+/// right or wrong, with one bubble or two (A15b.14's fallback), plain and
+/// neutral, the ends alike. A wrong hint with two bubbles brings the target
+/// to EX after the grant, which the events show; with one the slot waits a
+/// clock in RD and the target follows it at once. The change counted at the
+/// clock after the grant is caught where the target is late.
+#[test]
+fn a_register_read_in_a_mispredicted_slot_holds_the_level_for_the_target() {
+    use muir::isa::asm::HINT;
+    type Setup = fn(&mut Machine);
+    let cases: [(&str, Word, Setup); 2] =
+        [("121", 0o121, key_waiting), ("122", 0o122, mouse_moved)];
+    let mut wrong = Vec::new();
+    for (what, word, setup) in cases {
+        for (hinted, hint) in [("right", HINT), ("wrong", 0)] {
+            let p = read_in_a_slot(word, hint);
+            for bubbles in [1, 2] {
+                for neutral in [false, true] {
+                    let (u, e, same, ev) = read_calls(&p, setup, neutral, &|e| e.bubbles = bubbles);
+                    let (grant, commit) = grant_and_commit(&ev, page_bus(word), SLOT_TARGET);
+                    let case = format!(
+                        "{what}, hint {hinted}, {bubbles} bubble(s), neutral {neutral}: \
+                         granted at {grant}, the target committed at {commit}"
+                    );
+                    // One bubble moves it ahead of the slot, which then
+                    // waits a clock in RD (P2), so the target follows the
+                    // start; with two the target reaches EX after the grant.
+                    let late = hinted == "wrong" && bubbles == 2;
+                    if late != (commit > grant) {
+                        wrong.push(format!("{case}: the target late {}", commit > grant));
+                    }
+                    for (engine, calls) in [("micro", u), ("rtl", e)] {
+                        if calls != (1, 0) {
+                            wrong.push(format!("{case}, {engine}: calls {calls:?}, not (1, 0)"));
+                        }
+                    }
+                    if !same {
+                        wrong.push(format!("{case}: the ends differ"));
+                    }
+                    eprintln!("{case}; micro {u:?}, rtl {e:?}");
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// **A register read's side effect is held for the word right after its
+/// start, held in CS** (register read ruling): as
+/// [`a_register_write_waits_for_the_word_after_its_start_held_in_cs`], a
+/// read of 121 or 122 whose next word, the first check, selects OA-REG-HIGH
+/// written two words before, so CS holds it a clock and it reaches EX after
+/// the read's grant; it still calls, and the check after it does not, as on
+/// `micro` (its select check off). The change counted at the clock after
+/// the grant is caught.
+#[test]
+fn a_register_read_holds_the_level_for_the_word_after_its_start_held_in_cs() {
+    use muir::isa::asm::OA_HIGH_SELECT;
+    type Setup = fn(&mut Machine);
+    let cases: [(&str, Word, Setup); 2] =
+        [("121", 0o121, key_waiting), ("122", 0o122, mouse_moved)];
+    for (what, word, setup) in cases {
+        let mut p = Prog::default();
+        enable_interrupts(&mut p);
+        let (at, z) = (p.k(REGISTER_PAGE | word), p.k(0));
+        p.op(ALU | SETA | a_src(z) | fd(0o17));
+        p.op(ALU | SETA | a_src(at) | START_READ);
+        p.op(jcond(5) | P | N | target(SUBS[0]) | OA_HIGH_SELECT);
+        p.op(jcond(5) | P | N | target(SUBS[1]));
+        p.fill(2);
+        p.stop();
+        check_handlers(&mut p);
+        let mut m = machine(&p, REV15);
+        setup(&mut m);
+        let mut u = Micro::new(m.clone());
+        u.oa_select_check = false;
+        let u = run_engine(u).unwrap_or_else(|(h, _)| panic!("micro halted: {h:?}"));
+        let mut e = Pipeline::new(m);
+        e.events = Some(Vec::new());
+        e.boot();
+        e.skip_sweep();
+        while e.machine().opc != STOP as u16 {
+            e.step().unwrap();
+        }
+        let mut e = settled(e).unwrap_or_else(|(h, _)| panic!("the pipeline halted: {h:?}"));
+        let ev = e.events.take().unwrap();
+        assert_eq!(e.meters.oa_hold, 1, "{what}: the check held a clock in CS");
+        let (grant, commit) = grant_and_commit(&ev, page_bus(word), 3);
+        assert!(commit > grant, "{what}: the check in EX after the grant ({grant}, {commit})");
+        for (engine, m) in [("micro", u.machine()), ("rtl", e.machine())] {
+            assert_eq!((m.mmem[0o26], m.mmem[0o27]), (1, 0), "{what}, {engine}: the first calls");
+        }
+        assert_eq!(state(e.machine()), state(u.machine()), "{what}: the ends");
+    }
+}
+
+/// **A harness boundary between a register read's start and the next
+/// word** (register read ruling; as
+/// [`a_boundary_between_a_register_write_and_the_next_word_digests_alike`]):
+/// a return with `SPC<14>` arms the LC step in its delay slot, which reads
+/// 121, so that the boundary falls right after the start. `micro` counts
+/// the read's change at the boundary, as at a halt, and the pipeline's
+/// drain does: neither check calls, the digests are alike, and so are the
+/// ends.
+#[test]
+fn a_boundary_between_a_register_read_and_the_next_word_digests_alike() {
+    use support::neutral::{Digests, Neutral};
+    let mut p = Prog::default();
+    enable_interrupts(&mut p);
+    let (kbd, ret) = (p.k(REGISTER_PAGE | 0o121), p.k(0o100 | 1 << 14));
+    p.op(ALU | SETA | a_src(ret) | fd(0o15));
+    p.fill(1);
+    p.op(filler().raw() | POPJ);
+    p.op(ALU | SETA | a_src(kbd) | START_READ);
+    while p.at() < 0o100 + 2 {
+        p.fill(1);
+    }
+    two_checks(&mut p);
+    p.fill(2);
+    p.stop();
+    check_handlers(&mut p);
+    fn to_stop<E: Neutral>(d: &mut Digests<E>) {
+        for _ in 0..20_000 {
+            if d.machine().opc == STOP as u16 {
+                break;
+            }
+            d.step().unwrap();
+        }
+        for _ in 0..16 {
+            d.step().unwrap();
+        }
+    }
+    let mut m = machine(&p, REV15);
+    key_waiting(&mut m);
+    let mut u = Digests::new(Micro::new(m.clone()), 1);
+    u.engine.time_neutral();
+    u.boot();
+    to_stop(&mut u);
+    let mut x = Pipeline::new(m);
+    x.skip_sweep();
+    let mut d = Digests::new(x, 1);
+    d.engine.time_neutral();
+    d.boot();
+    d.engine.skip_sweep();
+    to_stop(&mut d);
+    let e = settled(d.engine).unwrap_or_else(|(h, _)| panic!("halted settling: {h:?}"));
+    assert_eq!(u.lines.len(), 1, "one boundary, at the start: {:?}", u.lines);
+    assert_eq!((e.machine().mmem[0o26], e.machine().mmem[0o27]), (0, 0), "neither check calls");
+    assert_eq!(d.lines, u.lines, "the digests");
+    assert_eq!(state(e.machine()), state(u.engine.machine()), "the ends");
+}
+
+/// **A register read right after a read of 121 finds the key word taken**
+/// (MP2b ruling Q4; A15b.3, "A start right after a start"): the second
+/// start, of word 100, is held behind the first and taken after its side
+/// effect counts, so `<4>` reads down, on both engines. The held level
+/// read by word 100 as well as by the checks is caught.
+#[test]
+fn a_register_read_right_after_a_read_of_121_finds_the_key_taken() {
+    let mut p = Prog::default();
+    let (kbd, word_100) = (p.k(REGISTER_PAGE | 0o121), p.k(REGISTER_PAGE | 0o100));
+    p.op(ALU | SETA | a_src(kbd) | START_READ);
+    p.op(ALU | SETA | a_src(word_100) | START_READ);
+    p.fill(1);
+    p.op(ALU | SETM | SRC_MD | m_dest(0o26));
+    p.stop();
+    for neutral in [false, true] {
+        let e = same_on(&p, &key_waiting, &|e| e.neutral = neutral);
+        assert_eq!(e.machine().mmem[0o26] & 1 << 4, 0, "neutral {neutral}: word 100 <4> down");
+    }
+}
+
 /// **A read start right after a read start: both land** (A15b.3, "A start
 /// right after a start"; MP2b rulings 2, Q2): the second start is held
 /// behind the first; the word right after the second start reads the

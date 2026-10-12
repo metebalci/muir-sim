@@ -60,6 +60,7 @@ impl Pipeline {
         self.npc_after = None;
         self.port.drain_now(&mut self.m);
         self.b = super::stages::Back::default();
+        self.m.register_read_counts();
         self.x.mutant_write = None;
         self.x.map_write = None;
         self.x.map_write_d = None;
@@ -211,6 +212,7 @@ impl Pipeline {
             && self.b.md.is_none()
             && !self.b.md_fill
             && self.b.register_write.is_none()
+            && self.b.register_read.is_none()
             && self.b.cmd_prod.is_none()
             && self.b.starts.is_empty()
     }
@@ -276,6 +278,7 @@ impl Pipeline {
             && self.b.md.is_none()
             && !self.b.md_fill
             && self.b.register_write.is_none()
+            && self.b.register_read.is_none()
             && self.b.cmd_prod.is_none()
             && self.b.starts.is_empty()
     }

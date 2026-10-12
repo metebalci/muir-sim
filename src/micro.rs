@@ -226,6 +226,12 @@ pub struct Micro {
     /// MD-after-start check), so the word is `MD` as it stands until the
     /// write goes out.
     write_word: Option<Word>,
+    /// Revision 15: the microcycle ends before a register read's side
+    /// effect counts, 2 when its start's microcycle runs: it counts from
+    /// the end of the microcycle after the start, as a register write goes
+    /// out (MP2b ruling Q4; [`crate::machine::Machine::register_read_15`]).
+    /// Not in a checkpoint, which is taken halted, the effect counted.
+    read_held: u8,
     /// Revision 14: the virtual address of that write, for its write-back
     /// as it goes out, which carries the setter's bit from the word written
     /// (A14.6, A14.8). Kept in a checkpoint of revision 14 alone.
@@ -358,6 +364,7 @@ impl Micro {
             write_out: None,
             write_ns: 0,
             write_word: None,
+            read_held: 0,
             write_va: None,
             write_pdl: None,
             redirect: None,
@@ -1071,6 +1078,20 @@ impl Micro {
             Some((physical, WriteOut::Next)) => self.write_out = Some((physical, WriteOut::Due)),
             _ => {}
         }
+        if self.read_held > 0 {
+            self.read_held -= 1;
+            if self.read_held == 0 {
+                self.m.register_read_counts();
+            }
+        }
+    }
+
+    /// A register read's side effect held counts from now, as at a halt
+    /// ([`Micro::read_held`]).
+    fn read_counts(&mut self) {
+        if std::mem::take(&mut self.read_held) > 0 {
+            self.m.register_read_counts();
+        }
     }
 
     /// A pop whose word has bit 14 up: the counter steps and, if
@@ -1593,7 +1614,10 @@ impl Micro {
             self.new_md_delay = 0;
             self.new_md2_delay = 0;
         } else if self.memstart {
+            // A start right after a start is held until the first has gone
+            // out: a register read's side effect counts by then.
             self.write_goes_out();
+            self.read_counts();
         }
         self.memop = true;
         // Revision 14's port A: a miss walks and fills before the start
@@ -1734,6 +1758,7 @@ impl Micro {
     /// the one the pipeline's drain leaves.
     pub fn send_out_waiting_write(&mut self) {
         self.write_goes_out();
+        self.read_counts();
     }
 
     /// Whether a write started in this microcycle waits for the next: it
@@ -1834,7 +1859,18 @@ impl Micro {
         self.m.write_back(va, e, false, 0);
         self.m.vmaok = true;
         let bus = crate::tlb::bus_address(va, e);
-        let w = self.m.bus_read(bus);
+        let device =
+            crate::busint::decode_quux_14(bus, self.m.main.len(), self.m.tv.buffer_words())
+                == crate::busint::Responder::Device;
+        let w = if self.m.geometry.extended() && device {
+            // Revision 15: a register read's side effect counts from the
+            // end of the next microcycle, whose checks see the interrupt as
+            // it stood (MP2b ruling Q4).
+            self.read_held = 2;
+            self.m.register_read_15(bus)
+        } else {
+            self.m.bus_read(bus)
+        };
         let main = bus & crate::tlb::DEVICE == 0 && (bus as usize) < self.m.main.len();
         self.read_main = main.then_some(w);
         self.pend_md(w);
@@ -2565,6 +2601,7 @@ impl Engine for Micro {
             write_out,
             write_ns: _,
             write_word: _,
+            read_held: _,
             write_va,
             write_pdl,
             // Set and used within one start.
@@ -2769,8 +2806,10 @@ impl Engine for Micro {
         if !machrun {
             // A write started before the halt goes out at the master
             // clock's edge, which runs on: `MEMSTART` is clocked by
-            // `MCLK1A` (`Rtl::start_bus_cycle`).
+            // `MCLK1A` (`Rtl::start_bus_cycle`). A register read's side
+            // effect counts.
             self.write_goes_out();
+            self.read_counts();
             self.speedclk();
             if !neutral {
                 self.m.ns += self.cycle_ns(false);

@@ -2513,6 +2513,31 @@ impl Machine {
         self.timers = Timers::new();
     }
 
+    /// **A device register's read on revision 15** (MP2b ruling Q4; the
+    /// register read ruling): [`Machine::bus_read`] takes the word and makes
+    /// the change at once, and the interrupt bits the read lowered read up
+    /// until [`Machine::register_read_counts`], which an engine calls once
+    /// the word right after the read's start has left EX and no sooner than
+    /// the clock after the grant (`micro`: at the end of the microcycle
+    /// after the start), so that word's conditions see the level as before
+    /// the read. Of the page's words only 121 and 122 have a read's side
+    /// effect the interrupt shows (`crate::quux_input`): 142's read
+    /// advances the read buffer and 145's schedules a transmission, and
+    /// neither changes the network's done bits at once; the other
+    /// devices' reads change nothing.
+    pub fn register_read_15(&mut self, phys: u32) -> Word {
+        let before = self.quux_input.levels();
+        let word = self.bus_read(phys);
+        self.quux_input.hold(before);
+        word
+    }
+
+    /// The side effect of the register read before it counts from now
+    /// ([`Machine::register_read_15`]).
+    pub fn register_read_counts(&mut self) {
+        self.quux_input.release();
+    }
+
     /// A read of a diagnostic register through this alone reads the open
     /// bus; the engines answer them.  See [`crate::spy`].
     ///
