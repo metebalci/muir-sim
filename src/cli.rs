@@ -4523,7 +4523,14 @@ fn resume_engine<E: Engine>(
     } else {
         format!("{} memory boards", m.memory_boards())
     };
-    eprintln!("resumed: {} at {} microcycles, {} ns, {memory}", path.display(), m.cycles, m.ns);
+    // `ns` is in the machine's units, 0.5 ns on revision 15: the line says
+    // whole nanoseconds.
+    eprintln!(
+        "resumed: {} at {} microcycles, {} ns, {memory}",
+        path.display(),
+        m.cycles,
+        m.device_ns()
+    );
     // `--continue`: the prompt's `continue`, before the first microcycle.
     if go_on {
         if halted(e) { take_off(e) } else { say_running_already() }

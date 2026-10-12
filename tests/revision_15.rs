@@ -1660,6 +1660,87 @@ fn an_rtl_stop_on_revision_15_drains_before_its_checkpoint() {
     }
 }
 
+/// The machine's clock in a revision-15 `rtl` checkpoint: its microcycles,
+/// the clocks the pipeline ran and the clock itself in the machine's units.
+fn clock_of(path: &std::path::Path) -> (u64, u64, u64) {
+    let c = muir::checkpoint::read(path).unwrap();
+    assert_eq!(c.engine, "rtl");
+    let mut e = muir::pipeline::Pipeline::new(machine_for(&c));
+    e.load(&mut c.reader()).unwrap();
+    let m = e.machine();
+    assert_eq!(m.time_base().per_ns, 2, "revision 15 counts units of 0.5 ns");
+    assert_eq!(m.device_ns(), m.ns / 2, "whole nanoseconds are half the units");
+    (m.cycles, e.clock(), m.ns)
+}
+
+/// **A resume on revision 15 says the machine's time in nanoseconds, and
+/// the clock goes on from where it stood**: the machine counts units of
+/// 0.5 ns, so the resume line gives half of them. Resumed and stopped at
+/// once, the clock is a few clocks past the checkpoint's; run on, it runs
+/// at a straight run's rate, a period a clock. (A resumed run is not a
+/// straight run clock for clock: the resume starts with the TLB swept and
+/// the pipeline empty, which costs it time once.) **Fails** a resume line
+/// that prints the units as nanoseconds, twice the time, and a resume that
+/// scales the clock or its rate.
+#[test]
+fn a_resume_on_revision_15_says_its_time_in_nanoseconds() {
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-resume-time");
+    let prom = memory_loop_prom(&dir);
+    let os = |s: &str| std::ffi::OsString::from(s);
+    let run = |args: &[&std::ffi::OsStr]| {
+        let out = quux_15("rtl", args).run();
+        let t = text(&out);
+        assert!(out.status.success(), "the run failed:\n{t}");
+        t
+    };
+    let straight = |stop: u64, chk: &std::path::Path| {
+        let stop = os(&stop.to_string());
+        run(&[
+            &os("--stop-after"),
+            &stop,
+            &os("--prom"),
+            prom.as_os_str(),
+            &os("--checkpoint"),
+            chk.as_os_str(),
+        ]);
+        clock_of(chk)
+    };
+    let resumed = |from: &std::path::Path, stop: u64, chk: &std::path::Path| {
+        let stop = os(&stop.to_string());
+        let t = run(&[
+            &os("--resume"),
+            from.as_os_str(),
+            &os("--stop-after"),
+            &stop,
+            &os("--checkpoint"),
+            chk.as_os_str(),
+        ]);
+        (t, clock_of(chk))
+    };
+    let period = muir::clock::PERIOD_15;
+    let a = dir.join("a.chk");
+    let (cycles, clocks, units) = straight(3000, &a);
+    assert_eq!(units, clocks * period, "the clock is on the period's grid");
+    assert!(clocks >= cycles, "a clock or more a microcycle: {clocks} clocks, {cycles}");
+    // The resume line: whole nanoseconds, half the units.
+    let (t, (_, _, at_once)) = resumed(&a, 1, &dir.join("b1.chk"));
+    let says = format!("resumed: {} at {cycles} microcycles, {} ns,", a.display(), units / 2);
+    assert!(t.contains(&says), "the resume line is not `{says}`:\n{t}");
+    // The clock goes on from the checkpoint's.
+    assert!(
+        units < at_once && at_once <= units + 100 * period,
+        "resumed and stopped at once, the clock went from {units} units to {at_once}"
+    );
+    // And at a straight run's rate.
+    let (_, (c2, _, r2)) = resumed(&a, 2000, &dir.join("b2.chk"));
+    let (_, (c3, _, r3)) = resumed(&a, 20000, &dir.join("b3.chk"));
+    let (s2c, _, s2) = straight(c2, &dir.join("s2.chk"));
+    let (s3c, _, s3) = straight(c3, &dir.join("s3.chk"));
+    assert_eq!((s2c, s3c), (c2, c3));
+    assert_eq!(r3 - r2, s3 - s2, "the resumed clock's rate, microcycles {c2} to {c3}");
+}
+
 /// **The prompt's `checkpoint` on revision 15's `rtl` drains the pipeline
 /// first, and the run goes on**: held, stepped, checkpointed, stepped again
 /// and quit with `--checkpoint`; both files digest as `micro`'s at the
