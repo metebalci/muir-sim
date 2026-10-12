@@ -229,6 +229,14 @@ impl TimeBase {
         if self.period <= 1 { start + units } else { start + self.clocks(units) * self.period }
     }
 
+    /// `units` in nanoseconds as a report prints them: whole, and on
+    /// revision 15 with ".5" where they are odd (MP2b ruling Q1). Every
+    /// report of the machine's time or of a period goes through here.
+    pub fn ns_text(self, units: u64) -> String {
+        let (whole, half) = (units / self.per_ns, units % self.per_ns);
+        if half == 0 { format!("{whole}") } else { format!("{whole}.5") }
+    }
+
     /// The last clock's instant at or before `t`: `t` itself with no grid.
     pub fn grid_floor(self, t: u64) -> u64 {
         if self.period <= 1 { t } else { t / self.period * self.period }
@@ -263,7 +271,7 @@ pub fn parse_microcycle_ns(text: &str) -> Option<u64> {
 /// A period in units of 0.5 ns as `--microcycle-ns` writes it: `8.5`,
 /// `40`.
 pub fn microcycle_ns_text(units: u64) -> String {
-    if units.is_multiple_of(2) { format!("{}", units / 2) } else { format!("{}.5", units / 2) }
+    TimeBase::half_ns(units).ns_text(units)
 }
 
 /// `sync`'s microcycle when `--sync-cycle-ticks` does not say: 4 ticks,

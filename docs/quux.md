@@ -2054,7 +2054,14 @@ edge and the delays the interface starts ending ⌈2d/P⌉ clocks after their
 start, so that at 8.5 ns a frame looped back is delivered at the clock the
 rule gives (`a_frame_s_delivery_at_8_5_ns_lands_at_the_rule_s_clock` and
 four more in `tests/quux_network.rs`; `docs/chaosnet.md` has the
-rule's instants and what it leaves unverified).
+rule's instants). The reports say the machine's time and the period in
+ns, with ".5" where an instant is odd (MP2b ruling Q1): the prompt's `pc`
+and `step` lines, the resume line, and `--pace`'s line; and the run's
+report measures it against the hardware at the period
+(`the_prompt_s_pc_on_revision_15_prints_an_odd_instant_s_half`,
+`a_resume_on_revision_15_prints_an_odd_instant_s_half`,
+`pace_on_revision_15_says_its_period`,
+`the_run_s_report_on_revision_15_is_against_the_period`).
 
 **Transfers.** Jumps, calls, POPJ and the fused return resolve in RD; a
 conditional jump is predicted by its hint and a dispatch by its predicted

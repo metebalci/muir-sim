@@ -1614,6 +1614,20 @@ impl Machine {
         self.ns / self.time_base().per_ns
     }
 
+    /// The machine's time as a report prints it, in nanoseconds: whole,
+    /// and on revision 15 with ".5" where [`Machine::ns`] is an odd unit
+    /// (MP2b ruling Q1), never the half dropped.
+    pub fn ns_text(&self) -> String {
+        self.time_base().ns_text(self.ns)
+    }
+
+    /// Revision 15's clock period in nanoseconds, 8.5 at 17 units, for a
+    /// report's figures; `None` on a machine with no period of its own.
+    pub fn period_ns(&self) -> Option<f64> {
+        let t = self.time_base();
+        (t.period > 0).then(|| t.period as f64 / t.per_ns as f64)
+    }
+
     /// The Chaosnet interface told the machine's unit of time and its
     /// clock's grid ([`crate::chaos::board::Interface::set_time_base`]),
     /// and the machine's time in those units, [`Machine::ns`] itself: on

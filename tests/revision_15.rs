@@ -1723,9 +1723,9 @@ fn a_resume_on_revision_15_says_its_time_in_nanoseconds() {
     let (cycles, clocks, units) = straight(3000, &a);
     assert_eq!(units, clocks * period, "the clock is on the period's grid");
     assert!(clocks >= cycles, "a clock or more a microcycle: {clocks} clocks, {cycles}");
-    // The resume line: whole nanoseconds, half the units.
+    // The resume line: nanoseconds, half the units, ".5" where odd.
     let (t, (_, _, at_once)) = resumed(&a, 1, &dir.join("b1.chk"));
-    let says = format!("resumed: {} at {cycles} microcycles, {} ns,", a.display(), units / 2);
+    let says = format!("resumed: {} at {cycles} microcycles, {} ns,", a.display(), ns_text(units));
     assert!(t.contains(&says), "the resume line is not `{says}`:\n{t}");
     // The clock goes on from the checkpoint's.
     assert!(
@@ -1739,6 +1739,144 @@ fn a_resume_on_revision_15_says_its_time_in_nanoseconds() {
     let (s3c, _, s3) = straight(c3, &dir.join("s3.chk"));
     assert_eq!((s2c, s3c), (c2, c3));
     assert_eq!(r3 - r2, s3 - s2, "the resumed clock's rate, microcycles {c2} to {c3}");
+}
+
+/// Revision 15's `units` of 0.5 ns as a report prints them (MP2b ruling
+/// Q1): half of them, and ".5" where they are odd.
+fn ns_text(units: u64) -> String {
+    if units % 2 == 1 { format!("{}.5", units / 2) } else { format!("{}", units / 2) }
+}
+
+/// **The prompt's `pc` on revision 15 prints an odd instant with its half
+/// nanosecond** (MP2b ruling Q1): held and stepped one microcycle at a
+/// time, checkpointed and asked after each step, every `pc` line gives the
+/// checkpoint's units as nanoseconds, ".5" where they are odd, and some of
+/// them are. **Fails** a `pc` that drops the half.
+#[test]
+fn the_prompt_s_pc_on_revision_15_prints_an_odd_instant_s_half() {
+    use std::io::Write;
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-prompt-pc-half");
+    let prom = memory_loop_prom(&dir);
+    let mut c = quux_15("rtl", &[]);
+    c.args(["--stop-after", "1000000000", "--prom"]).arg(&prom);
+    c.stdin(std::process::Stdio::piped());
+    let mut child = c.start();
+    let mut stdin = child.stdin();
+    let held: Vec<_> = (0..8).map(|k| dir.join(format!("held{k}.chk"))).collect();
+    write!(stdin, "hold\nstep 3000\n").unwrap();
+    for h in &held {
+        write!(stdin, "step 1\ncheckpoint {}\npc\n", h.display()).unwrap();
+    }
+    writeln!(stdin, "q").unwrap();
+    drop(stdin);
+    let out = child.wait();
+    let t = text(&out);
+    assert!(out.status.success(), "rtl:\n{t}");
+    // `step` and `checkpoint` say where the machine is too: each
+    // checkpoint's instant is on a `PC` line.
+    let pcs: Vec<&str> = t.lines().filter(|l| l.starts_with("PC ")).collect();
+    let mut odd = 0;
+    for h in &held {
+        let (cycles, _, units) = clock_of(h);
+        odd += units as usize % 2;
+        let says = format!("; {cycles} microcycles, {} ns;", ns_text(units));
+        assert!(pcs.iter().any(|l| l.contains(&says)), "no `PC` line says `{says}`:\n{t}");
+    }
+    assert!(odd > 0, "no step ended at an odd unit:\n{t}");
+}
+
+/// **A resume on revision 15 prints an odd instant with its half
+/// nanosecond** (MP2b ruling Q1): stopped and checkpointed at an odd unit,
+/// resumed, the line gives the units as nanoseconds and ".5". **Fails** a
+/// resume line that drops the half.
+#[test]
+fn a_resume_on_revision_15_prints_an_odd_instant_s_half() {
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-resume-half");
+    let prom = memory_loop_prom(&dir);
+    let os = |s: &str| std::ffi::OsString::from(s);
+    // The first stop of a few that leaves the clock at an odd unit.
+    let (chk, cycles, units) = (3000u64..3016)
+        .find_map(|stop| {
+            let chk = dir.join(format!("a{stop}.chk"));
+            let out = quux_15(
+                "rtl",
+                &[&os("--stop-after"), &os(&stop.to_string()), &os("--prom"), prom.as_os_str()],
+            )
+            .arg("--checkpoint")
+            .arg(&chk)
+            .run();
+            assert!(out.status.success(), "the run failed:\n{}", text(&out));
+            let (cycles, _, units) = clock_of(&chk);
+            (units % 2 == 1).then_some((chk, cycles, units))
+        })
+        .expect("a stop at an odd unit");
+    let out =
+        quux_15("rtl", &[&os("--resume"), chk.as_os_str(), &os("--stop-after"), &os("1")]).run();
+    let t = text(&out);
+    assert!(out.status.success(), "the resume failed:\n{t}");
+    let says = format!("resumed: {} at {cycles} microcycles, {}.5 ns,", chk.display(), units / 2);
+    assert!(t.contains(&says), "the resume line is not `{says}`:\n{t}");
+}
+
+/// **`--pace` on revision 15 says the period it runs at, with its half
+/// nanosecond**: at 8.5 ns, "8.5 ns a microcycle", on both engines.
+/// **Fails** a line that gives a timing model's microcycle, 40 ns.
+#[test]
+fn pace_on_revision_15_says_its_period() {
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-pace-line");
+    let prom = memory_loop_prom(&dir);
+    for engine in ["micro", "rtl"] {
+        let out = quux_15(engine, &[])
+            .args(["--pace", "--microcycle-ns", "8.5", "--stop-after", "10", "--prom"])
+            .arg(&prom)
+            .run();
+        let t = text(&out);
+        assert!(out.status.success(), "{engine}:\n{t}");
+        let says = "pace: the machine's own speed, 8.5 ns a microcycle;";
+        assert!(t.contains(says), "{engine}: no `{says}`:\n{t}");
+    }
+}
+
+/// **The run's report on revision 15 measures it against the hardware at
+/// the period**, 8.5 ns, on both engines: the ratio it prints is the rate
+/// it prints times 8.5 ns, within the printing's rounding. **Fails** a
+/// report against a whole-ns period (8 ns) or another engine's microcycle.
+#[test]
+fn the_run_s_report_on_revision_15_is_against_the_period() {
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-report-ratio");
+    let prom = memory_loop_prom(&dir);
+    for engine in ["micro", "rtl"] {
+        let out = quux_15(engine, &[])
+            .args(["--microcycle-ns", "8.5", "--stop-after", "2000000", "--prom"])
+            .arg(&prom)
+            .run();
+        let t = text(&out);
+        assert!(out.status.success(), "{engine}:\n{t}");
+        let line = t
+            .lines()
+            .find(|l| l.starts_with(engine) && l.contains("microcycles/s"))
+            .unwrap_or_else(|| panic!("{engine}: no report line:\n{t}"));
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let at = words.iter().position(|w| *w == "microcycles/s").unwrap();
+        let rate: f64 = words[at - 1].parse().unwrap();
+        let want = rate * 8.5e-9;
+        let against = words[at + 1..].join(" ");
+        if let Some(d) = against.strip_prefix("hardware/") {
+            let d: f64 = d.parse().unwrap();
+            assert!(
+                (d - 1.0 / want).abs() <= 1.0,
+                "{engine}: `{line}`, wanted hardware/{:.0}",
+                1.0 / want
+            );
+        } else {
+            let r: f64 = against.strip_suffix("x hardware").unwrap().parse().unwrap();
+            assert!((r - want).abs() <= 0.011, "{engine}: `{line}`, wanted {want:.2}x hardware");
+        }
+    }
 }
 
 /// **The prompt's `pc` on revision 15 says the machine's time in
@@ -1762,7 +1900,7 @@ fn the_prompt_s_pc_on_revision_15_says_nanoseconds() {
     let t = text(&out);
     assert!(out.status.success(), "rtl:\n{t}");
     let (cycles, _, units) = clock_of(&held);
-    let says = format!("; {cycles} microcycles, {} ns;", units / 2);
+    let says = format!("; {cycles} microcycles, {} ns;", ns_text(units));
     assert!(
         t.lines().any(|l| l.starts_with("PC ") && l.contains(&says)),
         "no `pc` line says `{says}`:\n{t}"

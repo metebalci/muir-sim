@@ -1011,9 +1011,9 @@ enum Which {
 /// On the netlist disk controller it inverts: the drive takes its own time,
 /// the polling loop runs through every gate on the board, and a seeking
 /// program comes out slower than this rather than faster.
-fn report(name: &str, cycles: u64, secs: f64, cycle_ns: u64) {
+fn report(name: &str, cycles: u64, secs: f64, cycle_ns: f64) {
     let rate = cycles as f64 / secs;
-    let ratio = rate / (1e9 / cycle_ns as f64);
+    let ratio = rate / (1e9 / cycle_ns);
     // Far below real time the reciprocal is the readable number:
     // "hardware/2800" says what "0.00x" does not. Near it, the ratio does.
     let against = if ratio >= 0.1 {
@@ -2872,7 +2872,7 @@ fn time_lashup(
             }
         }
     }
-    report("rtl, debugger", ran, t.elapsed().as_secs_f64(), crate::ioboard::CYCLE_NS);
+    report("rtl, debugger", ran, t.elapsed().as_secs_f64(), crate::ioboard::CYCLE_NS as f64);
     let e = &lashup.debugger;
     stop.conclude(ran, stop_pc(e), halt);
     println!(
@@ -3156,7 +3156,7 @@ fn time_fabric(
         hold.lines(&mut run.debugger, ran, setup, &mut Writes::CableEnd);
     }
     hold.done();
-    report("rtl, debugger", ran, t.elapsed().as_secs_f64(), crate::ioboard::CYCLE_NS);
+    report("rtl, debugger", ran, t.elapsed().as_secs_f64(), crate::ioboard::CYCLE_NS as f64);
     hold.conclude(&run.debugger, &stop, ran, halt);
     match run.debuggee.taken() {
         Some((count, faults)) => println!(
@@ -3664,7 +3664,10 @@ fn time_engine<S: Stepper>(
         let now = m.ns;
         port.poll_cable(&mut m.ioboard.serial.cable, now);
     }
-    report(name, ran, t.elapsed().as_secs_f64(), s.engine().nominal_cycle_ns());
+    // Revision 15's hardware runs at its period, 8.5 ns at 17 units, on
+    // either engine; every other machine at the engine's own microcycle.
+    let cycle_ns = s.engine().machine().period_ns().unwrap_or(s.engine().nominal_cycle_ns() as f64);
+    report(name, ran, t.elapsed().as_secs_f64(), cycle_ns);
     hold.conclude(s.engine(), &stop, ran, halt);
     if let Some(n) = s.debug_cycles() {
         println!("       {n} debug cycles on the cable");
@@ -3793,7 +3796,7 @@ fn interrupted(seen: &mut u32) -> bool {
 fn say_pc<E: Engine>(e: &E, ran: u64) {
     let m = e.machine();
     let prom = if m.in_prom(e.pc()) { " in the PROM" } else { "" };
-    let ns = m.device_ns();
+    let ns = m.ns_text();
     println!("PC {:o}{prom}; {} microcycles, {ns} ns; {ran} this run", e.pc(), m.cycles);
 }
 
@@ -4534,12 +4537,12 @@ fn resume_engine<E: Engine>(
         format!("{} memory boards", m.memory_boards())
     };
     // `ns` is in the machine's units, 0.5 ns on revision 15: the line says
-    // whole nanoseconds.
+    // nanoseconds, with ".5" where the instant is odd.
     eprintln!(
         "resumed: {} at {} microcycles, {} ns, {memory}",
         path.display(),
         m.cycles,
-        m.device_ns()
+        m.ns_text()
     );
     // `--continue`: the prompt's `continue`, before the first microcycle.
     if go_on {
@@ -5332,7 +5335,7 @@ fn time_chip(
     if let Some(prompt) = prompt.as_ref() {
         prompt.done();
     }
-    report("chip", ran, t.elapsed().as_secs_f64(), crate::ioboard::CYCLE_NS);
+    report("chip", ran, t.elapsed().as_secs_f64(), crate::ioboard::CYCLE_NS as f64);
     {
         let c = &end.machine().cpu;
         if quit {
@@ -6957,6 +6960,13 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 if which == Which::Chip {
                     "the machine's own speed; chip is far slower than that, so nothing waits"
                         .to_string()
+                } else if geometry.extended() {
+                    // Revision 15's clock, the period, not a timing model's.
+                    let period = microcycle.unwrap_or(crate::clock::PERIOD_15);
+                    format!(
+                        "the machine's own speed, {} ns a microcycle; the run waits when it is ahead",
+                        crate::clock::TimeBase::half_ns(period).ns_text(period)
+                    )
                 } else {
                     format!(
                         "the machine's own speed, {} ns a microcycle; the run waits when it is ahead",
