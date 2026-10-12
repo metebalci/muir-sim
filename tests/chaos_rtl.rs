@@ -811,3 +811,114 @@ fn a_clear_receiver_inside_a_frame_does_not_let_it_in_on_both_alike() {
         assert_eq!((c & csr::LOST_COUNT) >> 9, 1, "{what}: and the frame was counted: {c:#08o}");
     }
 }
+
+// --- The board's own frame, back off the cable ----------------------------
+
+/// One read on both, not compared: the board's word and the model's.
+fn pair(b: &mut UnibusMaster, m: &mut Model, uaddr: u32) -> (u16, u16) {
+    let (_, wb) = b.cycle(uaddr, None);
+    (wb, m.cycle(uaddr, None, b.now))
+}
+
+/// What one side read: the CSR and, with Receive Done up, the words.
+type Seen = (u16, Vec<u16>);
+
+/// The board's own frame to `dest` on a cable of its own, on both: reset,
+/// Clear Receiver with Spy or not, and, when `full`, a first frame to its
+/// own address first; then the frame to `dest`. Returns what the board
+/// and the model read: the CSR and, with Receive Done up, the words in
+/// the buffer.
+fn own_frame(dest: u16, spy: bool, full: bool) -> (Seen, Seen) {
+    let n = cadrio();
+    let mut b = board(&n);
+    let cable = || {
+        let mut e = Ether::new();
+        e.keep_log(true);
+        e.attach(Box::new(Capture::new(SERVER)));
+        e
+    };
+    b.plug_chaos(cable());
+    let mut m = Model::new(Some(cable()));
+    both(&mut b, &mut m, chaos::CSR, Some(csr::RESET), "reset");
+    b.run(b.now + 2_000);
+    m.run(b.now);
+    let spying = if spy { csr::SPY } else { 0 };
+    both(&mut b, &mut m, chaos::CSR, Some(csr::CLEAR_RECEIVER | spying), "clear receiver");
+    let send = |b: &mut UnibusMaster, m: &mut Model, to: u16| {
+        for &w in &rfc_time(MY_ADDRESS, to) {
+            both(b, m, chaos::WRITE_BUFFER, Some(w), "a word in");
+        }
+        both(b, m, chaos::START, None, "START");
+        let ((tb, _), (tm, _)) = wait_for(b, m, csr::TRANSMIT_DONE, 3_000_000);
+        assert_eq!(tm, tb, "to {to:o}: Transmit Done at the same poll on both");
+        // Past the frame's end, `-CBLBSY` and `RDONE` on both.
+        b.run(b.now + 10_000);
+        m.run(b.now);
+    };
+    if full {
+        send(&mut b, &mut m, MY_ADDRESS);
+    }
+    send(&mut b, &mut m, dest);
+    let (cb, cm) = pair(&mut b, &mut m, chaos::CSR);
+    let (bits_b, bits_m) = pair(&mut b, &mut m, chaos::BIT_COUNT);
+    let words = |b: &mut UnibusMaster, m: &mut Model, c: u16, bits: u16, board: bool| -> Vec<u16> {
+        if c & csr::RECEIVE_DONE == 0 {
+            return Vec::new();
+        }
+        (0..(bits as usize + 1) / 16)
+            .map(|_| {
+                if board {
+                    b.cycle(chaos::READ_BUFFER, None).1
+                } else {
+                    m.cycle(chaos::READ_BUFFER, None, b.now)
+                }
+            })
+            .collect()
+    };
+    let wb = words(&mut b, &mut m, cb, bits_b, true);
+    let wm = words(&mut b, &mut m, cm, bits_m, false);
+    ((cb, wb), (cm, wm))
+}
+
+/// **The board takes its own frame off the cable when it is for it, on
+/// both alike.** Its transceiver hears the whole cable, its own frame
+/// included, and its receiver judges that frame as any other:
+/// `DEST MATCH` --- its own address, zero, or Spy --- takes it into a free
+/// buffer, and another address is let go. MIT's `chatst.lisp` relies on
+/// it: its cable test sends to its own address and waits for Receive
+/// Done. With the buffer full the frame is counted in Lost Count, and one
+/// to its own address is aborted by its own busy receiver, which reads
+/// back as Transmit Abort. Measured on the board here, each case held to
+/// what the board does, and the model to the board.
+#[test]
+fn the_board_takes_its_own_frame_off_the_cable_on_both_alike() {
+    let other = 0o3070;
+    let mut wrong = Vec::new();
+    for (dest, spy, full, done, lost, abort) in [
+        (MY_ADDRESS, false, false, true, 0, false),
+        (0, false, false, true, 0, false),
+        (other, true, false, true, 0, false),
+        (other, false, false, false, 0, false),
+        (MY_ADDRESS, false, true, true, 1, true),
+        (0, false, true, true, 1, false),
+    ] {
+        let ((cb, wb), (cm, wm)) = own_frame(dest, spy, full);
+        let what = format!("to {dest:o}, spy {spy}, full {full}");
+        eprintln!("{what}: board CSR {cb:#08o}, model {cm:#08o}");
+        let bits = |c: u16| {
+            (c & csr::RECEIVE_DONE != 0, (c & csr::LOST_COUNT) >> 9, c & csr::TRANSMIT_ABORT != 0)
+        };
+        assert_eq!(bits(cb), (done, lost, abort), "{what}: the board, as measured");
+        if done {
+            // The buffer holds the frame taken first: with the buffer
+            // full, the first one, to this address.
+            let mut sent = rfc_time(MY_ADDRESS, if full { MY_ADDRESS } else { dest });
+            sent.push(MY_ADDRESS);
+            assert_eq!(wb[..sent.len()], sent[..], "{what}: the board's words back");
+        }
+        if (cm, &wm) != (cb, &wb) {
+            wrong.push(format!("{what}: the board {cb:#08o} {wb:?}, the model {cm:#08o} {wm:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of 6 cases unlike the board:\n{}", wrong.len(), wrong.join("\n"));
+}

@@ -465,6 +465,27 @@ measures all three on the board and
 `tests/chaos_rtl.rs::a_full_buffer_aborts_only_what_is_addressed_to_it_on_both_alike`
 holds the model to the same three.
 
+**The board takes its own frame off the cable when it is for it.** Its
+transceiver hears the whole cable, its own transmission included, and its
+receiver judges that frame as it judges any other. With the buffer free,
+`DEST MATCH` takes it: a frame to the board's own address, to zero, or to
+anyone under Spy comes back as Receive Done, with the board's address as its
+source, and a frame to another address is let go. With the buffer full the
+frame is counted in Lost Count, and one to the board's own address is
+aborted by its own busy receiver, which reads back as Transmit Abort.
+`tests/chaos_rtl.rs::the_board_takes_its_own_frame_off_the_cable_on_both_alike`
+measures the six cases on the board and holds the model to each. MIT's
+own test of the interface relies on it: `CHATST` in System 100's
+`sys/network/chaos/chatst.lisp` sends each pattern on the cable to the
+interface's own address with Receive All off (`CHATST-PREP NIL`, lines
+168-171, writes 10 to the CSR) and busy-waits for Receive Done
+(`CHATST-RCV`, lines 180-183). `tests/chaos_chatst.rs` runs
+`(chaos:chatst 1 1)` on System 100 and holds it to sending all six of its
+packets on the cable. MIT's network software never sends a frame to its own
+address or to zero: `TRANSMIT-INT-PKT` in `sys/network/chaos/chsncp.lisp`
+hands a packet for this host back to its own receive list and drops one
+with no route, so outside `CHATST` the case does not arise.
+
 **Lost Count counts what would have been received; it does not count what
 was aborted.** AIM-628 §7: four bits holding "a count of the number of
 packets which would have been received if the incoming packet buffer had not

@@ -521,8 +521,14 @@ impl Ether {
     }
 
     /// A frame the behavioral board heard, oldest first, as a receiver
-    /// takes it: everything on the cable but its own, wreckage included,
-    /// for the interface to filter as the receiver does.  The flag is
+    /// takes it: everything on the cable, wreckage included, for the
+    /// interface to filter as the receiver does --- **its own frame
+    /// among them**. The transceiver hears the whole cable, its own
+    /// transmission included (AIM-628 §2.3), and the receiver judges that
+    /// frame by `DEST MATCH` as any other: the netlist board takes its own
+    /// frame to its own address, to zero or under Spy into a free buffer
+    /// (`the_board_takes_its_own_frame_off_the_cable_on_both_alike` in
+    /// `tests/chaos_rtl.rs`).  The flag is
     /// whether the receiver was active for it: false, and the board's
     /// buffer was full when the frame's destination word went by, so
     /// `RACT` never came up, nothing of the frame reached the buffer, and
@@ -790,11 +796,14 @@ impl Ether {
             // `START^` for the frames that began [`RACT_NS`] ago: `RACT`
             // takes Receive Done as it stands now and keeps it for the
             // frame, whatever the software writes after.
-            let board = self.board.as_ref().map(|b| (b.address, b.receive_done));
+            // The board's own frame is no exception: its receiver hears it
+            // as it hears any, so with the buffer full it is counted, and
+            // to its own address its own busy receiver aborts it.
+            let full = self.board.as_ref().is_some_and(|b| b.receive_done);
             let mut inactive = false;
             for s in self.sending.iter_mut().filter(|s| s.ract_at == Some(t)) {
                 s.ract_at = None;
-                s.ract_off = board.is_some_and(|(me, full)| full && s.source != me);
+                s.ract_off = full;
                 inactive |= s.ract_off;
             }
             if inactive && let Some(b) = self.board.as_mut() {
@@ -935,9 +944,7 @@ impl Ether {
             if let Some(b) = self.board.as_mut() {
                 // Whether its receiver was active for this run of bits.
                 let taken = !std::mem::take(&mut b.not_taken);
-                if b.address != from {
-                    b.heard.push_back((now, r.clone(), taken));
-                }
+                b.heard.push_back((now, r.clone(), taken));
             }
             self.record(Event::Heard(now, r.framed));
         }
