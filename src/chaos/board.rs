@@ -84,11 +84,52 @@ pub const CBLBSY_OFF_NS: u64 = 375;
 /// which is 125 before that end.  Measured.
 pub const TDONE_BEFORE_END_NS: u64 = 500;
 
-/// From the read of START answered, `-SSYN`, to `TSREMPTY`: the source
-/// and check words shifted into the buffer behind the packet.  Measured on
-/// the netlist board, 4,150 at every phase of its clocks, where the answer
-/// itself comes 350 to 2,100 ns after `-MSYN`.  `rtl` hands the read to
-/// this model at the answer.
+/// From a WRITE BUFFER's or a START's answer, `-SSYN`, to the earliest
+/// instant the transmitter's shift register takes what the cycle gives
+/// it: the register loads (`UB>TSR`, `TSREMPTY` falling) at the first edge
+/// of the board's 8 MHz `FCLK^` at least this long after the answer ---
+/// `-MSYN` lifts 100 ns after `-SSYN`, and the load waits for the clock.
+/// Measured on the netlist board at every nanosecond of an edge's period:
+/// an answer 101 ns before an edge loads at it, one 100 ns before loads at
+/// the next.
+pub const TSR_LOAD_NS: u64 = 101;
+
+/// What one word takes to shift from the register into the buffer, its
+/// sixteen bits on `FCLK^`: `TSREMPTY` rises this long after the load.
+/// Measured on the netlist board.
+pub const TSR_WORD_NS: u64 = 2_000;
+
+/// When the transmitter's shift register is empty again, `TSREMPTY` up,
+/// after a cycle answered at `answer` loads `words` words into it: one for
+/// WRITE BUFFER, the source and check words for START. The load is at the
+/// first edge of `FCLK^` at or after the answer plus [`TSR_LOAD_NS`], the
+/// clock running free from `powered_at` with an edge every
+/// [`crate::busint::IOB_FCLK_NS`], and each word takes [`TSR_WORD_NS`]. So
+/// after an empty START, `TSREMPTY` comes 4,101 to 4,225 ns after the
+/// answer, by the clock's phase there, and after one that waited for the
+/// last word, whose answer is on the clock, always 4,150. In nanoseconds:
+/// the CADR's I/O board's, which revisions 13 and 14 keep. Revision 15's
+/// interface is QUUX's own and readies START [`TSR_READY_NS`] after the
+/// read instead (MP2b ruling Q19).
+///
+/// `TSREMPTY` is what a frame waits for at its turn: `TSTART` is clocked
+/// from `TSREMPTY AND CW AND -CBLBSY`. Measured on the netlist board by
+/// `an_empty_start_makes_the_turn_the_board_makes_on_both_alike` in
+/// `tests/chaos_rtl.rs`, answers swept at 10 ns steps across a rise of
+/// bit 7, and by `the_models_instants_are_the_boards` in
+/// `tests/chaos_netlist.rs`.
+pub fn tsr_empty(answer: u64, words: u64, powered_at: u64) -> u64 {
+    let edge = crate::busint::IOB_FCLK_NS;
+    let from = (answer + TSR_LOAD_NS).saturating_sub(powered_at);
+    powered_at + from.div_ceil(edge) * edge + words * TSR_WORD_NS
+}
+
+/// Revision 15's START: ready this long after the read, a delay started
+/// at the read and ended ⌈2d/P⌉ clocks after it (MP2b ruling Q19). It is
+/// the CADR board's `TSREMPTY` after a START that waited for the last
+/// word's shift, as MIT's driver's always does ([`tsr_empty`]); QUUX's
+/// interface is its own hardware and does not follow the board's 8 MHz
+/// clock.
 pub const TSR_READY_NS: u64 = 4_150;
 
 /// From `ABORT` at LMMODU 0A09 setting --- the transmitter's next clock
@@ -832,10 +873,11 @@ impl Interface {
         self.tell_the_cable();
     }
 
-    /// A read of [`interface::START`]: the buffer, with this address as
-    /// its source, is ready to go [`TSR_READY_NS`] on, and goes at the
-    /// turn timer's next rising edge of bit 7 with the cable idle
-    /// ([`Turn`]).
+    /// A read of [`interface::START`] answered at `now`: the buffer, with
+    /// this address as its source, is ready to go once the source and check
+    /// words are shifted in behind it ([`tsr_empty`]; on revision 15
+    /// [`TSR_READY_NS`] on), and goes at the turn timer's next rising edge
+    /// of bit 7 with the cable idle ([`Turn`]).
     ///
     /// **Transmit Done falls at the read if it is up**, which it is when no
     /// word was written since the last frame or a Reset. On the netlist
@@ -856,7 +898,12 @@ impl Interface {
                 buffer.len()
             );
         }
-        self.turn.ready = Some((self.time.after(now, self.time.ns(TSR_READY_NS)), buffer));
+        let ready = if self.time.period == 0 {
+            tsr_empty(now, 2, self.turn.powered_at)
+        } else {
+            self.time.after(now, self.time.ns(TSR_READY_NS))
+        };
+        self.turn.ready = Some((ready, buffer));
     }
 }
 

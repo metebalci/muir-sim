@@ -448,7 +448,7 @@ impl Buses {
                 {
                     let (at, msyn_at) = *self
                         .unibus_pending
-                        .get_or_insert_with(|| (self.io_timing.answer(r, write, now), now));
+                        .get_or_insert_with(|| (self.io_timing.answer_cycle(r, write, now), now));
                     if now >= at {
                         // The counter's low half is the count at `-MSYN`.
                         self.machine.ns = if r == ioboard::USEC_LOW { msyn_at } else { now };

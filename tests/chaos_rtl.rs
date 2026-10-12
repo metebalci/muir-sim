@@ -922,3 +922,78 @@ fn the_board_takes_its_own_frame_off_the_cable_on_both_alike() {
     }
     assert!(wrong.is_empty(), "{} of 6 cases unlike the board:\n{}", wrong.len(), wrong.join("\n"));
 }
+
+// --- The transmitter's shift register and the turn ----------------------
+
+/// **An empty START near a rise of `MY.TURN^` makes the turn the board
+/// makes, on both alike.** The board's `TSREMPTY` comes up on its 8 MHz
+/// clock, at the first edge at or after the read's answer plus 4,101 ns, so
+/// how long after the answer depends on the clock's phase there, 4,101 to
+/// 4,225 ns; the frame goes at a rise of bit 7 only if `TSREMPTY` is up by
+/// then. Answers swept across the 150 ns before a rise at 10 ns steps,
+/// looped back: the board's frame makes the rise for an answer 4,101 ns
+/// or more before it and waits a round for one later, and the model's
+/// Transmit Done comes at the same poll as the board's at every step.
+#[test]
+fn an_empty_start_makes_the_turn_the_board_makes_on_both_alike() {
+    // `MY.TURN^`'s second rise after power-on with the cable idle,
+    // measured on the board below.
+    let rise = 260_250u64;
+    let mut wrong = Vec::new();
+    let mut made = Vec::new();
+    for before in (4_050..=4_200u64).rev().step_by(10) {
+        let n = cadrio();
+        let mut b = board(&n);
+        let mut m = Model::new(None);
+        both(&mut b, &mut m, chaos::CSR, Some(csr::RESET), "reset");
+        b.run(b.now + 2_000);
+        m.run(b.now);
+        both(&mut b, &mut m, chaos::CSR, Some(csr::LOOP_BACK | csr::CLEAR_RECEIVER), "loop back");
+        // The read's answer at `rise - before`: `-MSYN` the address time
+        // after the cycle begins, and an empty START answered 350 ns on.
+        let aim = rise - before - muir::busint::UNIBUS_ADDRESS_NS - 350;
+        b.run(aim);
+        m.run(aim);
+        let begin = b.now;
+        let (took, _) = b.cycle(chaos::START, None);
+        let answered = begin + muir::busint::UNIBUS_ADDRESS_NS + took;
+        assert_eq!(answered, rise - before, "the START answered where aimed");
+        m.cycle(chaos::START, None, answered);
+        // The board's own record of the turn: `MY.TURN^` rising at `rise`.
+        let mut was = b.level("MY.TURN^");
+        let mut rose = None;
+        while b.now < rise + 1_000 {
+            let next = b.chip.next_tap().map_or(b.now + 25, |t| t.max(b.now + 1)).min(b.now + 25);
+            b.run(next);
+            let l = b.level("MY.TURN^");
+            if l == Level::High && was != Level::High {
+                rose.get_or_insert(b.now);
+            }
+            was = l;
+        }
+        m.run(b.now);
+        assert_eq!(rose, Some(rise), "MY.TURN^ rises where the sweep is aimed");
+        let ((tb, _), (tm, _)) = wait_for(&mut b, &mut m, csr::TRANSMIT_DONE, 1_000_000);
+        // A frame that made the rise is done within 20 us of it.
+        if tb < 20_000 {
+            made.push(before);
+        }
+        eprintln!(
+            "START answered {before} ns before the rise: board's Transmit Done after {tb} ns, model's after {tm} ns"
+        );
+        if tm != tb {
+            wrong.push(format!("{before} ns before: board {tb} ns, model {tm} ns"));
+        }
+    }
+    assert_eq!(
+        made,
+        (4_110..=4_200).rev().step_by(10).collect::<Vec<u64>>(),
+        "the board makes the rise from 4,101 ns before it"
+    );
+    assert!(
+        wrong.is_empty(),
+        "{} of 16 answers unlike the board:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}

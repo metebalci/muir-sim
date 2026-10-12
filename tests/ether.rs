@@ -359,13 +359,16 @@ fn on_the_cable(data: usize) -> (usize, u64) {
 /// by then the one count after the cable idled --- its own turn, its own
 /// source word having loaded the counter with zero --- has gone by. Bit 7
 /// of the counter comes round again 256 counts later, so two short frames
-/// from one station are 257 slots apart and two full ones 513, which is
-/// what the netlist board takes with microcode 323 driving it
+/// from one station are 257 slots apart, as the netlist board's are
 /// (`two_packets_back_to_back_wait_a_whole_round` in
-/// `tests/chaos_netlist.rs`).
+/// `tests/chaos_netlist.rs`). Two full ones are 769: the board takes a
+/// word no faster than every 2,451 ns, its transmit shift register holding
+/// the next write while the last word shifts in
+/// (`a_word_written_while_the_last_shifts_is_answered_as_the_board_answers`
+/// there), so 253 words take more than two whole rounds to write.
 #[test]
 fn a_stations_next_frame_waits_for_its_host_to_refill() {
-    for (what, data, slots) in [("short frames", 4usize, 257u64), ("full packets", 244, 513)] {
+    for (what, data, slots) in [("short frames", 4usize, 257u64), ("full packets", 244, 769)] {
         let mut e = Ether::new();
         e.keep_log(true);
         let frames = vec![packet(0o3060, 0o3062, data), packet(0o3060, 0o3062, data)];

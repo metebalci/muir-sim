@@ -1505,7 +1505,7 @@ fn diagnose_the_busy_receiver() {
 /// `tests/chaos_rtl.rs` --- and the software cannot be there. Transmit
 /// Done comes 250 ns before the frame's nominal end, writing eleven words
 /// and reading `START` takes tens of microseconds, and the transmitter is
-/// loaded [`TSR_READY_NS`] later still. So the count that would have
+/// loaded some 4,150 ns later still ([`tsr_empty`]). So the count that would have
 /// started the second frame has gone by, and `MY.TURN^`, bit 7 of the
 /// 74LS193s at LMTURN 0A17 and 0A18, rises again 256 counts on. Measured:
 /// 257,875 ns between the last edge of the first frame and the first edge
@@ -1523,7 +1523,7 @@ fn diagnose_the_busy_receiver() {
 /// has that one slot to empty its buffer. Issue 110.
 #[test]
 fn two_packets_back_to_back_wait_a_whole_round() {
-    use muir::chaos::board::TSR_READY_NS;
+    use muir::chaos::board::tsr_empty;
     let n = cadrio();
     let mut b = board(&n);
     on_the_cable(&mut b);
@@ -1539,8 +1539,8 @@ fn two_packets_back_to_back_wait_a_whole_round() {
             b.cycle(chaos::WRITE_BUFFER, Some(w));
         }
         let at = b.now;
-        b.cycle(chaos::START, None);
-        starts.push(at);
+        let (took, _) = b.cycle(chaos::START, None);
+        starts.push(at + muir::busint::UNIBUS_ADDRESS_NS + took);
         let deadline = b.now + 700_000;
         let mut tx = b.chaos.as_ref().unwrap().board_tx(&b.chip);
         let was = edges.len();
@@ -1577,9 +1577,9 @@ fn two_packets_back_to_back_wait_a_whole_round() {
     }
     assert_eq!(runs.len(), 2, "two frames went out: {runs:?}");
     let gap = runs[1].0 - runs[0].1;
-    let ready = starts[1] + TSR_READY_NS;
+    let ready = tsr_empty(starts[1], 2, 0);
     eprintln!(
-        "START read at {:?}; the transmitter loaded at {ready}, {} ns after the cable idled; \
+        "START answered at {:?}; the transmitter loaded at {ready}, {} ns after the cable idled; \
          the gap is {gap} ns, {} slots",
         starts,
         ready as i64 - runs[0].1 as i64,
@@ -1594,10 +1594,12 @@ fn two_packets_back_to_back_wait_a_whole_round() {
 /// counters; here the board runs a looped-back frame and each instant is
 /// measured on its nets and held to the constant that stands for it:
 ///
-/// - `TSREMPTY` [`TSR_READY_NS`] after the START read is answered, at
-///   whatever phase of the board's clocks the read comes --- the answer
-///   itself takes 350 to 2,100 ns, and `rtl` hands the read to the model at
-///   the answer;
+/// - `TSREMPTY` where [`tsr_empty`] puts it after the START read is
+///   answered, at whatever phase of the board's clocks the read comes ---
+///   4,150 ns after an answer that waited for the last word's shift, which
+///   a read up to 1,750 ns after the last write's cycle does, and 4,101 to
+///   4,225 ns after one that did not, by the phase --- and `rtl` hands the
+///   read to the model at the answer;
 /// - the frame's first edge on `-TTL.D.OUT` [`TURN_START_NS`] after
 ///   `MY.TURN^` rises;
 /// - `-TDONE` [`TDONE_BEFORE_END_NS`] before the frame's nominal end, its
@@ -1608,8 +1610,7 @@ fn two_packets_back_to_back_wait_a_whole_round() {
 #[test]
 fn the_models_instants_are_the_boards() {
     use muir::chaos::board::{
-        CBLBSY_OFF_NS, TDONE_BEFORE_END_NS, TSR_READY_NS, TURN_FIRST_TC_NS, TURN_START_NS,
-        TURN_TC_NS,
+        CBLBSY_OFF_NS, TDONE_BEFORE_END_NS, TURN_FIRST_TC_NS, TURN_START_NS, TURN_TC_NS, tsr_empty,
     };
     use muir::chaos::packet::frame;
     use muir::chaos::wire::CELL_NS;
@@ -1619,7 +1620,7 @@ fn the_models_instants_are_the_boards() {
         let next = b.chip.next_tap().map_or(b.now + 50, |t| t.max(b.now + 1)).min(b.now + 500);
         b.run(next);
     };
-    for delay in [0, 375, 750, 1125, 1500] {
+    for delay in [0, 375, 750, 1125, 1500, 1750, 1800, 1850, 1900, 1950, 2000, 2050] {
         let mut b = board(&n);
         b.cycle(chaos::CSR, Some(csr::RESET));
         b.run(b.now + 2_000);
@@ -1634,7 +1635,15 @@ fn the_models_instants_are_the_boards() {
         while b.level("TSREMPTY") != Level::High {
             tap(&mut b);
         }
-        assert_eq!(b.now - answered, TSR_READY_NS, "TSREMPTY after START, {delay} ns later");
+        assert_eq!(
+            b.now,
+            tsr_empty(answered, 2, 0),
+            "TSREMPTY after START, {delay} ns later, answered in {took} ns"
+        );
+        eprintln!(
+            "START {delay} ns later: answered in {took} ns, TSREMPTY {} ns after",
+            b.now - answered
+        );
         if delay != 0 {
             continue;
         }
@@ -1903,4 +1912,57 @@ fn an_empty_start_sends_the_source_and_its_check_word_from_both() {
     let c = m.read(chaos::CSR, b.now);
     eprintln!("the model's CSR after the board's empty frame: {c:#08o}");
     assert!(c & (csr::RECEIVE_DONE | csr::CRC_ERROR | csr::LOST_COUNT) == 0, "not taken: {c:#08o}");
+}
+
+// --- The transmitter's shift register holds the Unibus -------------------
+
+/// **A word written while the last one is still shifting is answered when
+/// the shift register is empty, as the board answers it, and so is
+/// START.** The board loads each word into its transmit shift register at
+/// the first edge of its 8 MHz clock at least 101 ns after the write's
+/// answer --- `-MSYN` lifting 100 ns after `-SSYN`, and the load on the
+/// clock --- and shifts its sixteen bits into the buffer, 2,000 ns; a
+/// WRITE BUFFER or a START that comes before `TSREMPTY` is up again is
+/// answered 350 ns after it is. Six words and a START, spaced from 0 to
+/// 2,500 ns after each cycle's end and at five phases of the clock: every
+/// answer on the board is the one `muir::busint::IoBoardTiming` gives the
+/// same cycles, which is how `rtl` answers them.
+#[test]
+fn a_word_written_while_the_last_shifts_is_answered_as_the_board_answers() {
+    use muir::busint::{IoBoardTiming, UNIBUS_ADDRESS_NS};
+    let n = cadrio();
+    let mut wrong = Vec::new();
+    for gap in [0u64, 500, 1_000, 1_500, 1_750, 2_000, 2_500] {
+        for phase in [0u64, 25, 50, 75, 100] {
+            let mut b = board(&n);
+            let mut timing = IoBoardTiming::default();
+            let mut cycle = |b: &mut UnibusMaster, uaddr: u32, write: Option<u16>| {
+                let msyn = b.now + UNIBUS_ADDRESS_NS;
+                let (took, _) = b.cycle(uaddr, write);
+                (msyn + took, timing.answer_cycle(uaddr, write.is_some(), msyn))
+            };
+            cycle(&mut b, chaos::CSR, Some(csr::RESET));
+            b.run(b.now + 2_000 + phase);
+            cycle(&mut b, chaos::CSR, Some(csr::LOOP_BACK | csr::CLEAR_RECEIVER));
+            for (k, w) in [0o125252u16, 0o052525, 0o177400, 0o000377, 0o007417, MY_ADDRESS]
+                .into_iter()
+                .enumerate()
+            {
+                let (board, model) = cycle(&mut b, chaos::WRITE_BUFFER, Some(w));
+                if model != board {
+                    wrong.push(format!(
+                        "gap {gap} phase {phase}: word {k} answered at {board}, the model {model}"
+                    ));
+                }
+                b.run(b.now + gap);
+            }
+            let (board, model) = cycle(&mut b, chaos::START, None);
+            if model != board {
+                wrong.push(format!(
+                    "gap {gap} phase {phase}: START answered at {board}, the model {model}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{} answers unlike the board's:\n{}", wrong.len(), wrong.join("\n"));
 }

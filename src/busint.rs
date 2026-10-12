@@ -606,9 +606,23 @@ impl MemoryBoard {
 /// answer [`IOB_STRAIGHT_NS`] after the second edge strictly after
 /// `-MSYN`; the counter's low half, which latches the count, takes one
 /// edge and [`IOB_USEC_LOW_NS`].
+///
+/// **The Chaosnet transmitter holds the Unibus while its shift register
+/// is busy.** [`IoBoardTiming::answer_cycle`] answers the cycles a
+/// processor or a debugger runs one after another, and remembers when the
+/// transmitter's shift register is next empty: a WRITE BUFFER or START
+/// that comes before then is answered [`IOB_CHAOS_BUFFER_NS`] after it is
+/// ([`crate::chaos::board::tsr_empty`]).
 #[derive(Clone, Debug, Default)]
 pub struct IoBoardTiming {
     timing: TimingModel,
+    /// When the transmitter's shift register is next empty, `TSREMPTY` up:
+    /// the last WRITE BUFFER's word, or START's source and check words,
+    /// shifted into the buffer. `None` before any. **Not kept in a
+    /// checkpoint**, as [`TimingModel`] is not: a resume answers the first
+    /// such cycle as if the register were empty, which it is from 4.2 us
+    /// after the last word on.
+    tsr_empty: Option<u64>,
 }
 
 /// From power-on to the first rising edge of the board's `1 USEC CLK`:
@@ -664,7 +678,40 @@ impl IoBoardTiming {
     /// from power-on and its delay lines are delays a strobe starts,
     /// [`TimingModel`].
     pub fn with_timing_model(model: TimingModel) -> IoBoardTiming {
-        IoBoardTiming { timing: model }
+        IoBoardTiming { timing: model, tsr_empty: None }
+    }
+
+    /// [`IoBoardTiming::answer`] for a cycle that is run, one after
+    /// another as a master runs them: a WRITE BUFFER or a START is answered
+    /// no sooner than [`IOB_CHAOS_BUFFER_NS`] after the transmitter's shift
+    /// register is empty, the netlist board's `-TSR.SSYN` waiting for
+    /// `TSREMPTY`, and loads it again from its own answer
+    /// ([`crate::chaos::board::tsr_empty`]): one word for WRITE BUFFER, the
+    /// source and check words for START. Measured on the netlist board,
+    /// words and START spaced from 0 to 2,500 ns apart at five phases of
+    /// its clock, by
+    /// `a_word_written_while_the_last_shifts_is_answered_as_the_board_answers`
+    /// in `tests/chaos_netlist.rs`.
+    ///
+    /// **Unverified:** whether a Reset or a Clear Transmitter written while
+    /// the register shifts empties it at once. MIT's driver writes neither
+    /// inside a packet, and the board has not been measured doing it.
+    pub fn answer_cycle(&mut self, uaddr: u32, write: bool, msyn: u64) -> u64 {
+        use crate::chaos::board;
+        use crate::chaos::interface as chaos;
+        let words = match uaddr {
+            chaos::WRITE_BUFFER if write => 1,
+            chaos::START if !write => 2,
+            _ => return self.answer(uaddr, write, msyn),
+        };
+        let t = self.timing;
+        let free = self.answer(uaddr, write, msyn);
+        let held = self.tsr_empty.map(|e| t.free_running(e) + t.triggered(IOB_CHAOS_BUFFER_NS));
+        let ssyn = free.max(held.unwrap_or(0));
+        // The load is on `FCLK^`, which runs free from power-on.
+        let load = self.fclk_edge_at_or_after(ssyn + t.triggered(board::TSR_LOAD_NS));
+        self.tsr_empty = Some(load + words * board::TSR_WORD_NS);
+        ssyn
     }
 
     /// The first rising edge of the microsecond clock strictly after `t`.
@@ -1745,7 +1792,7 @@ impl Busint {
                             ),
                             Responder::Unibus(u) => match ioboard::answers(u, self.write) {
                                 Some(r) => {
-                                    let ssyn = self.io.answer(r, self.write, msyn);
+                                    let ssyn = self.io.answer_cycle(r, self.write, msyn);
                                     // The counter's low half is the count as
                                     // it stood at `-MSYN`: the board latches
                                     // it on the way to answering, before the
@@ -2218,7 +2265,7 @@ impl Busint {
             ),
             Responder::Unibus(u) => match ioboard::answers(u, req.write) {
                 Some(r) => {
-                    let ssyn = self.io.answer(r, req.write, msyn);
+                    let ssyn = self.io.answer_cycle(r, req.write, msyn);
                     (ssyn, if r == ioboard::USEC_LOW { msyn } else { ssyn })
                 }
                 // A write the decoder takes nowhere is never acknowledged;

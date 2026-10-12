@@ -328,6 +328,59 @@ slot is 1,000 ns and a whole round is 256 of them.** A frame ready goes
 468 ns after the count that carries the low byte from 0 to 255, the 74S74 at
 LMMODU `0B15` clocking `TSTART` from `TSREMPTY AND CW AND -CBLBSY`.
 
+**The transmitter's shift register paces the writes and readies the
+frame.** Every word the software writes, and at `START` the source and check
+words, reaches the buffer through the transmitter's shift register. The
+register loads (`UB>TSR`, `TSREMPTY` falling) at the first edge of the
+board's 8 MHz `FCLK^` at least 101 ns after the cycle's answer --- `-MSYN`
+lifts 100 ns after `-SSYN` --- and shifts the word's sixteen bits in over
+2,000 ns, when `TSREMPTY` rises again. A WRITE BUFFER or a `START` that
+comes while the register is busy is held, not refused: the board answers it
+350 ns after `TSREMPTY` rises (`-TSR.SSYN`), where an idle register answers
+350 ns after `-MSYN`. So the board takes at most a word every 2,451 to 2,576
+ns, answer to answer, whatever the software does.
+`tests/chaos_netlist.rs::a_word_written_while_the_last_shifts_is_answered_as_the_board_answers`
+measures six words and a `START` spaced 0 to 2,500 ns apart at five phases
+of the clock, and holds `rtl`'s answers (`IoBoardTiming::answer_cycle`) to
+every one of the board's. Microcode 323's `CHAOS-XMT-2` writes the two
+halves of each 32-bit word 1,305 ns apart and the pairs 2,755 ns apart on
+`rtl`, and reads `START` 1,305 ns after the last word, so the second half of
+every pair and the `START` are held. `micro` answers every cycle at once and
+has none of this.
+
+`START`'s source and check words make `TSREMPTY` come 4,000 ns after their
+load: 4,150 ns after a `START` that was held, whose answer is on the clock,
+as MIT's driver's always is, and 4,101 to 4,225 ns after one that was not,
+by the clock's phase there. A frame makes a rise of bit 7 only if
+`TSREMPTY` is up at it, the same edge of `FCLK^` counting.
+`tests/chaos_rtl.rs::an_empty_start_makes_the_turn_the_board_makes_on_both_alike`
+sweeps an empty `START`'s answer across a rise at 10 ns steps: the board's
+frame makes the rise from 4,101 ns before it and waits a round from 4,100,
+and the model's does the same at every step.
+`tests/chaos_netlist.rs::the_models_instants_are_the_boards` holds
+`TSREMPTY` to the rule after `START`s that were held and that were not.
+**Unverified:** whether a Reset or a Clear Transmitter written while the
+register shifts empties it at once; MIT's driver writes neither inside a
+packet, and the board has not been measured doing it.
+
+This is the CADR's I/O board, which revisions 13 and 14 keep. **Revision
+15's interface is QUUX's own** and does not follow the board's 8 MHz clock:
+its `START` is ready `TSR_READY_NS`, 4,150 ns, after the read, a delay
+started there (below), and it holds no cycle.
+
+**A checkpoint does not keep when the register is next empty.** The hold is
+`rtl`'s bus interface's (`IoBoardTiming::answer_cycle`), which remembers the
+instant the register empties and does not write it to a checkpoint. A
+checkpoint is taken between microcycles, and the bus interface's part of it
+carries a Unibus cycle in progress with its answer instant already decided,
+held or not, so that cycle resumes as it was; what a resume loses is the
+register's busy time behind it, so the next WRITE BUFFER or `START` of a
+packet in progress is answered as if the register were empty. A `START`
+already read keeps its readiness: the interface writes when its frame is
+ready into the checkpoint. Before the hold was modeled nothing about the
+register was kept, because nothing about it was modeled beyond that
+readiness.
+
 **The board takes the first turn of the round after its own frame, where
 AIM-628 describes the last.** The memo's picture is a virtual token, §2.6,
 memo page 7:
@@ -364,7 +417,9 @@ station with an interface and a host behind it, and such a node is charged
 `refill()` --- `REFILL_WORD_NS` a word, plus the hardware's own shift-in ---
 before its next turn counts.
 `tests/ether.rs::a_stations_next_frame_waits_for_its_host_to_refill` holds
-two short frames from one station 257 slots apart and two full packets 513,
+two short frames from one station 257 slots apart and two full packets 769,
+the 253 words of a full packet taking more than two rounds at the pace the
+shift register takes them,
 and `::a_stations_refill_holds_up_only_its_own_next_frame` holds that this
 delays nobody else. The counter also **runs free**: a turn missed while the
 cable stays idle is gone, and the next is a whole round on, which
@@ -517,14 +572,16 @@ measured on the netlist board, and each says which.
 | `ABORT_HOLD_NS` | 1000 | how long an aborting driver holds the cable high | netlist board, and §2.5's "four bit cells" |
 | `BUSY_ABORT_NS` | 12260 | frame's first edge to the busy receiver's abort signal | netlist board: `DEST MATCH` 12,060, driver on 12,260, Lost Count 12,310 |
 | `RACT_NS` | 60 | frame's first edge to `START^`, where the receiver decides | netlist board |
-| `REFILL_WORD_NS` | 1995 | what one word costs a station's host to write | microcode 323's `CHAOS-XMT-2`, fitted over 9 to 253 words |
+| `REFILL_WORD_NS` | 2630 | what one word costs a station's host to write | microcode 323's `CHAOS-XMT-2` on `rtl`, held by the shift register, fitted over 11 to 34 words |
 | `TURN_TC_NS` | 500 | the divider's terminal count | the 74LS161 at LMTURN `0A16` reloading 14 |
 | `TURN_FIRST_TC_NS` | 4250 | power-on to the first terminal count | netlist board |
 | `TURN_LOAD_NS` | 8250 | frame's first edge to `-LOAD.MY.TURN` | netlist board: `SRC STB`, 33 bit cells in |
 | `TURN_START_NS` | 468 | the count that raises bit 7 to the frame's first edge | netlist board |
 | `CBLBSY_OFF_NS` | 375 | frame's nominal end --- its first edge plus a cell for each of its bits, the appended zero included --- to `-CBLBSY` lifting | netlist board; `RDONE` rises with it |
 | `TDONE_BEFORE_END_NS` | 500 | how far before that nominal end Transmit Done comes | netlist board |
-| `TSR_READY_NS` | 4150 | the read of `START` answered, `-SSYN`, to `TSREMPTY` | netlist board, at every phase of its clocks; the answer itself takes 350 to 2,100 ns |
+| `TSR_LOAD_NS` | 101 | a WRITE BUFFER's or `START`'s answer, `-SSYN`, to the earliest `FCLK^` edge the shift register loads at | netlist board, at every nanosecond of the clock's period |
+| `TSR_WORD_NS` | 2000 | one word shifted from the register into the buffer | netlist board: sixteen bits on `FCLK^` |
+| `TSR_READY_NS` | 4150 | revision 15's `START`, from the read to ready | the board's `TSREMPTY` after a `START` that waited for the last word, as MIT's driver's does; revision 15 keeps it as a delay started at the read |
 | `TDONE_AFTER_ABORT_NS` | 125 | `ABORT` setting to Transmit Done | netlist board |
 
 **On QUUX revision 15 the interface keeps the machine's time** (contract G3

@@ -148,12 +148,16 @@ pub const ROUND_NS: u64 = 256 * SLOT_NS;
 /// What one sixteen-bit word costs a station's host to write into the
 /// outgoing buffer: microcode 323's `CHAOS-XMT-2` loop in
 /// `uc-chaos.lisp`, which reads a pair of halfwords out of memory and
-/// writes each into the hardware --- 18 microinstructions and 3 memory
-/// cycles a pair, which on `micro`'s periods is 9 × 145 + 1.5 × 460 a
-/// word.  Measured against a CADR's own driver over W = 9 to 253 words,
-/// the first word written to the read of `START` fits `1,995 ns × W −
-/// 955` on `micro` and `2,050 × W − 907` on `rtl`; the constant, under a
-/// microsecond either way, is not charged.
+/// writes each into the hardware, held by the board's transmit shift
+/// register while the last word shifts in
+/// ([`crate::busint::IoBoardTiming::answer_cycle`]). On `rtl` the loop
+/// writes a pair's two halves 1,305 ns apart and the pairs 2,755 ns apart,
+/// and the register holds every second half to 2,451-2,576 ns after the
+/// first: 2,634 ns a word on the mean. Measured on `rtl` over System 100's
+/// boot, its login and a file probe, packets of W = 11 to 34 words, the
+/// first word written to the read of `START` fits `2,631 ns × W − 278`;
+/// the constant is not charged. `micro` answers every cycle at once, holds
+/// nothing, and writes faster than the board takes words.
 ///
 /// **The CADR's own driver is the station modeled here.** The machine at
 /// the other end of a CHUDP link is not modeled at all --- muir has no
@@ -162,12 +166,13 @@ pub const ROUND_NS: u64 = 256 * SLOT_NS;
 /// the CADR's. That fixes the order of magnitude, which is what the
 /// spacing of a burst turns on: hundreds of microseconds between frames
 /// rather than the one slot a queue would take.
-pub const REFILL_WORD_NS: u64 = 1_995;
+pub const REFILL_WORD_NS: u64 = 2_630;
 
 /// What a station takes from its last frame's end to having the next one
 /// ready to go: `words` writes down the Unibus at [`REFILL_WORD_NS`]
 /// each and the read of `START`, then [`super::board::TSR_READY_NS`] for
-/// the source and check words to be shifted in behind the packet ---
+/// the source and check words to be shifted in behind the packet, as they
+/// are behind a CADR driver's START, which waits for the last word ---
 /// less [`super::board::TDONE_BEFORE_END_NS`], because Transmit Done,
 /// which is what lets the host start writing, comes that much before the
 /// frame's nominal end.
@@ -1046,9 +1051,11 @@ impl Ether {
     /// turn at the first count after the cable idles --- and misses it,
     /// because no host can write a packet into the buffer in a
     /// microsecond --- and goes a whole round later: 257 slots for a
-    /// short frame, 513 for a full one, which is what the netlist board
-    /// takes with its own software (`two_packets_back_to_back_wait_a_whole_round`
-    /// in `tests/chaos_netlist.rs`).
+    /// short frame, as the netlist board takes them
+    /// (`two_packets_back_to_back_wait_a_whole_round` in
+    /// `tests/chaos_netlist.rs`), and 769 for a full one, whose 253 words
+    /// take more than two rounds to write at the pace the board's transmit
+    /// shift register takes them.
     ///
     /// **And the counter runs free.**  While the cable is idle it counts
     /// down on every other terminal count whether anyone is ready or not
