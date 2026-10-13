@@ -1269,7 +1269,8 @@ fn a_1_us_timer_rises_at_clock_1649_the_14th_time() {
 }
 
 /// **The accumulators keep true time over a simulated second at 7, 8, 8.5,
-/// 11 and 19 ns, within one period** (A15b.12): the microsecond clock reads
+/// 11, 19, 48 and 63.5 ns, within one period** (A15b.12), the last the
+/// longest the fabric's period field holds: the microsecond clock reads
 /// k from the first clock at or after k µs, and k − 1 at the clock before;
 /// timer 0 at the tick's period rises at the first clock at or after each
 /// of its edges; the counted real-time clock turns at the first clock at or
@@ -1278,7 +1279,7 @@ fn a_1_us_timer_rises_at_clock_1649_the_14th_time() {
 /// one in whole ns at an odd period.
 #[test]
 fn the_accumulators_keep_true_time_over_a_second() {
-    for period in [14u64, 16, 17, 22, 38] {
+    for period in [14u64, 16, 17, 22, 38, 96, 127] {
         let mut m = Machine::with_geometry(REV15, 1);
         m.period = period;
         let first = |t: u64| t.div_ceil(period);
@@ -1364,7 +1365,7 @@ fn muldiv_clocks(f: u64, period: u64, of_md: bool) -> (u64, Pipeline) {
 /// 8.5 and 19 ns, and one counted from EX's entry.
 #[test]
 fn div_stays_18_clocks_in_ex_and_mul_5() {
-    for period in [17, 38] {
+    for period in [17, 38, 127] {
         assert_eq!(muldiv_clocks(0o43, period, false).0, 17, "DIV at {period}");
         assert_eq!(muldiv_clocks(0o42, period, false).0, 4, "MUL at {period}");
         let (held, e) = muldiv_clocks(0o43, period, true);
@@ -1445,7 +1446,7 @@ fn a_register_takes_a_clock_more_than_nothing() {
 
 /// **An empty sweeps the TLB one entry a clock** (MP2b ruling Q9): a start
 /// after a `WRITE-MAP` empty is granted no sooner than N clocks after the
-/// empty lands, at 8.5 ns and at 19 ns alike. **Fails** N × 10 ns.
+/// empty lands, at 8.5, 19 and 63.5 ns alike. **Fails** N × 10 ns.
 #[test]
 fn an_empty_sweeps_the_tlb_one_entry_a_clock() {
     use muir::pipeline::Event;
@@ -1454,7 +1455,7 @@ fn an_empty_sweeps_the_tlb_one_entry_a_clock() {
     p.op(ALU | SETA | a_src(empty) | fd(0o23));
     p.fill(1);
     p.read(PHYS | 3, 0o20).stop();
-    for period in [17, 38] {
+    for period in [17, 38, 127] {
         let (e, ev) = events(&p, period, muir::pipeline::PortTiming::KRIA);
         let landed =
             ev.iter().position(|&(_, x)| x == Event::Commit(Some(1))).map(|k| ev[k].0).unwrap();

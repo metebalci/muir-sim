@@ -215,9 +215,9 @@ fn expect(m: &Machine, rows: &[(u64, Word, &str)]) {
 
 /// **Feature word 0 says revision 15, and word 25 the microcycle in units
 /// of 0.5 ns** (A15b.1): `micro`'s period is the Kria's 8.5 ns when nothing
-/// says otherwise (MP2b ruling Q14), so 17; 40 ns gives 80 (Q15). On
-/// revision 14 word 25 reads 0, as every unassigned feature word does (the
-/// control). **Fails** a MACHINE-ID left at 14, a word 25 that is not the
+/// says otherwise (MP2b ruling Q14), so 17; 63.5 ns, the longest, gives 127
+/// (Q15; A15b.12). On revision 14 word 25 reads 0, as every unassigned
+/// feature word does (the control). **Fails** a MACHINE-ID left at 14, a word 25 that is not the
 /// engine's period, and one in whole ns doubled, which cannot say 17.
 #[test]
 fn feature_words_0_and_25_say_revision_15_and_its_period() {
@@ -226,13 +226,13 @@ fn feature_words_0_and_25_say_revision_15_and_its_period() {
     let m = run(&p);
     expect(&m, &[(0o20, 0x5155_00f4, "MACHINE-ID"), (0o21, 17, "word 25 at 8.5 ns")]);
     let mut u = Micro::new(machine(&p, REV15, &|_| {}));
-    u.period = 80;
+    u.period = 127;
     u.boot();
     while u.machine().opc != STOP as u16 {
         u.step().unwrap();
     }
     u.run(16);
-    expect(u.machine(), &[(0o21, 80, "word 25 at 40 ns")]);
+    expect(u.machine(), &[(0o21, 127, "word 25 at 63.5 ns, the longest")]);
     let m = run_on(&p, Geometry::QUUX_14, &|_| {}).ok().unwrap();
     expect(m.machine(), &[(0o20, 0x5155_00e4, "revision 14"), (0o21, 0, "no word 25")]);
 }
@@ -1837,6 +1837,39 @@ fn pace_on_revision_15_says_its_period() {
         assert!(out.status.success(), "{engine}:\n{t}");
         let says = "pace: the machine's own speed, 8.5 ns a microcycle;";
         assert!(t.contains(says), "{engine}: no `{says}`:\n{t}");
+    }
+}
+
+/// **`--microcycle-ns` is 5 to 63.5 ns in steps of 0.5** (A15b.12), the
+/// fabric's period field, seven bits of 0.5 ns: 48, 50 and 63.5 run, and
+/// their `--pace` line says the period as given; 64 and 4.5, past either
+/// end, and 40.25, off the step, are usage errors that say the range.
+/// **Fails** a range that stops at 40 ns (48 refused) or one that takes
+/// 64.
+#[test]
+fn the_period_is_5_to_63_5_ns() {
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-period-range");
+    let prom = memory_loop_prom(&dir);
+    for ns in ["5", "40", "48", "50", "63.5"] {
+        let out = quux_15("micro", &[])
+            .args(["--pace", "--microcycle-ns", ns, "--stop-after", "10", "--prom"])
+            .arg(&prom)
+            .run();
+        let t = text(&out);
+        assert!(out.status.success(), "--microcycle-ns {ns}:\n{t}");
+        let says = format!("pace: the machine's own speed, {ns} ns a microcycle;");
+        assert!(t.contains(&says), "--microcycle-ns {ns}: no `{says}`:\n{t}");
+    }
+    for ns in ["64", "4.5", "40.25", "127"] {
+        let out = quux_15("micro", &[])
+            .args(["--microcycle-ns", ns, "--stop-after", "10", "--prom"])
+            .arg(&prom)
+            .run();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "--microcycle-ns {ns}: not a usage error:\n{err}");
+        let says = "--microcycle-ns wants the period in ns, 5 to 63.5 in steps of 0.5";
+        assert!(err.contains(says), "--microcycle-ns {ns}: the refusal is not `{says}`:\n{err}");
     }
 }
 

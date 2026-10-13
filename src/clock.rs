@@ -248,12 +248,13 @@ impl TimeBase {
 /// binding fit sets one (contract G3 revision 15, §12.1; MP2b ruling Q14).
 pub const PERIOD_15: u64 = 17;
 
-/// `--microcycle-ns`'s range in units of 0.5 ns: 5 to 40 ns (A15b.12).
-pub const PERIOD_15_RANGE: std::ops::RangeInclusive<u64> = 10..=80;
+/// `--microcycle-ns`'s range in units of 0.5 ns: 5 to 63.5 ns (A15b.12),
+/// all the fabric's period field holds, seven bits of 0.5 ns.
+pub const PERIOD_15_RANGE: std::ops::RangeInclusive<u64> = 10..=127;
 
 /// The period `--microcycle-ns <n>` names, in units of 0.5 ns: a whole
-/// number of ns, or one with `.5` (`.0` allowed), from 5 to 40 (MP2b
-/// ruling Q15). Anything else is `None`.
+/// number of ns, or one with `.5` (`.0` allowed), from 5 to 63.5 (MP2b
+/// ruling Q15; A15b.12). Anything else is `None`.
 pub fn parse_microcycle_ns(text: &str) -> Option<u64> {
     let (whole, half) = match text.split_once('.') {
         None => (text, 0),

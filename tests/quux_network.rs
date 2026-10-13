@@ -273,6 +273,24 @@ fn a_frame_s_delivery_at_19_ns_lands_at_the_rule_s_clock() {
     assert_eq!(looped_back_15(38, 5, 2_000), want);
 }
 
+/// **The same at 48 and 63.5 ns**, periods of 96 and 127 units, 127 the
+/// longest the fabric's period field holds (A15b.12). The count is bit
+/// 7's second rise, count 512, at 260,250 ns, between clocks at both, with
+/// START read early enough to be ready by it. At 48 ns the frame on
+/// the cable at clock 5,432, Transmit Done at 5,844 and Receive Done at
+/// 5,862; at 63.5 ns at 4,107, 4,419 and 4,432.
+#[test]
+fn a_frame_s_delivery_at_48_and_63_5_ns_lands_at_the_rule_s_clock() {
+    for (p, start, want) in
+        [(96, 5_300, [5_432, 5_844, 5_862]), (127, 4_000, [4_107, 4_419, 4_432])]
+    {
+        let edge = turn_edge(512);
+        assert_ne!(edge % p, 0, "{p}: the edge falls between clocks");
+        assert_eq!(by_the_rule(p, edge), want.map(Some), "{p}: the rule's clocks");
+        assert_eq!(looped_back_15(p, start, want[2] + 100), want.map(Some), "at {p} units");
+    }
+}
+
 /// **The turn timer acts at the first clock at or after its edge**, here
 /// one that falls between clocks: at 8.5 ns bit 7's second rise is count
 /// 512, whose edge at 260,250 ns is 6 units before clock 30,618. START

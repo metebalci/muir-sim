@@ -1789,7 +1789,7 @@ const HELP: &[(Whose, &str)] = &[
     (
         Whose::Quux,
         "  --microcycle-ns <ns>         QUUX revision 15: the clock's period, the
-                               microcycle, 5 to 40 in steps of 0.5, on both
+                               microcycle, 5 to 63.5 in steps of 0.5, on both
                                engines. [default: 8.5, the Kria KR260's]",
     ),
     (
@@ -5782,7 +5782,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 }
                 microcycle = args.next().as_deref().and_then(crate::clock::parse_microcycle_ns);
                 if microcycle.is_none() {
-                    usage("--microcycle-ns wants the period in ns, 5 to 40 in steps of 0.5");
+                    usage("--microcycle-ns wants the period in ns, 5 to 63.5 in steps of 0.5");
                 }
             }
             (None, "--sync-cycle-ticks") if geometry.extended() => {

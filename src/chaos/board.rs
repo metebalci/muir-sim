@@ -1284,12 +1284,14 @@ mod tests {
     /// of `Q`, the counter values either side of its wrap, and runs from
     /// one count to a thousand --- more than the byte's own period, so
     /// the wrap is crossed several times over. And on revision 15's grid,
-    /// at 8.5 and 19 ns, where a count is taken at the first clock at or
-    /// after its edge: a run to the clock of its last count, and one to
-    /// the instant before the next count's clock, take the same counts.
+    /// at 8.5, 19 and 63.5 ns, where a count is taken at the first clock
+    /// at or after its edge: a run to the clock of its last count, and one
+    /// to the instant before the next count's clock, take the same counts.
     #[test]
     fn a_batched_run_of_terminal_counts_is_a_stepped_one() {
-        for time in [TimeBase::NS, TimeBase::half_ns(17), TimeBase::half_ns(38)] {
+        let times =
+            [TimeBase::NS, TimeBase::half_ns(17), TimeBase::half_ns(38), TimeBase::half_ns(127)];
+        for time in times {
             for q in [false, true] {
                 for low in [0u8, 1, 2, 127, 128, 254, 255] {
                     for n in [1u64, 2, 3, 4, 5, 17, 254, 255, 256, 257, 511, 512, 1_000] {
