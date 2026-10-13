@@ -331,6 +331,10 @@ struct Waiting {
     at: u64,
     source: u16,
     buffer: Vec<u16>,
+    /// The behavioral board's frame as its transmit buffer plays it out,
+    /// source and check word included; `None` for a node's, which
+    /// [`frame`] makes of `buffer`.
+    line: Option<Vec<u16>>,
     /// Whether `at` is the transmitter's own instant --- the board's turn
     /// timer's, or a transmitter's that has not heard the cable --- which
     /// goes then, busy or not, rather than a turn, which goes then if the
@@ -474,12 +478,15 @@ impl Ether {
         });
     }
 
-    /// The behavioral board's frame to send, cable destination last, and
-    /// the instant its turn timer starts it: it goes then, busy cable or
-    /// not, and [`Ether::board_sending_until`] says when it ends.
-    pub fn board_send(&mut self, buffer: Vec<u16>, start: u64) {
+    /// The behavioral board's frame to send, as its transmit buffer holds
+    /// it --- the words, the source and the check word, each frame's last
+    /// two, or what a buffer written past its end leaves
+    /// ([`super::packet::line`]) --- and the instant its turn timer starts
+    /// it: it goes then, busy cable or not, and
+    /// [`Ether::board_sending_until`] says when it ends.
+    pub fn board_send(&mut self, line: Vec<u16>, start: u64) {
         if let Some(b) = self.board.as_mut() {
-            b.pending = Some((start, buffer));
+            b.pending = Some((start, line));
             b.sending_until = None;
         }
     }
@@ -495,6 +502,7 @@ impl Ether {
             at: now,
             source,
             buffer,
+            line: None,
             committed: true,
             deaf: true,
             station: false,
@@ -883,8 +891,14 @@ impl Ether {
     }
 
     /// A frame starts on the cable at `now`.
-    fn start(&mut self, now: u64, me: u16, buffer: Vec<u16>, deaf: bool) {
-        let bits = frame(&buffer, me);
+    fn start(&mut self, now: u64, me: u16, buffer: Vec<u16>, line: Option<Vec<u16>>, deaf: bool) {
+        // A line of fewer than three words has no destination word for a
+        // receiver to decide on.
+        let has_dest = line.as_ref().is_none_or(|l| l.len() >= 3);
+        let bits = match &line {
+            Some(l) => super::packet::line(l),
+            None => frame(&buffer, me),
+        };
         if self.logging {
             self.record(Event::Sent(now, me, buffer.clone()));
         }
@@ -909,7 +923,7 @@ impl Ether {
         self.sending.push(Transmission {
             source: me,
             dest,
-            dest_at: self.board.as_ref().map(|_| now + dest_after),
+            dest_at: self.board.as_ref().filter(|_| has_dest).map(|_| now + dest_after),
             ract_at: self.board.as_ref().map(|_| now + ract_after),
             ract_off: false,
             buffer,
@@ -959,12 +973,14 @@ impl Ether {
         if let Some(b) = self.board.as_mut()
             && b.pending.as_ref().is_some_and(|&(t, _)| t <= now)
         {
-            let (at, buffer) = b.pending.take().unwrap();
+            let (at, line) = b.pending.take().unwrap();
             let source = b.address;
+            let buffer = line[..line.len().saturating_sub(2)].to_vec();
             self.waiting.push(Waiting {
                 at,
                 source,
                 buffer,
+                line: Some(line),
                 committed: true,
                 deaf: false,
                 station: false,
@@ -989,6 +1005,7 @@ impl Ether {
                         at,
                         source,
                         buffer,
+                        line: None,
                         committed: false,
                         deaf: false,
                         station,
@@ -1027,7 +1044,7 @@ impl Ether {
         self.waiting = rest;
         for w in due {
             if w.committed || !busy {
-                self.start(now, w.source, w.buffer, w.deaf);
+                self.start(now, w.source, w.buffer, w.line, w.deaf);
             } else {
                 // Someone took the cable first: wait for it to clear.
                 self.waiting.push(Waiting { at: now + self.ns(1), ..w });

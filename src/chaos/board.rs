@@ -23,7 +23,7 @@
 
 use super::ether::{Ether, turn_byte};
 use super::interface::{self, csr};
-use super::packet::{Framed, Received, check_word, frame};
+use super::packet::{Framed, Received, check_on, check_word, unframe_any};
 use super::wire;
 use crate::clock::TimeBase;
 use std::collections::VecDeque;
@@ -38,6 +38,43 @@ const WRITABLE: u16 = csr::TIMER_INT_ENABLE
     | csr::SPY
     | csr::RECEIVE_INT_ENABLE
     | csr::TRANSMIT_INT_ENABLE;
+
+/// Both buffers are a 2147, 4K by 1: the outgoing one at LMTBUF 0C10 on
+/// the twelve bits of `TBCT`, off the 25LS193s at 0C11-0C13, and the
+/// incoming one at LMRBUF 0C04 on `RBCT`. The bits each holds, and the
+/// sixteen-bit words. Each count wraps, so neither buffer has an end: a
+/// word written past the 256th goes over the first, and so does a bit
+/// received past the 4,096th, and the reads go round
+/// (`tests/chaos_rtl.rs`: `a_frame_written_past_the_buffer_wraps_on_both_alike`,
+/// `a_frame_longer_than_the_buffer_keeps_its_last_4096_bits_on_both_alike`,
+/// `reading_on_goes_round_the_buffer_on_both_alike`).
+const BUFFER_BITS: usize = 4_096;
+const BUFFER_WORDS: usize = BUFFER_BITS / 16;
+
+/// What a word of the incoming buffer never written reads as: the
+/// netlist's 2147 starts with its cells clear, which the read path gives
+/// back as ones (`reading_on_goes_round_the_buffer_on_both_alike` reads it
+/// past a short frame). A real 2147 holds nothing defined at power-up;
+/// what a CADR's read there is **unverified**, and only a board would say.
+const NEVER_WRITTEN: u16 = 0o177777;
+
+/// The incoming buffer's word that the last bit of `bits` received is in,
+/// counting from the word the first bit went into: where `RBCT` leaves the
+/// first read.
+fn top_word(bits: usize) -> usize {
+    (bits + BUFFER_BITS - 1) % BUFFER_BITS / 16
+}
+
+/// From a frame's turn to Transmit Done when the transmit count is 0 and
+/// there is nothing to send --- 254 words written, the source and check
+/// words taking the count round to 0: `TSTART` at the count, `TBUSY` 93 ns
+/// on and `TDONE` 125 ns after that, and nothing on the line. Measured on
+/// the netlist board.
+pub const EMPTY_TDONE_NS: u64 = 218;
+
+/// The most words a frame can be written with and go out whole, the
+/// source and check words after them: 253, 4,080 bits.
+const LONGEST_WRITTEN: usize = BUFFER_WORDS - 3;
 
 /// How often the cable is looked at while nothing is known to be due: a
 /// node with a frame to send is asked only then, so this bounds the extra
@@ -158,7 +195,9 @@ struct Turn {
     /// Frames seen starting on the cable, this interface's own included:
     /// first edge, source, nominal end.  Kept while they can matter.
     frames: Vec<(u64, u16, u64)>,
-    /// A packet started: `TSREMPTY` at, and its words.
+    /// A packet started: `TSREMPTY` at, and the words its transmit buffer
+    /// will play out, the source and check word last
+    /// ([`super::packet::line`]).
     ready: Option<(u64, Vec<u16>)>,
 }
 
@@ -264,12 +303,20 @@ pub struct Interface {
     crc_error: bool,
     /// Packets that came while the buffer was full, four bits.
     lost: u8,
-    /// The outgoing buffer, as written, destination last.
+    /// The outgoing buffer, word `k` of a frame at `k mod 256`: the words
+    /// written so far, round the buffer once 256 have been. How many have
+    /// been written, and the check of every one of them, which the checker
+    /// takes as each is shifted in.
     xmit: Vec<u16>,
-    /// The incoming buffer --- the words as written, destination, source,
-    /// check --- and how far it has been read.
+    xmit_n: usize,
+    xmit_check: u16,
+    /// The incoming buffer, all 256 words, in the order the frame in it
+    /// is read --- its words, destination, source, check, and on round the
+    /// buffer to what was there before --- and how many reads it has had,
+    /// and the check of the words read.
     rcv: Vec<u16>,
     rcv_at: usize,
+    rcv_check: u16,
     /// The bits the receiver took for what is in the buffer, the trailing
     /// zero stripped: a whole number of words for a packet, and whatever
     /// came for wreckage, whose last partial word is read back padded.
@@ -320,8 +367,11 @@ impl Clone for Interface {
             crc_error: self.crc_error,
             lost: self.lost,
             xmit: self.xmit.clone(),
+            xmit_n: self.xmit_n,
+            xmit_check: self.xmit_check,
             rcv: self.rcv.clone(),
             rcv_at: self.rcv_at,
+            rcv_check: self.rcv_check,
             rcv_bits: self.rcv_bits,
             tdone_at: self.tdone_at,
             incoming: self.incoming.clone(),
@@ -359,8 +409,11 @@ impl Interface {
             crc_error: false,
             lost: 0,
             xmit: Vec::new(),
-            rcv: Vec::new(),
+            xmit_n: 0,
+            xmit_check: 0,
+            rcv: vec![NEVER_WRITTEN; BUFFER_WORDS],
             rcv_at: 0,
+            rcv_check: 0,
             rcv_bits: 0,
             tdone_at: None,
             incoming: VecDeque::new(),
@@ -446,24 +499,71 @@ impl Interface {
     /// "The number of bits in the incoming packet buffer, minus one.
     /// After the whole packet has been read out, it will contain 7777."
     /// Before any packet, and after a Reset or a Clear Receiver, the
-    /// netlist board reads 0 (`tests/cadrio_netlist.rs`). The count comes
-    /// down by what each read takes: sixteen bits a word, and only the
-    /// bits there are for the partial word wreckage puts at the top ---
-    /// the netlist board reads 15 with one whole word left of 222 bits
-    /// (`tests/chaos_rtl.rs`).
+    /// netlist board reads 0 (`tests/cadrio_netlist.rs`).
+    ///
+    /// It is `RBCT` less one, in twelve bits. The receiver leaves `RBCT` at
+    /// the bits it took, round the buffer if there were more than 4,096 ---
+    /// 15 for 4,112. The first read takes it down to the word boundary
+    /// below the last bit, the bits there are for a partial word at the
+    /// top --- the netlist board reads 15 with one whole word left of 222
+    /// bits (`tests/chaos_rtl.rs`) --- and each read after takes sixteen,
+    /// past `7777` and round, never stopping
+    /// (`reading_on_goes_round_the_buffer_on_both_alike`).
     pub fn bit_count(&self) -> u16 {
         if !self.receive_done {
             return 0;
         }
-        let top = self.rcv_bits - (self.rcv.len().saturating_sub(1)) * 16;
-        let read = match self.rcv_at {
-            0 => 0,
-            k => top + (k - 1) * 16,
+        let rbct = match self.rcv_at {
+            0 => self.rcv_bits % BUFFER_BITS,
+            k => {
+                (16 * top_word(self.rcv_bits) + BUFFER_BITS - 16 * ((k - 1) % BUFFER_WORDS))
+                    % BUFFER_BITS
+            }
         };
-        match self.rcv_bits.saturating_sub(read) {
-            0 => 0o7777,
-            left => (left as u16 - 1) & 0o7777,
+        ((rbct + BUFFER_BITS - 1) % BUFFER_BITS) as u16
+    }
+
+    /// Read `k` of the frame in the incoming buffer: the buffer's words
+    /// round and round from the frame's first, the first read with zeros
+    /// above the frame's last bit when that is inside a word. The bits
+    /// above it in the buffer --- an earlier frame's, or the same frame's a
+    /// lap before --- the first read does not see, and read 256 does
+    /// (`reading_on_goes_round_the_buffer_on_both_alike`,
+    /// `a_frame_longer_than_the_buffer_keeps_its_last_4096_bits_on_both_alike`).
+    fn rcv_word(&self, k: usize) -> u16 {
+        let w = self.rcv[k % BUFFER_WORDS];
+        let pad = (16 - self.rcv_bits % 16) % 16;
+        if k == 0 { w & (u16::MAX >> pad) } else { w }
+    }
+
+    /// A frame of `bits` bits, whose words read back whole are `words`,
+    /// into the incoming buffer. Every bit goes in at `RBCT`, from 0, and
+    /// takes it on one, so past the 4,096th a bit goes over the first
+    /// ones and the buffer holds the frame's last 4,096. A frame comes check
+    /// word first and the words the software reads first last, so those
+    /// are what is kept; and a partial top word goes over only the bits it
+    /// has, the rest of that word holding what it held.
+    fn land(&mut self, words: &[u16], bits: usize) {
+        let was = top_word(self.rcv_bits);
+        let mut ram: Vec<u16> =
+            (0..BUFFER_WORDS).map(|j| self.rcv[(was + BUFFER_WORDS - j) % BUFFER_WORDS]).collect();
+        let n = words.len();
+        let pad = (16 - bits % 16) % 16;
+        for k in (0..n).rev() {
+            let j = (n - 1 - k) % BUFFER_WORDS;
+            ram[j] = if k == 0 && pad > 0 {
+                let low = u16::MAX >> pad;
+                (ram[j] & !low) | (words[0] & low)
+            } else {
+                words[k]
+            };
         }
+        let top = top_word(bits);
+        self.rcv =
+            (0..BUFFER_WORDS).map(|k| ram[(top + BUFFER_WORDS - k) % BUFFER_WORDS]).collect();
+        self.rcv_bits = bits;
+        self.rcv_at = 0;
+        self.rcv_check = 0;
     }
 
     /// The Unibus interrupt this interface is requesting, if it is.
@@ -668,11 +768,24 @@ impl Interface {
 
     /// The turn has come at terminal count `t`: the packet ready goes out
     /// from `start`, on the cable, or back to this receiver under Loop
-    /// Back, or into the void with no cable.
+    /// Back, or into the void with no cable. With nothing in the buffer to
+    /// send, nothing goes and Transmit Done comes [`EMPTY_TDONE_NS`] after
+    /// the count.
     fn launch(&mut self, start: u64, t: u64) {
-        let Some((ready_at, buffer)) = self.turn.ready.take() else { return };
+        let Some((ready_at, line)) = self.turn.ready.take() else { return };
         let time = self.time;
-        let bits = frame(&buffer, self.address).len() as u64;
+        if line.is_empty() {
+            self.tdone_at = Some(time.after(t, time.ns(EMPTY_TDONE_NS)));
+            if self.trace {
+                eprintln!(
+                    "chaos {t:>6}: interface {:o}'s turn, its frame ready since {ready_at}, and nothing to send",
+                    self.address
+                );
+            }
+            return;
+        }
+        let cells = super::packet::line(&line);
+        let bits = cells.len() as u64;
         let length = bits * time.ns(wire::CELL_NS);
         let end = start + length;
         if self.trace {
@@ -685,17 +798,12 @@ impl Interface {
             self.turn.frames.push((start, self.address, end));
             self.tdone_at = Some(time.after(start, length - time.ns(TDONE_BEFORE_END_NS)));
             if self.csr & csr::LOOP_BACK != 0 {
-                let mut over = buffer.clone();
-                over.push(self.address);
-                let check = check_word(&over);
-                let bits = (buffer.len() + 2) * 16;
-                let framed = Framed { buffer, source: self.address, check, check_ok: true };
-                let r = Received { framed, bits };
+                let r = unframe_any(&cells);
                 self.incoming.push_back((time.after(start, length + time.ns(CBLBSY_OFF_NS)), r));
                 self.incoming.make_contiguous().sort_by_key(|&(t, _)| t);
             }
         } else if let Some(e) = self.ether.as_mut() {
-            e.board_send(buffer, start);
+            e.board_send(line, start);
         }
     }
 
@@ -721,8 +829,18 @@ impl Interface {
     /// with the buffer full is a frame looped back inside the interface,
     /// where the cable is unused and the ether sees nothing: it is
     /// counted here.
+    ///
+    /// **A run of 48 bits or fewer is not taken**, the check, source and
+    /// destination words and nothing after them, though its destination
+    /// matched: the board's own frame of 48 bits, 257 words written, does
+    /// not land, and of 64, 258 written, does
+    /// (`a_frame_written_past_the_buffer_wraps_on_both_alike` in
+    /// `tests/chaos_rtl.rs`).
     fn arrive(&mut self, now: u64, r: &Received) {
         let Some(&dest) = r.framed.buffer.last() else { return };
+        if r.bits <= 48 {
+            return;
+        }
         let mine = dest == self.address || dest == 0 || self.csr & csr::SPY != 0;
         if !mine {
             return;
@@ -753,11 +871,10 @@ impl Interface {
                 }
             );
         }
-        self.rcv = f.buffer.clone();
-        self.rcv.push(f.source);
-        self.rcv.push(f.check);
-        self.rcv_at = 0;
-        self.rcv_bits = bits;
+        let mut words = f.buffer.clone();
+        words.push(f.source);
+        words.push(f.check);
+        self.land(&words, bits);
         self.crc_error = !f.check_ok;
         self.receive_done = true;
         self.tell_the_cable();
@@ -774,19 +891,27 @@ impl Interface {
                         "chaos {now:>6}: interface {:o} read its CSR with a packet waiting, {} of {} words read",
                         self.address,
                         self.rcv_at,
-                        self.rcv.len()
+                        self.rcv_bits.div_ceil(16)
                     );
                 }
                 self.csr()
             }
             interface::MY_ADDRESS => self.address,
-            interface::READ_BUFFER => {
-                let w = self.rcv.get(self.rcv_at).copied().unwrap_or(0);
-                if self.rcv_at < self.rcv.len() {
-                    self.rcv_at += 1;
-                }
+            // **CRC Error from the first read on is the check of the words
+            // read**, [`check_word`] over them not zero: the read-out runs
+            // the buffer through the checker, which AIM-628 §7 makes right
+            // "when the packet has been completely read out". So it is up
+            // partway through a good frame and down at its end, and a
+            // frame that lost its check word to the wrap reads out with it
+            // up. The check is carried from read to read.
+            interface::READ_BUFFER if self.receive_done => {
+                let w = self.rcv_word(self.rcv_at);
+                self.rcv_at += 1;
+                self.rcv_check = check_on(self.rcv_check, &[w]);
+                self.crc_error = self.rcv_check != 0;
                 w
             }
+            interface::READ_BUFFER => 0,
             interface::BIT_COUNT => self.bit_count(),
             interface::START => {
                 self.start(now);
@@ -812,18 +937,20 @@ impl Interface {
                             "chaos {now:>6}: interface {:o} cleared its receiver, {} of {} words read{}",
                             self.address,
                             self.rcv_at,
-                            self.rcv.len(),
+                            self.rcv_bits.div_ceil(16),
                             if self.receive_done { "" } else { ", buffer already free" }
                         );
                     }
                     self.receive_done = false;
                     self.crc_error = false;
-                    self.rcv.clear();
                     self.rcv_at = 0;
+                    self.rcv_check = 0;
                     self.lost = 0;
                 }
                 if v & csr::CLEAR_TRANSMITTER != 0 {
                     self.xmit.clear();
+                    self.xmit_n = 0;
+                    self.xmit_check = 0;
                     self.turn.ready = None;
                     self.tdone_at = None;
                     self.transmit_abort = false;
@@ -837,14 +964,17 @@ impl Interface {
                         self.address
                     );
                 }
-                // The outgoing buffer is the 2147 at LMTBUF 0C10, 4K by 1,
-                // addressed by `TBCT<11:0>` from the three 25LS193s at
-                // 0C11-0C13: 4,096 bits, 256 sixteen-bit words, and a word
-                // past that has nowhere to go.  The incoming buffer is its
-                // twin, the 2147 at LMRBUF 0C04 on `RBCT<11:0>`.
-                if self.xmit.len() < 256 {
+                // The word goes in at `TBCT`, which takes it on sixteen in
+                // twelve bits: past the 256th word it goes over the first
+                // ([`BUFFER_WORDS`]). The checker takes it as it shifts in.
+                let at = self.xmit_n % BUFFER_WORDS;
+                if at < self.xmit.len() {
+                    self.xmit[at] = v;
+                } else {
                     self.xmit.push(v);
                 }
+                self.xmit_n += 1;
+                self.xmit_check = check_on(self.xmit_check, &[v]);
                 self.transmit_done = false;
                 self.transmit_abort = false;
             }
@@ -865,8 +995,10 @@ impl Interface {
         self.crc_error = false;
         self.lost = 0;
         self.xmit.clear();
-        self.rcv.clear();
+        self.xmit_n = 0;
+        self.xmit_check = 0;
         self.rcv_at = 0;
+        self.rcv_check = 0;
         self.tdone_at = None;
         self.incoming.clear();
         self.turn.ready = None;
@@ -888,14 +1020,33 @@ impl Interface {
     /// (`an_empty_start_lowers_transmit_done_until_its_frame_ends` in
     /// `tests/chaos_netlist.rs`). On revision 15 the fall is at the read's
     /// own clock, `now`, with no delay to round.
+    ///
+    /// **What goes out is what the buffer holds below `TBCT`.** The source
+    /// and the check word --- the check of every word written and the
+    /// source --- go in at the count like the words, so for `n` words
+    /// written the frame is `(16n + 32) mod 4096` bits: the words, the
+    /// source and the check for up to 253, nothing for 254, and from 255
+    /// the check word and what the wrap left below it
+    /// (`a_frame_written_past_the_buffer_wraps_on_both_alike` in
+    /// `tests/chaos_rtl.rs`).
     fn start(&mut self, now: u64) {
         self.transmit_done = false;
-        let buffer = std::mem::take(&mut self.xmit);
+        let n = std::mem::take(&mut self.xmit_n);
+        let check = check_on(std::mem::take(&mut self.xmit_check), &[self.address]);
+        let mut line = std::mem::take(&mut self.xmit);
+        for (k, w) in [(n, self.address), (n + 1, check)] {
+            let at = k % BUFFER_WORDS;
+            if at < line.len() {
+                line[at] = w;
+            } else {
+                line.push(w);
+            }
+        }
+        line.truncate((n + 2) % BUFFER_WORDS);
         if self.trace {
             eprintln!(
-                "chaos {now:>6}: interface {:o} read START, {} words in its transmit buffer",
+                "chaos {now:>6}: interface {:o} read START, {n} words in its transmit buffer",
                 self.address,
-                buffer.len()
             );
         }
         let ready = if self.time.period == 0 {
@@ -903,7 +1054,7 @@ impl Interface {
         } else {
             self.time.after(now, self.time.ns(TSR_READY_NS))
         };
-        self.turn.ready = Some((ready, buffer));
+        self.turn.ready = Some((ready, line));
     }
 }
 
@@ -924,8 +1075,11 @@ impl Interface {
             crc_error,
             lost,
             xmit,
+            xmit_n,
+            xmit_check,
             rcv,
             rcv_at,
+            rcv_check: _,
             rcv_bits,
             tdone_at,
             incoming,
@@ -944,8 +1098,30 @@ impl Interface {
         w.bool(*receive_done);
         w.bool(*crc_error);
         w.u8(*lost);
-        w.u16s(xmit);
-        w.u16s(rcv);
+        // The outgoing buffer as the words written, as it always was while
+        // there are 256 or fewer; past that, its 256 words, then how many
+        // were written past a multiple of 256 and the check of them all,
+        // which nothing shorter could be. Every field keeps its type, so a
+        // checkpoint written by a board, which writes an empty buffer,
+        // still loads.
+        if *xmit_n <= BUFFER_WORDS {
+            w.u16s(xmit);
+        } else {
+            let mut v = xmit.clone();
+            v.push((xmit_n % BUFFER_WORDS) as u16);
+            v.push(*xmit_check);
+            w.u16s(&v);
+        }
+        // The incoming buffer whole, its 256 words in the order the frame
+        // in it is read; the check of the words read is made again on load.
+        // A buffer never written is written empty, as it always was, which
+        // keeps a checkpoint of a machine that never took a frame the bytes
+        // it had (`a_cadr_checkpoint_keeps_version_49_s_bytes`).
+        if rcv.iter().all(|&w| w == NEVER_WRITTEN) {
+            w.u16s(&[]);
+        } else {
+            w.u16s(rcv);
+        }
         w.u64(*rcv_at as u64);
         w.u64(*rcv_bits as u64);
         w.opt(*tdone_at, crate::checkpoint::Writer::u64);
@@ -958,7 +1134,7 @@ impl Interface {
             w.bool(r.framed.check_ok);
             w.u64(r.bits as u64);
         }
-        turn.save(w);
+        turn.save(w, *address);
         w.u64(*polled);
     }
 
@@ -978,10 +1154,39 @@ impl Interface {
         self.receive_done = r.bool()?;
         self.crc_error = r.bool()?;
         self.lost = r.u8()?;
-        self.xmit = r.u16s()?;
-        self.rcv = r.u16s()?;
-        self.rcv_at = r.u64()? as usize;
-        self.rcv_bits = r.u64()? as usize;
+        let xmit = r.u16s()?;
+        if xmit.len() <= BUFFER_WORDS {
+            self.xmit_n = xmit.len();
+            self.xmit_check = check_word(&xmit);
+            self.xmit = xmit;
+        } else if xmit.len() == BUFFER_WORDS + 2 {
+            self.xmit_n = 2 * BUFFER_WORDS + xmit[BUFFER_WORDS] as usize % BUFFER_WORDS;
+            self.xmit_check = xmit[BUFFER_WORDS + 1];
+            self.xmit = xmit[..BUFFER_WORDS].to_vec();
+        } else {
+            return Err(crate::checkpoint::bad(format!(
+                "a Chaosnet transmit buffer of {} words",
+                xmit.len()
+            )));
+        }
+        let rcv = r.u16s()?;
+        let rcv_at = r.u64()? as usize;
+        let rcv_bits = r.u64()? as usize;
+        if rcv.len() == BUFFER_WORDS {
+            self.rcv = rcv;
+            self.rcv_bits = rcv_bits;
+        } else {
+            // Written before the buffer was kept whole: the frame's words
+            // alone, landed in a buffer never written.
+            self.rcv = vec![NEVER_WRITTEN; BUFFER_WORDS];
+            self.rcv_bits = 0;
+            if !rcv.is_empty() {
+                self.land(&rcv, rcv_bits);
+            }
+            self.rcv_bits = rcv_bits;
+        }
+        self.rcv_at = rcv_at;
+        self.rcv_check = (0..rcv_at).fold(0, |c, k| check_on(c, &[self.rcv_word(k)]));
         self.tdone_at = r.opt(crate::checkpoint::Reader::u64)?;
         let n = r.u64()?;
         let mut incoming = VecDeque::new();
@@ -996,7 +1201,7 @@ impl Interface {
             incoming.push_back((at, Received { framed, bits }));
         }
         self.incoming = incoming;
-        self.turn.load(r)?;
+        self.turn.load(r, self.address)?;
         self.polled = r.u64()?;
         self.next_event = None;
         self.tell_the_cable();
@@ -1005,7 +1210,11 @@ impl Interface {
 }
 
 impl Turn {
-    fn save(&self, w: &mut crate::checkpoint::Writer) {
+    /// A frame ready is written as the words written when it is a frame
+    /// of them, the source and the check word --- as it always was --- and
+    /// otherwise as its words and 512 more, which no buffer of words
+    /// written ever was: what a buffer written past its end holds.
+    fn save(&self, w: &mut crate::checkpoint::Writer, me: u16) {
         let Turn { powered_at, taken, q, low, frames, ready } = self;
         w.u64(*powered_at);
         w.u64(*taken);
@@ -1018,13 +1227,24 @@ impl Turn {
             w.u64(*c);
         }
         w.bool(ready.is_some());
-        if let Some((at, words)) = ready {
+        if let Some((at, line)) = ready {
             w.u64(*at);
-            w.u16s(words);
+            let m = line.len();
+            let written = m >= 2
+                && m - 2 <= LONGEST_WRITTEN
+                && line[m - 2] == me
+                && line[m - 1] == check_word(&line[..m - 1]);
+            if written {
+                w.u16s(&line[..m - 2]);
+            } else {
+                let mut v = line.clone();
+                v.resize(m + 2 * BUFFER_WORDS, 0);
+                w.u16s(&v);
+            }
         }
     }
 
-    fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()> {
+    fn load(&mut self, r: &mut crate::checkpoint::Reader, me: u16) -> std::io::Result<()> {
         self.powered_at = r.u64()?;
         self.taken = r.u64()?;
         self.q = r.bool()?;
@@ -1032,7 +1252,19 @@ impl Turn {
         let n = r.u64()?;
         self.frames =
             (0..n).map(|_| Ok((r.u64()?, r.u16()?, r.u64()?))).collect::<std::io::Result<_>>()?;
-        self.ready = if r.bool()? { Some((r.u64()?, r.u16s()?)) } else { None };
+        self.ready = if r.bool()? {
+            let at = r.u64()?;
+            let mut v = r.u16s()?;
+            if v.len() >= 2 * BUFFER_WORDS {
+                v.truncate(v.len() - 2 * BUFFER_WORDS);
+            } else {
+                v.push(me);
+                v.push(check_word(&v));
+            }
+            Some((at, v))
+        } else {
+            None
+        };
         Ok(())
     }
 }
@@ -1082,6 +1314,95 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// **CRC Error over a long read-out costs a read apiece.** The check
+    /// of the words read is carried from read to read, not made again over
+    /// all of them: 100,000 reads of a looped-back packet, round and round
+    /// the buffer, take well under the bound, and CRC Error after them is
+    /// the check of every word read.
+    #[test]
+    fn a_long_read_out_keeps_its_check_as_it_goes() {
+        let mut i = Interface::new(0o3050, None, 0, false);
+        let mut now = 12_000;
+        i.write(interface::CSR, csr::RESET, now);
+        i.write(interface::CSR, csr::LOOP_BACK | csr::CLEAR_RECEIVER, now);
+        for w in [0o125252, 0o052525, 0o177400, 0o000377, 0o007417, 0o3050] {
+            i.write(interface::WRITE_BUFFER, w, now);
+        }
+        i.read(interface::START, now);
+        while i.csr() & csr::RECEIVE_DONE == 0 {
+            now += 1_000;
+            i.advance(now);
+            assert!(now < 3_000_000, "the packet looped back");
+        }
+        let started = std::time::Instant::now();
+        let read: Vec<u16> = (0..100_000).map(|_| i.read(interface::READ_BUFFER, now)).collect();
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(5), "100,000 reads took {took:?}");
+        assert_eq!(
+            i.read(interface::CSR, now) & csr::CRC_ERROR != 0,
+            check_word(&read) != 0,
+            "CRC Error after them is the check of the words read"
+        );
+    }
+
+    /// The interface through a checkpoint and back, onto one at the same
+    /// switches.
+    fn through_a_checkpoint(i: &Interface) -> Interface {
+        let mut w = crate::checkpoint::Writer::new();
+        i.save(&mut w);
+        let bytes = w.finish();
+        let mut j = Interface::new(i.address, None, 0, false);
+        j.load(&mut crate::checkpoint::Reader::new(&bytes)).unwrap();
+        j
+    }
+
+    /// **A checkpoint keeps both buffers as they are, round and all.** A
+    /// transmit buffer written past its end, the frame START left ready
+    /// from one, and a received frame partway read out: each resumed goes
+    /// on as it would have.
+    #[test]
+    fn a_checkpoint_keeps_both_buffers_round_and_all() {
+        let mut i = Interface::new(0o3050, None, 0, false);
+        let now = 12_000;
+        i.write(interface::CSR, csr::RESET, now);
+        for k in 0..300u16 {
+            i.write(interface::WRITE_BUFFER, 0o100000 | k, now);
+        }
+        let mut j = through_a_checkpoint(&i);
+        assert_eq!(
+            (&j.xmit, j.xmit_n % 256, j.xmit_check),
+            (&i.xmit, i.xmit_n % 256, i.xmit_check)
+        );
+        i.read(interface::START, now);
+        j.read(interface::START, now);
+        assert_eq!(j.turn.ready, i.turn.ready, "START from the resumed buffer");
+        assert_eq!(i.turn.ready.as_ref().map(|r| r.1.len()), Some(46), "302 words, 46 past 256");
+        let k = through_a_checkpoint(&i);
+        assert_eq!(k.turn.ready, i.turn.ready, "the frame ready, written past its end");
+
+        let mut i = Interface::new(0o3050, None, 0, false);
+        let mut now = 12_000;
+        i.write(interface::CSR, csr::RESET, now);
+        i.write(interface::CSR, csr::LOOP_BACK | csr::CLEAR_RECEIVER, now);
+        for w in [0o125252, 0o052525, 0o177400, 0o3050] {
+            i.write(interface::WRITE_BUFFER, w, now);
+        }
+        i.read(interface::START, now);
+        while i.csr() & csr::RECEIVE_DONE == 0 {
+            now += 1_000;
+            i.advance(now);
+        }
+        for _ in 0..3 {
+            i.read(interface::READ_BUFFER, now);
+        }
+        let mut j = through_a_checkpoint(&i);
+        for k in 0..300 {
+            let a = (i.bit_count(), i.read(interface::READ_BUFFER, now), i.csr());
+            let b = (j.bit_count(), j.read(interface::READ_BUFFER, now), j.csr());
+            assert_eq!(b, a, "read {k} after the resume");
         }
     }
 

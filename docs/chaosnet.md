@@ -116,7 +116,63 @@ them for `3050`, reads `764142`, and gets `3050` back, then does it again at
 the 2147 at LMTBUF `0C10`, addressed a bit at a time by `TBCT<11:0>` off the
 three 25LS193s at `0C11`-`0C13`; the incoming buffer is its twin at LMRBUF
 `0C04` on `RBCT<11:0>`. Four thousand and ninety-six bits is **256 sixteen-bit
-words**, and a word written past that has nowhere to go.
+words**. Neither count stops at the end: each wraps in its twelve bits, so
+neither buffer has an end, and what goes past the 256th word goes over the
+first.
+
+**A frame written past the transmit buffer wraps.** Each word written goes
+in at `TBCT` and takes it on sixteen; START shifts in the source and the
+check word --- the check of every word written and of the source --- the
+same way, and the frame on the line is the count's bits, played down from it:
+`(16n + 32) mod 4096` bits for `n` words written. Up to 253 words that is the
+words, the source and the check, 4,080 bits at most, the longest frame a
+board sends. At 254 the count comes round to 0 and nothing goes: `TSTART`
+comes at the turn, `TBUSY` 93 ns later and Transmit Done 125 ns after that,
+with nothing on the line. From 255 the frame is 16, 32, 48, 64 bits and so
+on: the check word, and what the wrap left below it. Such a run is wreckage
+to a receiver, and a run of 48 bits or fewer --- check, source and
+destination and nothing after --- is not taken at all, its destination
+matching or not. Measured on the board with its own frames of 253 to 258
+words to its own address, on the cable and under Loop Back, and held on the
+model by
+`tests/chaos_rtl.rs::a_frame_written_past_the_buffer_wraps_on_both_alike`:
+Transmit Done at the same poll, the same CSR, the same words back and the
+same frames on the cable. MIT's software writes at most 253 words.
+
+**A frame longer than the receive buffer keeps its last 4,096 bits.** The
+receiver stores every bit that comes; past the 4,096th `RBCT` wraps and the
+bits go over the first ones. A frame comes check word first, so what is lost
+is what the software reads last: of a frame of 257 words with the source and
+check, the check word, and of 258, the source and the check. It lands as any
+frame does, Receive Done up and CRC Error clear if the check made on the bits
+as they came was good, and Bit Count is the bits less one in twelve bits, 15
+for 257 words. The first 256 words read are the frame's first 256. Measured
+on the board with frames of 256, 257 and 258 words from another station and
+a 272-word one under wreckage, every count, word and CSR held on the model by
+`tests/chaos_rtl.rs::a_frame_longer_than_the_buffer_keeps_its_last_4096_bits_on_both_alike`.
+Only another kind of station can send such a frame: a CADR board's
+transmitter wraps first, and muir's CHUDP link refuses a packet longer than
+any Chaos packet.
+
+**Reading goes round the buffer.** Nothing stops a read at the frame's end:
+`RBCT` keeps coming down sixteen a read in twelve bits, past `7777` and
+round, and the words are what the buffer holds there --- an earlier frame's,
+the same frame's first words again once round, or, never written, what the
+netlist's RAM holds at power-up, which reads as all ones. A real 2147 holds
+nothing defined at power-up; what a CADR's reads there is **unverified**. A
+partial top word, a frame ending inside a word, is read the first time with
+zeros above its bits, although the buffer holds an earlier frame's bits there,
+which a read round the buffer sees. From the first read on, **CRC Error is
+the check of the words read so far**: the read-out runs the buffer through
+the checker, which is what makes the bit right "when the packet has been
+completely read out". So it is up partway through a good frame and down at
+its end, and a frame that lost its check word to the wrap reads out with it
+up. Measured on the board with a 255-word frame read 262 times and with
+wreckage over an earlier frame of ones read 300 times, every count, word and
+CSR held on the model by
+`tests/chaos_rtl.rs::reading_on_goes_round_the_buffer_on_both_alike`; the
+check is carried from read to read, so a long read-out costs a read apiece
+(`a_long_read_out_keeps_its_check_as_it_goes` in `src/chaos/board.rs`).
 
 **Bit Count** is "the number of bits in the incoming packet buffer, minus
 one. After the whole packet has been read out, it will contain 7777 (a

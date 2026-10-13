@@ -923,6 +923,367 @@ fn the_board_takes_its_own_frame_off_the_cable_on_both_alike() {
     assert!(wrong.is_empty(), "{} of 6 cases unlike the board:\n{}", wrong.len(), wrong.join("\n"));
 }
 
+// --- The buffers: 4K by 1, round and round -------------------------------
+
+/// What one side read of a frame in its buffer: the CSR as it landed, and
+/// for each read the bit count before it, the word, and the CSR after it.
+#[derive(Debug, Default, PartialEq)]
+struct ReadOut {
+    landed: u16,
+    counts: Vec<u16>,
+    words: Vec<u16>,
+    csrs: Vec<u16>,
+}
+
+impl ReadOut {
+    /// The first read at which two read-outs differ, and what each saw.
+    fn unlike(&self, other: &ReadOut) -> Option<String> {
+        let at = |r: &ReadOut, k: usize| (r.counts[k], r.words[k], r.csrs[k]);
+        if self.landed != other.landed {
+            return Some(format!("landed {:#08o} against {:#08o}", self.landed, other.landed));
+        }
+        (0..self.words.len())
+            .find(|&k| at(self, k) != at(other, k))
+            .map(|k| format!("read {k}: {:?} against {:?}", at(self, k), at(other, k)))
+    }
+}
+
+/// A frame of `n` words, dest last: the rest numbered, so that each word
+/// says where it was.
+fn numbered(n: usize, dest: u16) -> Vec<u16> {
+    let mut v: Vec<u16> = (0..n - 1).map(|k| 0o100000 | k as u16).collect();
+    v.push(dest);
+    v
+}
+
+/// Both interfaces reset, receivers cleared, a cable of their own each.
+fn on_a_cable(n: &Netlist) -> (UnibusMaster<'_>, Model) {
+    let mut b = board(n);
+    let cable = || {
+        let mut e = Ether::new();
+        e.keep_log(true);
+        e.attach(Box::new(Capture::new(SERVER)));
+        e
+    };
+    b.plug_chaos(cable());
+    let mut m = Model::new(Some(cable()));
+    both(&mut b, &mut m, chaos::CSR, Some(csr::RESET), "reset");
+    b.run(b.now + 2_000);
+    m.run(b.now);
+    both(&mut b, &mut m, chaos::CSR, Some(csr::CLEAR_RECEIVER), "clear receiver");
+    (b, m)
+}
+
+/// `earlier`, if given, from [`SERVER`] on each cable, landed and cleared
+/// unread; then `first` from [`SERVER`] and, `over` cells into it, a
+/// second frame put over it by a transmitter that heard neither cable.
+/// Whatever lands is read `reads` times on both. Returns what the board and
+/// the model read.
+fn read_round(
+    earlier: Option<&[u16]>,
+    first: &[u16],
+    over: Option<u64>,
+    reads: usize,
+) -> (ReadOut, ReadOut) {
+    let n = cadrio();
+    let (mut b, mut m) = on_a_cable(&n);
+    if let Some(words) = earlier {
+        let at = b.now;
+        b.chaos.as_mut().unwrap().ether.send_now(at, SERVER, words.to_vec());
+        m.io.chaos.as_mut().unwrap().ether_mut().unwrap().send_now(at, SERVER, words.to_vec());
+        wait_for(&mut b, &mut m, csr::RECEIVE_DONE, 3_000_000);
+        both(&mut b, &mut m, chaos::CSR, Some(csr::CLEAR_RECEIVER), "clear receiver, unread");
+        b.run(b.now + 20_000);
+        m.run(b.now);
+    }
+    let at = b.now;
+    b.chaos.as_mut().unwrap().ether.send_now(at, SERVER, first.to_vec());
+    m.io.chaos.as_mut().unwrap().ether_mut().unwrap().send_now(at, SERVER, first.to_vec());
+    if let Some(cells) = over {
+        b.run(at + cells * wire::CELL_NS);
+        m.run(b.now);
+        let other = rfc_time(0o3061, 0o3070);
+        b.chaos.as_mut().unwrap().ether.send_now(b.now, 0o3061, other.clone());
+        m.io.chaos.as_mut().unwrap().ether_mut().unwrap().send_now(b.now, 0o3061, other);
+    }
+    let ((_, cb), (_, cm)) = wait_for(&mut b, &mut m, csr::RECEIVE_DONE, 3_000_000);
+    let (mut rb, mut rm) = (ReadOut { landed: cb, ..ReadOut::default() }, ReadOut::default());
+    rm.landed = cm;
+    for _ in 0..reads {
+        for (uaddr, of) in [(chaos::BIT_COUNT, 0), (chaos::READ_BUFFER, 1), (chaos::CSR, 2)] {
+            let (wb, wm) = pair(&mut b, &mut m, uaddr);
+            for (r, w) in [(&mut rb, wb), (&mut rm, wm)] {
+                [&mut r.counts, &mut r.words, &mut r.csrs][of].push(w);
+            }
+        }
+    }
+    (rb, rm)
+}
+
+/// The board's CRC Error after each read is the check of the words read
+/// so far: [`muir::chaos::packet::check_word`] over them not zero.
+fn crc_is_the_check_of_the_words_read(r: &ReadOut, what: &str) {
+    use muir::chaos::packet::check_word;
+    for k in 0..r.words.len() {
+        assert_eq!(
+            r.csrs[k] & csr::CRC_ERROR != 0,
+            check_word(&r.words[..=k]) != 0,
+            "{what}: the board's CRC Error after read {k} is the check of the words read"
+        );
+    }
+}
+
+/// **A frame longer than the receive buffer keeps its last 4,096 bits, on
+/// both alike.** The buffer is the 2147 at LMRBUF `0C04`, 4K by 1, on the
+/// twelve bits of `RBCT`: the receiver stores every bit that comes, and
+/// past the 4,096th the count wraps and the bits go over the first ones.
+/// A frame comes check word first, so what is lost is what the software
+/// reads last. Measured on the board here, with frames from another
+/// station of 256, 257 and 258 words with the source and check, and a
+/// 272-word frame with another put over it, wreckage whose top word is
+/// partial:
+///
+/// - It lands as any frame does: Receive Done, CRC Error only for the
+///   wreckage --- the check is made on the bits as they come --- and the
+///   bit count the number of bits less one in twelve bits, so 15 for 257
+///   words.
+/// - The first 256 words read are the frame's first 256, the partial word
+///   with zeros above its bits as for any wreckage; the words past them
+///   are gone, the check word of a 257-word frame and the source and check
+///   of a 258-word one. Reading on goes round the buffer: read 256 is the
+///   first word's sixteen bits as the buffer holds them, and the count
+///   keeps coming down sixteen a read from where the first read left it,
+///   in twelve bits.
+/// - CRC Error once reading starts is the check of the words read so far,
+///   so a frame that lost its check word reads out with it set.
+///
+/// The model is held to every count, word and CSR.
+#[test]
+fn a_frame_longer_than_the_buffer_keeps_its_last_4096_bits_on_both_alike() {
+    use muir::chaos::packet::check_word;
+    let reads = 262;
+    let mut wrong = Vec::new();
+    for (buffer, over, landed, count) in [
+        (254, None, csr::RECEIVE_DONE | csr::TRANSMIT_DONE, 0o7777),
+        (255, None, csr::RECEIVE_DONE | csr::TRANSMIT_DONE, 0o17),
+        (256, None, csr::RECEIVE_DONE | csr::TRANSMIT_DONE, 0o37),
+        (270, Some(4_105), csr::RECEIVE_DONE | csr::TRANSMIT_DONE | csr::CRC_ERROR, 0o301),
+    ] {
+        let sent = numbered(buffer, MY_ADDRESS);
+        let (board, model) = read_round(None, &sent, over, reads);
+        // The words as the software would read them back whole: the
+        // buffer, the source, the check word.
+        let mut whole = sent.clone();
+        whole.push(SERVER);
+        whole.push(check_word(&whole));
+        let what =
+            format!("{} words{}", buffer + 2, if over.is_some() { " under wreckage" } else { "" });
+        eprintln!("{what}: board landed {:#08o} count {:#o}", board.landed, board.counts[0]);
+        assert_eq!(
+            (board.landed, board.counts[0]),
+            (landed, count),
+            "{what}: the board, as measured"
+        );
+        // A whole frame: its first 256 words, and then round again. What
+        // the wreckage's words are is the bits that came, which the model
+        // is held to below.
+        if over.is_none() {
+            assert_eq!(board.words[..256], whole[..256], "{what}: the board's first 256 words");
+            assert_eq!(board.words[256..258], board.words[..2], "{what}: reading goes round");
+        }
+        crc_is_the_check_of_the_words_read(&board, &what);
+        if let Some(how) = model.unlike(&board) {
+            wrong.push(format!("{what}: the model {how}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of 4 frames unlike the board:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// **Reading on past a frame that fits goes round the buffer, and CRC
+/// Error is the check of the words read, on both alike.** Nothing on the
+/// board stops a read at the frame's end: `RBCT` keeps coming down sixteen
+/// a read in twelve bits, past `7777`, and the words are what the buffer
+/// holds there --- whatever an earlier frame left, or, never written, what
+/// the netlist's RAM holds at power-up, which reads as all ones. The check
+/// run over the read-out is the same as for a frame that filled the
+/// buffer: CRC Error from the first read on is the check of the words read
+/// so far, so it is up partway through a good frame and down once the
+/// frame is read out, the one time AIM-628 §7 gives it a meaning there.
+/// Measured on the board with a 255-word frame from another station read
+/// 262 times, and with wreckage of 16 words whose top word is partial,
+/// landed over an earlier frame of ones left unread: the first read takes
+/// the partial word with zeros above its bits even though the buffer holds
+/// the earlier frame's ones there, and reading on gives the earlier frame's
+/// words. The model is held to every count, word and CSR.
+#[test]
+fn reading_on_goes_round_the_buffer_on_both_alike() {
+    let mut ones = vec![0o177777u16; 252];
+    ones.push(MY_ADDRESS);
+    let mut wrong = Vec::new();
+    for (what, earlier, first, over, reads, landed, count) in [
+        (
+            "255 words",
+            None,
+            numbered(253, MY_ADDRESS),
+            None,
+            262,
+            csr::RECEIVE_DONE | csr::TRANSMIT_DONE,
+            0o7757,
+        ),
+        (
+            "wreckage over an earlier frame",
+            Some(&ones[..]),
+            numbered(12, MY_ADDRESS),
+            Some(64),
+            300,
+            csr::RECEIVE_DONE | csr::TRANSMIT_DONE | csr::CRC_ERROR,
+            0o333,
+        ),
+    ] {
+        let (board, model) = read_round(earlier, &first, over, reads);
+        eprintln!("{what}: board landed {:#08o} count {:#o}", board.landed, board.counts[0]);
+        assert_eq!(
+            (board.landed, board.counts[0]),
+            (landed, count),
+            "{what}: the board, as measured"
+        );
+        crc_is_the_check_of_the_words_read(&board, what);
+        let n = (board.counts[0] as usize + 16) / 16;
+        assert_eq!(board.counts[n], 0o7777, "{what}: read out");
+        assert_eq!(board.counts[n + 1], 0o7757, "{what}: and the count comes on down");
+        if over.is_none() {
+            assert_eq!(board.csrs[n - 2] & csr::CRC_ERROR, csr::CRC_ERROR, "{what}: CRC partway");
+            assert_eq!(board.csrs[n - 1] & csr::CRC_ERROR, 0, "{what}: and not once read out");
+            assert_eq!(board.words[n], 0o177777, "{what}: what the netlist's RAM held");
+        } else {
+            assert!(board.words[0] < 0o20000, "{what}: zeros above the partial word's bits");
+            assert_eq!(board.words[n], 0o177777, "{what}: the earlier frame's ones");
+        }
+        if let Some(how) = model.unlike(&board) {
+            wrong.push(format!("{what}: the model {how}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of 2 unlike the board:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// What one side did with its own frame: Transmit Done's poll, the CSR
+/// then, the bit count and the words in the buffer if it landed, and the
+/// frames its cable carried (words, source, check, whether good).
+type OwnSeen = (u64, u16, u16, Vec<u16>, Vec<(Vec<u16>, u16, u16, bool)>);
+
+/// The board's own frame of `n` words, `numbered` and to its own address,
+/// sent on both, on the cable or under Loop Back.
+fn own_written(n: usize, loop_back: bool) -> (OwnSeen, OwnSeen) {
+    let nl = cadrio();
+    let (mut b, mut m) = on_a_cable(&nl);
+    if loop_back {
+        both(&mut b, &mut m, chaos::CSR, Some(csr::LOOP_BACK | csr::CLEAR_RECEIVER), "loop back");
+    }
+    for &w in &numbered(n, MY_ADDRESS) {
+        both(&mut b, &mut m, chaos::WRITE_BUFFER, Some(w), "a word in");
+    }
+    both(&mut b, &mut m, chaos::START, None, "START");
+    let ((tb, _), (tm, _)) = wait_for(&mut b, &mut m, csr::TRANSMIT_DONE, 3_000_000);
+    b.run(b.now + 10_000);
+    m.run(b.now);
+    let (cb, cm) = pair(&mut b, &mut m, chaos::CSR);
+    let (nb, nm) = pair(&mut b, &mut m, chaos::BIT_COUNT);
+    let words = |b: &mut UnibusMaster, m: &mut Model, c: u16, bits: u16, board: bool| -> Vec<u16> {
+        if c & csr::RECEIVE_DONE == 0 {
+            return Vec::new();
+        }
+        (0..(bits as usize + 16) / 16)
+            .map(|_| {
+                if board {
+                    b.cycle(chaos::READ_BUFFER, None).1
+                } else {
+                    m.cycle(chaos::READ_BUFFER, None, b.now)
+                }
+            })
+            .collect()
+    };
+    let wb = words(&mut b, &mut m, cb, nb, true);
+    let wm = words(&mut b, &mut m, cm, nm, false);
+    let heard = |e: &Ether| {
+        e.log
+            .iter()
+            .filter_map(|ev| match ev {
+                Event::Heard(_, f) => Some((f.buffer.clone(), f.source, f.check, f.check_ok)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let hb = heard(&b.chaos.as_ref().unwrap().ether);
+    let hm = heard(m.io.chaos.as_ref().unwrap().ether().unwrap());
+    ((tb, cb, nb, wb, hb), (tm, cm, nm, wm, hm))
+}
+
+/// **A frame written past the transmit buffer wraps, on both alike.** The
+/// outgoing buffer is the 2147 at LMTBUF `0C10`, 4K by 1, on `TBCT<11:0>`
+/// off the 25LS193s at `0C11`-`0C13`: each word written goes in at the
+/// count and takes it on sixteen, START shifts the source and check words
+/// in behind them, and the twelve-bit count wraps, so a word past the
+/// 256th goes over the first ones. The check is made on every word shifted
+/// in, the source last. The frame on the line is the count's bits, played
+/// down from it: `(16n + 32) mod 4096` for `n` words written. Measured on
+/// the board here, its own frames to its own address on the cable and
+/// under Loop Back:
+///
+/// - 253 words: 4,080 bits, the longest a board sends, landing whole.
+/// - 254: nothing. The count is 0; `TSTART` comes at the turn, `TBUSY`
+///   93 ns later and Transmit Done 125 ns after that, and nothing is on
+///   the line.
+/// - 255 to 258: 16 to 64 bits, the check word and what the wrap left
+///   below it. Only the 64 bits of 258 land, as wreckage.
+///
+/// Transmit Done at the same poll on both, the same CSR, the same words
+/// back, and the same frames on each cable.
+#[test]
+fn a_frame_written_past_the_buffer_wraps_on_both_alike() {
+    let mut wrong = Vec::new();
+    for loop_back in [false, true] {
+        for (n, bits) in [
+            (253, Some(4_080)),
+            (254, None),
+            (255, None),
+            (256, None),
+            (257, None),
+            (258, Some(64)),
+        ] {
+            let (board, model) = own_written(n, loop_back);
+            let what = format!("{n} words written{}", if loop_back { ", loop back" } else { "" });
+            eprintln!(
+                "{what}: board {board:?}",
+                board = (board.0, board.1, board.2, board.4.len())
+            );
+            let landed = board.1 & csr::RECEIVE_DONE != 0;
+            assert_eq!(
+                landed.then_some(board.2 as usize + 1),
+                bits,
+                "{what}: what landed on the board"
+            );
+            if !loop_back {
+                // A frame of one word reads as a check word alone.
+                let words = |f: &(Vec<u16>, u16, u16, bool)| {
+                    if f.0.is_empty() && f.1 == 0 { 1 } else { f.0.len() + 2 }
+                };
+                let on_line = board.4.iter().map(words).sum::<usize>();
+                let want = (16 * n + 32) % 4096 / 16;
+                assert_eq!(on_line, want, "{what}: the board's frame on the line, in words");
+            }
+            if model != board {
+                wrong.push(format!("{what}: the board {board:?}\n  the model {model:?}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{} of 12 unlike the board:\n{}", wrong.len(), wrong.join("\n"));
+}
+
 // --- The transmitter's shift register and the turn ----------------------
 
 /// **An empty START near a rise of `MY.TURN^` makes the turn the board

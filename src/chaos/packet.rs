@@ -178,7 +178,15 @@ impl Packet {
 /// only this one gives it. `the_check_word_is_the_boards` in
 /// `tests/chaos.rs` holds it there, and the loopback test asserts it live.
 pub fn check_word(words: &[u16]) -> u16 {
-    let mut r = 0u32; // stage k in bit k
+    check_on(0, words)
+}
+
+/// [`check_word`] carried on from `check`, the check of the words before
+/// `words`: `check_on(check_word(a), b)` is `check_word` of `a` then `b`.
+/// The interface's checker runs this way over a buffer a word at a time,
+/// as it is filled and as it is read out.
+pub fn check_on(check: u16, words: &[u16]) -> u16 {
+    let mut r = check as u32; // stage k in bit k
     for &w in words {
         for k in (0..16).rev() {
             let d = (w >> k) & 1 != 0;
@@ -209,8 +217,17 @@ pub fn frame(buffer: &[u16], source: u16) -> Vec<bool> {
     let mut all: Vec<u16> = buffer.to_vec();
     all.push(source);
     all.push(check_word(&all));
+    line(&all)
+}
+
+/// The bits `words` occupy on the cable as a transmit buffer holding them
+/// plays them out: backwards, bit by bit, and a zero. [`frame`] is this of
+/// the buffer, the source and the check word; a buffer written past its
+/// end holds other words, which go out the same way.
+pub fn line(words: &[u16]) -> Vec<bool> {
+    let all = words;
     let mut bits: Vec<bool> = Vec::with_capacity(all.len() * 16 + 1);
-    for &w in &all {
+    for &w in all {
         for k in (0..16).rev() {
             bits.push((w >> k) & 1 != 0);
         }
@@ -279,13 +296,12 @@ pub struct Received {
 /// stripped. The buffer is a bit at a time, the 2147 at LMRBUF 0C04 on
 /// `RBCT<11:0>`, and the software reads it sixteen bits at a time down
 /// from the word boundary above the last bit stored, so a partial word is
-/// the last bits received, read with what the RAM held above them: the
-/// netlist board reads wreckage back that way in `tests/chaos_netlist.rs`
-/// and `tests/chaos_rtl.rs`, and read zeros there. **Unverified** whether
-/// the RAM holds zeros above the last bit after an earlier packet; a
-/// longer one received first would settle it. Fewer than three whole
-/// words, or a count that is not a whole number of words, cannot check
-/// good.
+/// the last bits received, read with zeros above them: the netlist board
+/// reads wreckage back that way in `tests/chaos_netlist.rs` and
+/// `tests/chaos_rtl.rs`, and does so over an earlier frame that left ones
+/// in the buffer there (`reading_on_goes_round_the_buffer_on_both_alike`).
+/// Fewer than three whole words, or a count that is not a whole number of
+/// words, cannot check good.
 pub fn unframe_any(bits: &[bool]) -> Received {
     let mut bits = bits.to_vec();
     if bits.last() == Some(&false) {
