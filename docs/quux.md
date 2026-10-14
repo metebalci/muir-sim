@@ -1362,8 +1362,15 @@ It is today's return, `QMLP` or `QMLP+2`, whenever a fetch is needed and
 the prefetch (below) does not hold the word, the entry has R or P, the
 word is another main loop's (`DMLP`'s), the register is disabled, or the
 popping microinstruction pushes, pops by functional source 14, writes M 31
-or INTERRUPT-CONTROL, or steps the location counter itself (a `NEXT INSTR`
-the microcycle before, or a dispatch's `IR<24>`).
+or INTERRUPT-CONTROL, follows a `NEXT INSTR` the microcycle before
+(`src/micro.rs:882`, `src/pipeline/exec.rs:256`), or is a dispatch with
+`IR<24>` that pops by its entry's R (`advance`, `src/micro.rs:2433`,
+`src/pipeline/exec.rs:726`). A dispatch with `IR<24>` whose entry has R and
+P both set, so that its own POPJ pops, still fuses: `dispatch()` steps the
+location counter first (`src/micro.rs:2416`, `src/pipeline/exec.rs:711`),
+the return is decided after (`src/micro.rs:2980`, `src/pipeline/exec.rs:868`),
+and the index is taken from the counter as the step leaves it, the halfword
+`QMLP+2` would dispatch.
 
 **The prefetch** (`src/memory_port.rs`, contract H8a §3.5, G2 §9). A
 return that needs a fetch fuses too when the next word is already in hand.

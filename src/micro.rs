@@ -863,7 +863,8 @@ impl Micro {
     /// A pop with `<14>` up: to the handler the MACRO DISPATCH MEMORY names
     /// if the return is fused (`crate::machine::macro_dispatch`), and
     /// otherwise as [`Micro::pop_asks_for_a_fetch`] says. `advance` is a
-    /// dispatch's `IR<24>`, which has stepped the counter already.
+    /// dispatch's `IR<24>` on the path that pops by the entry's R, which
+    /// has stepped the counter already.
     ///
     /// Fused only where today's return goes to the main loop's dispatch,
     /// no fetch needed (this engine has no cache, so not QUUX's
@@ -871,10 +872,13 @@ impl Micro {
     /// in results, where the microcode keeps the rule after a fused
     /// return), and nothing in this microinstruction changes what
     /// that dispatch would see: no push, no pop by the functional source,
-    /// no write of M 31 or INTERRUPT-CONTROL, and no step of the counter in
-    /// this microcycle (`LCINC`: `NEXT INSTRD`, or the dispatch's
-    /// `IR<24>`). The counter steps a microcycle later, so the halfword is
-    /// chosen by it as stepped.
+    /// no write of M 31 or INTERRUPT-CONTROL, no `NEXT INSTRD` (the step of
+    /// the microcycle before) and no `advance` (a dispatch with `IR<24>`
+    /// that pops by its entry's R). A dispatch with `IR<24>` and R and P
+    /// whose own POPJ pops is not barred: `dispatch()` has stepped the
+    /// counter before the return is decided, and the index is taken from
+    /// the counter as that step leaves it. The counter steps a microcycle
+    /// later, so the halfword is chosen by it as stepped.
     fn main_loop_return(&mut self, word: u32, advance: bool) -> u32 {
         let target = self.pop_asks_for_a_fetch(word);
         if !self.m.geometry.macro_dispatch
