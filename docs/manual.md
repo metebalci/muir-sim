@@ -605,6 +605,50 @@ to make one. The CADR's pack is MIT's raw Trident image, exactly a T-300's size.
 Default: unit 0; no pack unless one is named, which is a drive with no pack
 in it and a boot that waits on it for ever.
 
+### `--ethernet-mac XX:XX:XX:XX:XX:XX`
+
+`quux` only, revision 16.
+
+**QUUX:** the [Ethernet device's](quux.md#revision-16-the-ethernet-device)
+MAC address, register-page words 253-254, and the address its filter takes
+besides broadcast. Six pairs of hex digits by colons, in either case; a
+group address, `<0>` of its first byte set, is refused, a station's own
+address never being one. The start says it. The CADR and revisions below 16
+refuse the flag.
+
+Default: `02:00:00:00:00:01`, a locally administered address.
+
+### `--ethernet-socket <path>[,clocked]`
+
+`quux` only, revision 16.
+
+**QUUX:** what sits behind the Ethernet device: a UNIX stream socket muir
+connects to as a client, whose listener is the peer. In plain mode each
+Ethernet frame, either way, is a 32-bit big-endian length and its bytes,
+QEMU's `-netdev stream` format, and one arriving is delivered at the first
+edge after it arrives. With `,clocked` each record also carries the
+machine's time, and muir runs only until the time the peer names: a run
+repeats bit for bit whatever the host does. [The host
+side](quux.md#the-host-side---ethernet-socket) gives the records. A socket
+muir cannot connect to stops the run; the peer closing it is said once,
+and the run goes on as without the flag. The CADR and revisions below 16
+refuse the flag.
+
+Default: none. What the device sends is dropped, its consumer index still
+advancing, and nothing arrives.
+
+### `--ethernet-trace`
+
+`quux` only, revision 16.
+
+**QUUX:** every Ethernet frame the device sends and receives, to stderr,
+with the machine's time in ns, its length, its addresses and its type, and
+why one is refused or dropped: the checksum and type rules' reasons, a
+length outside 14-1514, a MAC address not the device's, a disabled device,
+no buffer given or one too short.
+
+Default: off.
+
 ### `--file-root [<name>=]<folder>[,ro]`
 
 `quux` only.

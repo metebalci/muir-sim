@@ -1734,15 +1734,27 @@ impl Machine {
     }
 
     /// [`Machine::advance_ethernet`] at an engine's edge, which a disabled
-    /// device skips: what has arrived while it is disabled is dropped at
-    /// the next register access, which advances it first, and nothing is
-    /// due. So a machine below revision 16, whose device is never enabled,
-    /// pays one test an edge.
+    /// device skips unless its peer asks for every edge
+    /// ([`crate::ethernet_device::Peer::every_edge`]): `--ethernet-socket`'s
+    /// does, so what arrives while the device is disabled is discarded at
+    /// the next edge, and a clocked one waits at an edge. With a scripted
+    /// peer, what has arrived while it is disabled is dropped at the next
+    /// register access, which advances it first, and nothing is due. So a
+    /// machine below revision 16, or one without the socket whose device is
+    /// not enabled, pays one test an edge.
     #[inline]
     pub fn advance_ethernet_at_edge(&mut self) {
-        if self.ethernet.enabled() {
-            self.advance_ethernet_now();
+        if self.ethernet.at_edges() {
+            self.ethernet_edge();
         }
+    }
+
+    /// The edge's work for a device that has some: advanced, and its peer
+    /// told, where a clocked socket waits (QUUX's Ethernet contract, §3).
+    #[inline(never)]
+    fn ethernet_edge(&mut self) {
+        self.advance_ethernet_now();
+        self.ethernet.edge(self.ns);
     }
 
     #[inline(never)]

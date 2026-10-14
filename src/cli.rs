@@ -1069,6 +1069,9 @@ const OWN_FLAGS: &[(&str, Whose)] = &[
     ("--tv-board", Whose::Cadr),
     ("--watch", Whose::Cadr),
     ("--cache", Whose::Quux),
+    ("--ethernet-mac", Whose::Quux),
+    ("--ethernet-socket", Whose::Quux),
+    ("--ethernet-trace", Whose::Quux),
     ("--file-root", Whose::Quux),
     ("--main-memory-size", Whose::Quux),
     ("--memory-timing", Whose::Quux),
@@ -1114,6 +1117,8 @@ const USAGE_QUUX: &str = "usage: quux [--micro|--rtl] [--cache <words>] [--chaos
             [--chaos-udp-default-peer <host>[:<port>]]
             [--chaos-udp-peer <address>@<host>:<port>] [--checkpoint <file>]
             [-c|--config <file>] [--continue] [--disk-pack <image>[,ro]]
+            [--ethernet-mac XX:XX:XX:XX:XX:XX]
+            [--ethernet-socket <path>[,clocked]] [--ethernet-trace]
             [--file-root [<name>=]<folder>[,ro]]
             [--glass-tty [<endpoint>][,ro]] [--keyboard-boot <keys>]
             [--keyboard-mapping <file>] [--keyboard-mapping-dump]
@@ -1423,6 +1428,34 @@ const HELP: &[(Whose, &str)] = &[
                                checkpoint rather than the file. [default: no
                                disk unless one is named, and a boot that waits
                                on it for ever]",
+    ),
+    (
+        Whose::Quux,
+        "  --ethernet-mac XX:XX:XX:XX:XX:XX
+                               QUUX revision 16: the Ethernet device's MAC
+                               address, register-page words 253-254, and
+                               the address its filter takes besides
+                               broadcast. Not a group address.
+                               [default: 02:00:00:00:00:01, locally
+                               administered]",
+    ),
+    (
+        Whose::Quux,
+        "  --ethernet-socket <path>[,clocked]
+                               QUUX revision 16: what sits behind the
+                               Ethernet device, a UNIX stream socket muir
+                               connects to. Each Ethernet frame is a 32-bit
+                               big-endian length and its bytes (QEMU's
+                               -netdev stream); clocked adds the machine's
+                               time to each, and muir runs only until the
+                               time the peer names. [default: none; what is
+                               sent is dropped and nothing arrives]",
+    ),
+    (
+        Whose::Quux,
+        "  --ethernet-trace             QUUX revision 16: every Ethernet frame sent
+                               and received, to stderr, and why one is
+                               refused or dropped.",
     ),
     (
         Whose::Quux,
@@ -2657,6 +2690,30 @@ fn machine(
     }
     attach(&mut m, packs);
     m
+}
+
+/// Revision 16's Ethernet device as the run's flags make it (QUUX's
+/// Ethernet contract, §3): `--ethernet-mac`'s address in 253-254 and its
+/// filter, `--ethernet-trace`, and the socket's peer behind it. The run's
+/// say, not a checkpoint's: a resume keeps them. Nothing on another
+/// machine, which refuses the flags.
+fn fit_ethernet(
+    m: &mut Machine,
+    (mac, trace): ([u8; 6], bool),
+    peer: Option<Box<dyn crate::ethernet_device::Peer>>,
+) {
+    if !m.geometry.ethernet() {
+        return;
+    }
+    m.ethernet.host.mac = mac;
+    // 255-257 keep `Host`'s defaults until `--ip-address` and
+    // `--ip-gateway` give them.
+    if trace {
+        m.ethernet.trace = Some(crate::ethernet_device::stderr());
+    }
+    if let Some(p) = peer {
+        m.attach_ethernet_peer(p);
+    }
 }
 
 /// The boot PROM this run loads: MIT's own, built in, or QUUX's on
@@ -5477,6 +5534,12 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     let mut rtc = crate::machine::Rtc::Host;
     // QUUX's file device's folders (contract Q9).
     let mut file_roots = crate::file_device::Mounts::default();
+    // Revision 16's Ethernet device (QUUX's Ethernet contract, §3): what
+    // sits behind it, the MAC address its filter takes, and the trace. The
+    // socket is connected after the flags are read.
+    let mut ethernet_socket: Option<crate::ethernet_socket::Socket> = None;
+    let mut ethernet_mac = crate::ethernet_device::Host::default().mac;
+    let mut ethernet_trace = false;
     // The color TV, the second display board: off unless `--color-tv`
     // fits it, because a CADR has one screen unless somebody plugged a
     // second board in, and `COLOR-EXISTS-P` is System 100 asking which
@@ -5780,6 +5843,29 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                     None => usage(WANTS),
                 };
             }
+            // The Ethernet device's flags, revision 16's alone: the CADR
+            // refuses them as quux's, above.
+            (None, flag @ ("--ethernet-socket" | "--ethernet-mac" | "--ethernet-trace"))
+                if !geometry.ethernet() =>
+            {
+                usage(&format!("{flag} is QUUX revision 16's: MUIR_QUUX_REVISION=16"))
+            }
+            (None, "--ethernet-socket") => {
+                match crate::ethernet_socket::parse_socket(&args.next().unwrap_or_default()) {
+                    Ok(socket) => ethernet_socket = Some(socket),
+                    Err(e) => usage(&e),
+                }
+            }
+            (None, "--ethernet-mac") => {
+                match crate::ethernet_socket::parse_mac(&args.next().unwrap_or_default()) {
+                    Ok(mac) => ethernet_mac = mac,
+                    Err(e) => usage(&e),
+                }
+            }
+            (None, "--ethernet-trace") => ethernet_trace = true,
+            // `--ip-address` and `--ip-gateway` (QUUX's Ethernet contract,
+            // §3) go here when they come: words 255-257, the host's as
+            // `--ethernet-mac`'s are 253-254 (`ethernet_device::Host`).
             (None, "--microcycle-ns") => {
                 if !geometry.extended() {
                     usage("--microcycle-ns is QUUX revision 15's: MUIR_QUUX_REVISION=15");
@@ -6558,6 +6644,14 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         crate::chaos::udp::Link::bind(at, udp_peers, udp_default_peer)
             .unwrap_or_else(|e| usage(&format!("--chaos-udp {at}: {e}")))
     });
+    // The Ethernet device's socket (QUUX's Ethernet contract, §3),
+    // connected here for the same reason: a peer that is not there stops
+    // the run. The machine's units are revision 16's, 0.5 ns.
+    let mut ethernet_peer = ethernet_socket.as_ref().map(|s| {
+        let per_ns = crate::clock::TimeBase::half_ns(crate::clock::PERIOD_15).per_ns;
+        crate::ethernet_socket::connect(&s.path, s.mode, per_ns, crate::ethernet_device::stderr())
+            .unwrap_or_else(|e| usage(&format!("--ethernet-socket {}: {e}", s.path.display())))
+    });
     // The other machine's Chaosnet: a cable of its own, since muir's cable
     // carries one machine.  Its address is the debugger's over again
     // unless told otherwise --- the two cables never meet, so there is
@@ -6713,6 +6807,21 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             writeln!(
                 s,
                 "machine: quux, revision 16: revision 15 with the Ethernet device at register-page words 240-257, its interrupt word 100 <8>; rtl is its four-stage pipeline"
+            )
+            .unwrap();
+        }
+        if geometry.ethernet() {
+            let behind = match &ethernet_socket {
+                Some(socket) => {
+                    format!("socket {}, {} mode", shown(&socket.path), socket.mode.name())
+                }
+                None => "no socket: transmitted Ethernet frames are dropped and none arrive".into(),
+            };
+            writeln!(
+                s,
+                "ethernet: MAC address {}; {behind}{}",
+                crate::ethernet_socket::mac_text(ethernet_mac),
+                if ethernet_trace { "; traced" } else { "" }
             )
             .unwrap();
         }
@@ -7048,6 +7157,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             if let Some(n) = tlb {
                 m.set_tlb_entries(n);
             }
+            fit_ethernet(&mut m, (ethernet_mac, ethernet_trace), ethernet_peer.take());
             m.chaos = chaos.clone();
             m.plug_chaos(0);
             let mut e = Micro::new(m);
@@ -7107,6 +7217,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             if let Some(n) = tlb {
                 m.set_tlb_entries(n);
             }
+            fit_ethernet(&mut m, (ethernet_mac, ethernet_trace), ethernet_peer.take());
             m.chaos = chaos.clone();
             m.plug_chaos(0);
             let mut e = crate::pipeline::Pipeline::new(m);

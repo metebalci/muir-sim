@@ -958,6 +958,9 @@ const CADR_ONLY: &[&str] = &[
 ];
 const QUUX_ONLY: &[&str] = &[
     "--cache",
+    "--ethernet-mac",
+    "--ethernet-socket",
+    "--ethernet-trace",
     "--file-root",
     "--main-memory-size",
     "--memory-timing",

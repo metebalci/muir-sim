@@ -491,7 +491,7 @@ impl Pipeline {
         self.m.advance_ioboard();
         self.m.dma_written = false;
         self.m.advance_file_device();
-        if self.m.ethernet.enabled() {
+        if self.m.ethernet.at_edges() {
             self.m.advance_ethernet_at_edge();
             self.ethernet_coherence();
         }

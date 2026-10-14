@@ -216,6 +216,26 @@ pub trait Peer: Send {
     fn take(&mut self) -> Vec<u8>;
     /// An Ethernet frame the device sent at `at`.
     fn sent(&mut self, at: u64, frame: Vec<u8>);
+    /// Whether the device is to be advanced at every edge of an engine,
+    /// enabled or not, and the peer told of each ([`Peer::edge`]): a
+    /// socket's peer, whose Ethernet frames are delivered or dropped at the
+    /// first edge after they arrive (§2.8), and whose clocked mode waits at
+    /// an edge. A scripted peer is asked only while the device is enabled
+    /// and at its register accesses.
+    fn every_edge(&self) -> bool {
+        false
+    }
+    /// The machine at an engine's edge, the device advanced to `now`: where
+    /// a clocked peer waits once `now` has reached the time it may run to.
+    fn edge(&mut self, _now: u64) {}
+}
+
+/// Where a line of `--ethernet-trace`, or a transport's notice, goes.
+pub type Say = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// [`Say`] to stderr.
+pub fn stderr() -> Say {
+    Arc::new(|line: &str| eprintln!("{line}"))
 }
 
 /// **A scripted peer, in the process**: Ethernet frames to arrive at the
@@ -291,7 +311,15 @@ pub struct EthernetDevice {
     pub coherence: Coherence,
     /// What the last advance wrote, for the cache. Not in a checkpoint.
     pub written: Written,
+    /// `--ethernet-trace`'s lines: each Ethernet frame sent and received,
+    /// and why one is refused or dropped. Not in a checkpoint.
+    pub trace: Option<Say>,
     enabled: bool,
+    /// Whether an engine's edge advances the device: enabled, or a peer
+    /// that asks for every edge ([`Peer::every_edge`]). One test an edge.
+    edges: bool,
+    /// The peer asks for every edge.
+    peer_edges: bool,
     interrupt_enable: bool,
     refused: bool,
     index_fault: bool,
@@ -327,7 +355,10 @@ impl Clone for EthernetDevice {
             rules: self.rules,
             coherence: self.coherence,
             written: self.written.clone(),
+            trace: self.trace.clone(),
             enabled: self.enabled,
+            edges: self.enabled,
+            peer_edges: false,
             interrupt_enable: self.interrupt_enable,
             refused: self.refused,
             index_fault: self.index_fault,
@@ -377,7 +408,10 @@ impl EthernetDevice {
             rules: Rules::OFFLOAD,
             coherence: Coherence::default(),
             written: Written::default(),
+            trace: None,
             enabled: false,
+            edges: false,
+            peer_edges: false,
             interrupt_enable: false,
             refused: false,
             index_fault: false,
@@ -403,7 +437,16 @@ impl EthernetDevice {
 
     /// The host side, from now on.
     pub fn attach(&mut self, peer: Box<dyn Peer>) {
+        self.peer_edges = peer.every_edge();
         self.peer = Some(peer);
+        self.set_enabled(self.enabled);
+    }
+
+    /// 240 `<0>` set or cleared, and with it whether an edge advances the
+    /// device.
+    fn set_enabled(&mut self, on: bool) {
+        self.enabled = on;
+        self.edges = on || self.peer_edges;
     }
 
     fn tx_entries(&self) -> u16 {
@@ -432,6 +475,21 @@ impl EthernetDevice {
     /// 240 `<0>`.
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Whether an engine's edge advances the device: while it is enabled,
+    /// and at every edge for a peer that asks ([`Peer::every_edge`]).
+    #[inline]
+    pub fn at_edges(&self) -> bool {
+        self.edges
+    }
+
+    /// The peer told of an engine's edge at `now`, the device advanced to
+    /// it ([`Peer::edge`]).
+    pub fn edge(&mut self, now: u64) {
+        if let Some(p) = self.peer.as_mut() {
+            p.edge(now);
+        }
     }
 
     /// Status `<8>`: a filled entry not taken back.
@@ -504,7 +562,7 @@ impl EthernetDevice {
                                 && base as usize + (8 << log2) <= main.len()
                         };
                         if fits(self.tx_base, self.tx_log2) && fits(self.rx_base, self.rx_log2) {
-                            self.enabled = true;
+                            self.set_enabled(true);
                             self.interrupt_enable = ie;
                         } else {
                             self.refused = true;
@@ -553,7 +611,7 @@ impl EthernetDevice {
     /// Disable, which is the reset: the transmits waiting dropped, the
     /// indexes and the interrupt enable 0. Quiet at once.
     pub fn disable(&mut self) {
-        self.enabled = false;
+        self.set_enabled(false);
         self.interrupt_enable = false;
         (self.tx_prod, self.tx_cons) = (0, 0);
         (self.rx_prod, self.rx_cons, self.rx_taken) = (0, 0, 0);
@@ -593,13 +651,13 @@ impl EthernetDevice {
                 (Some(d), r) if r.is_none_or(|r| d <= r) => {
                     self.reached = self.reached.max(d);
                     self.head_due = None;
-                    self.send(d, main);
+                    self.send(d, main, time);
                     self.take(d, time);
                 }
                 (_, Some(r)) => {
                     self.reached = self.reached.max(r);
                     let f = self.peer.as_mut().map(|p| p.take()).unwrap_or_default();
-                    wrote |= self.deliver(r, &f, main);
+                    wrote |= self.deliver(r, &f, main, time);
                 }
                 _ => break,
             }
@@ -608,26 +666,45 @@ impl EthernetDevice {
         wrote
     }
 
+    /// A line of the trace at `at`, if the trace is on: `line` is made only
+    /// then.
+    fn say(&self, at: u64, time: TimeBase, line: impl FnOnce() -> String) {
+        if let Some(t) = &self.trace {
+            t(&format!("ethernet {}: {}", time.ns_text(at), line()));
+        }
+    }
+
     /// The entry at 245 sent, or refused, at `at`; 245 passes it.
-    fn send<W: MemoryWord>(&mut self, at: u64, main: &[W]) {
+    fn send<W: MemoryWord>(&mut self, at: u64, main: &[W], time: TimeBase) {
+        let index = self.tx_cons;
         let e = self.tx_base as usize + 8 * (self.tx_cons % self.tx_entries()) as usize;
         let (addr, len) = (main[e].low() & ADDRESS, main[e + 1].low());
         self.tx_cons = self.tx_cons.wrapping_add(1);
         let at_word = addr as usize;
-        if !(MIN_FRAME..=MAX_FRAME).contains(&len)
-            || addr & LINE != 0
-            || at_word + (len as usize).div_ceil(4) > main.len()
-        {
+        let placed = if !(MIN_FRAME..=MAX_FRAME).contains(&len) {
+            Err(format!("length {len}, outside {MIN_FRAME}-{MAX_FRAME}"))
+        } else if addr & LINE != 0 {
+            Err(format!("its Ethernet frame at {addr:o}, off a line"))
+        } else if at_word + (len as usize).div_ceil(4) > main.len() {
+            Err(format!("its Ethernet frame at {addr:o}, past main memory"))
+        } else {
+            Ok(())
+        };
+        if let Err(why) = placed {
             self.tx_refusals = (self.tx_refusals + 1) & 0xff;
+            self.say(at, time, || format!("transmit entry {index} refused: {why}"));
             return;
         }
         let mut frame: Vec<u8> = (0..len as usize)
             .map(|k| (main[at_word + k / 4].low() >> (8 * (k % 4))) as u8)
             .collect();
-        if (self.rules.transmit)(&mut frame).is_err() {
+        if let Err(why) = (self.rules.transmit)(&mut frame) {
             self.tx_refusals = (self.tx_refusals + 1) & 0xff;
+            self.say(at, time, || format!("transmit entry {index} refused: {why}"));
             return;
         }
+        let behind = if self.peer.is_some() { "" } else { ", nothing behind the device" };
+        self.say(at, time, || format!("sent {}{behind}", described(&frame)));
         if let Some(p) = self.peer.as_mut() {
             p.sent(at, frame);
         }
@@ -635,31 +712,53 @@ impl EthernetDevice {
 
     /// An Ethernet frame arrived, at `at`: dropped or delivered. Whether
     /// main memory was written.
-    fn deliver<W: MemoryWord>(&mut self, at: u64, f: &[u8], main: &mut [W]) -> bool {
+    fn deliver<W: MemoryWord>(
+        &mut self,
+        at: u64,
+        f: &[u8],
+        main: &mut [W],
+        time: TimeBase,
+    ) -> bool {
+        let dropped = |d: &Self, why: &str| {
+            d.say(at, time, || format!("received {}, dropped: {why}", described(f)));
+        };
         if !self.enabled {
+            dropped(self, "the device is disabled");
             return false;
         }
         let dst = f.get(..6);
         if dst != Some(&self.host.mac[..]) && dst != Some(&BROADCAST[..]) {
+            dropped(self, "not this device's MAC address");
             return false;
         }
-        if let Err((counter, _)) = (self.rules.receive)(f) {
+        if let Err((counter, why)) = (self.rules.receive)(f) {
             match counter {
                 RxCounter::OtherType => self.type_drops = (self.type_drops + 1) & 0xf,
                 RxCounter::Ipv4Check => self.ipv4_drops = (self.ipv4_drops + 1) & 0x7f,
             }
+            dropped(self, why);
             return false;
         }
         if self.rx_prod == self.rx_cons {
             self.rx_drops = (self.rx_drops + 1) & 0xff;
+            dropped(self, "no buffer given");
             return false;
         }
+        let index = self.rx_cons;
         let e = self.rx_base as usize + 8 * (self.rx_cons % self.rx_entries()) as usize;
         let (buf, room) = (main[e].low() & ADDRESS, main[e + 1].low());
         let n = f.len();
         let words = n.div_ceil(4);
         if n > room as usize || buf & LINE != 0 || buf as usize + words > main.len() {
             self.rx_drops = (self.rx_drops + 1) & 0xff;
+            let why = if n > room as usize {
+                format!("entry {index}'s buffer of {room} bytes is too short")
+            } else if buf & LINE != 0 {
+                format!("entry {index}'s buffer at {buf:o}, off a line")
+            } else {
+                format!("entry {index}'s buffer at {buf:o}, past main memory")
+            };
+            dropped(self, &why);
             return false;
         }
         let buf = buf as usize;
@@ -679,6 +778,7 @@ impl EthernetDevice {
         }
         self.rx_cons = self.rx_cons.wrapping_add(1);
         self.delivered_at = Some(at);
+        self.say(at, time, || format!("received {}, into entry {index}", described(f)));
         true
     }
 
@@ -701,7 +801,8 @@ impl EthernetDevice {
     /// Back from a checkpoint: the registers, the counters and the
     /// transmit due. The host's words and the peer stay the run's.
     pub fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()> {
-        self.enabled = r.bool()?;
+        let on = r.bool()?;
+        self.set_enabled(on);
         self.interrupt_enable = r.bool()?;
         self.refused = r.bool()?;
         self.index_fault = r.bool()?;
@@ -740,4 +841,15 @@ impl EthernetDevice {
         }
         Ok(())
     }
+}
+
+/// An Ethernet frame as the trace names it: its length, its destination
+/// and source and its type, as far as it has them.
+fn described(f: &[u8]) -> String {
+    if f.len() < 14 {
+        return format!("{} bytes", f.len());
+    }
+    let mac = |m: &[u8]| m.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
+    let kind = u16::from_be_bytes([f[12], f[13]]);
+    format!("{} bytes, {} from {}, type {kind:04x}", f.len(), mac(&f[..6]), mac(&f[6..12]))
 }

@@ -2515,8 +2515,15 @@ trip, which the boards' own measurement settles.
 
 **The host side** is what sits behind the device, `ethernet_device::Peer`:
 a test attaches a scripted one in the process with
-`Machine::attach_ethernet_peer` (`ethernet_device::Script`). A copy of the
-machine has nothing behind its device.
+`Machine::attach_ethernet_peer` (`ethernet_device::Script`), and a run the
+socket `--ethernet-socket` names (below). A copy of the machine has nothing
+behind its device. Without the flag, a transmitted Ethernet frame goes
+nowhere, 245 still advancing, and none arrives
+(`without_a_socket_transmits_go_nowhere_and_245_advances` in
+`tests/ethernet_socket.rs`). `--ethernet-mac` gives 253-254 and the filter's
+address, and `--ethernet-trace` prints every Ethernet frame sent and
+received, and why one is refused or dropped
+(`the_trace_says_what_is_sent_received_refused_and_dropped`).
 
 **A checkpoint** never refuses on the device's account: waiting transmit
 entries are in main memory and their indexes are registers, so a resume
@@ -2524,6 +2531,69 @@ sends them, at the times an unbroken run would
 (`a_checkpoint_with_transmits_waiting_resumes_and_sends_them`). Revision
 15's checkpoint has no device in it
 (`revision_15_s_checkpoint_has_no_ethernet_device`).
+
+### The host side: `--ethernet-socket`
+
+muir connects to a UNIX stream socket as a client (QUUX's Ethernet
+contract, §3; `muir::ethernet_socket`). Every number on it is big-endian.
+
+**Plain mode**, `--ethernet-socket <path>`: each Ethernet frame, either
+way, is a record of its length in bytes, 32 bits, and its bytes. That is
+QEMU's `-netdev stream` format. A record of length 0 is skipped. A received
+Ethernet frame is delivered, or dropped, at the first edge after it arrives,
+by the host's clock (`plain_framing_carries_ethernet_frames_both_ways`).
+muir holds at most 1,024 that the machine has not taken, and drops what
+arrives beyond them, saying so once until it takes one.
+
+**Clocked mode**, `--ethernet-socket <path>,clocked`: every record carries
+the machine's time.
+
+| Field | Bytes | |
+|---|---|---|
+| length | 4 | the Ethernet frame's length in bytes, 0 to 65,535 |
+| time | 8 | machine time in whole ns |
+| Ethernet frame | length | |
+
+A record of length 0 is a control record: from the peer, **run until** its
+time; from muir, **reached** its time. Otherwise it is an Ethernet frame:
+from the peer, to be delivered at its time; from muir, sent at its time.
+
+- muir runs until the time the peer last named, 0 at the start. At the
+  first edge at or after it --- the run's first edge, at the start --- it
+  sends the Ethernet frames it has sent since its last "reached", each with
+  the time it was sent, in order; then "reached" with that edge's time; then
+  it reads records until a "run until", and runs on.
+- An Ethernet frame from the peer is delivered at the first clock at or
+  after its time and never before the time muir has reached; frames of one
+  time are delivered in the order they came.
+- A "run until" a time already reached is answered at once with "reached"
+  and the same time.
+- The machine's time on revision 16 is in units of 0.5 ns: a time muir
+  sends is its own rounded down to the nanosecond, and one it reads is
+  exact.
+
+muir reads the socket only while it waits, so the band's time and every
+delivery are independent of the host's scheduling, and a script rerun on
+the same band gives the same records bit for bit
+(`clocked_frames_arrive_at_their_times_and_muir_waits_at_each_reached`,
+`clocked_mode_reports_each_transmit_with_its_time_before_reached`,
+`two_runs_of_one_clocked_script_give_the_same_bytes`,
+`quux_waits_in_clocked_mode_on_both_engines_and_repeats_itself`). The peer
+reads what muir sends while it waits for "reached".
+
+**In either mode** the device takes the socket at every edge, enabled or
+not: an Ethernet frame arriving while it is disabled is discarded and
+counted nowhere, so a band that never touches 240-257 holds nothing
+(`a_disabled_device_discards_what_a_socket_sends_and_holds_no_more`). The
+peer closing the socket, or a record longer than 65,535 bytes, ends it:
+muir says so once and runs on as without the flag, and a clocked run no
+longer waits (`the_peer_closing_leaves_the_device_as_without_a_socket`).
+A socket muir cannot connect to stops the run before it starts. The setup
+names the MAC address and the socket and its mode. A run's socket, MAC
+address and trace are the run's, not a checkpoint's: a resume keeps them
+(`a_resumed_device_sends_and_receives_through_the_socket_by_its_mac_address`).
+The CADR and revisions below 16 refuse the three flags by name
+(`the_flags_are_refused_on_the_cadr_and_below_revision_16`).
 
 ## Not modeled
 

@@ -32,6 +32,7 @@ pub mod dm;
 pub mod engine;
 pub mod ethernet_device;
 pub mod ethernet_offload;
+pub mod ethernet_socket;
 pub mod fabric;
 pub mod file_device;
 pub mod ioboard;
