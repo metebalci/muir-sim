@@ -1,8 +1,9 @@
 # `tools/`
 
 Scripts that make the committed fixtures in `data/`, from MIT's files in
-`mit/` or, for QUUX's disks, with standard tools, four that fetch what is not committed, and one that checks the
-first lot still make what is committed. None of them runs as part of the
+`mit/` or, for QUUX's disks, with standard tools, four that fetch what is not committed, one that checks the
+first lot still make what is committed, and `quux-taps`, which installs the
+taps QUUX's Ethernet link runs over (below). None of them runs as part of the
 build --- CI runs `check-netlists.sh` on every push, which is what says the
 fixtures and the drawings have not drifted apart. `data/README.md` says
 which test holds each output to its source.
@@ -24,6 +25,58 @@ Ubuntu, `gcc` on Fedora --- and only when a netlist has to be made again.
 | `newdsk-proms.sh` | `data/newdsk-d0?.prom`, the disk controller's control store, assembled from `mit/cadrdc/newdsk.31` by `examples/dcmicro.rs` |
 | `trident-tables.sh` | `data/trident-connectors.txt` and `data/trident-bus.txt`, by `examples/trident-tables.rs` |
 | `quux-disk-fixtures.sh` | `data/quux-disk*`, QUUX's disk raw, as a fixed and a dynamic VHD, and grown: with sgdisk, dd, qemu-img and qemu-io, not muir. `QEMU_IMG` and `QEMU_IO` name the qemu tools when they are not on the path |
+| `quux-taps` | nothing in the tree. Run once as root, it installs a pool of taps for QUUX's Ethernet link on the computer it runs on; see below |
+
+## `quux-taps`
+
+A tap is the host's end of a machine's Ethernet link. `quux-taps` makes a
+pool of them, `quux0` to `quux<N-1>`, owned by one user, and installs them
+so they are made again at every boot. It runs once, as root; after that the
+user opens a tap with no privilege at all. A process takes a tap by name; a
+tap already held refuses a second open, so the next one is tried, and a tap
+is free again when its holder exits.
+
+    sudo tools/quux-taps                # quux0 and quux1, for the user running sudo
+    sudo tools/quux-taps --count 1      # one tap: enough for one machine
+    sudo tools/quux-taps --count 4      # a machine, and checks beside it
+    tools/quux-taps --count 4 --dry-run # what it would do; changes nothing
+    sudo tools/quux-taps --uninstall    # remove all of it
+
+One tap is enough for one machine, and two to four leave room for a check
+running beside it. `--user U` names another owner; `--address A.B.C.D/P`
+another host-side address. The default, `169.254.0.1/30`, is link-local and
+belongs to no network: the host is `169.254.0.1` and the machine
+`169.254.0.2`. Without root it refuses to run, except with `--dry-run`,
+and it refuses an argument it cannot use before it does anything.
+
+**Every tap is the same:** the host side has the same address, the MAC
+address `02:00:00:00:00:02` and an MTU of 1,500 on each, so a machine finds
+the same link behind whichever tap it is given. On each tap, before it
+comes up, IPv6 is turned off (`net.ipv6.conf.quuxN.disable_ipv6=1`), so
+Linux sends no IPv6 on the link at all, and `rp_filter` is set to 2, loose:
+every tap carries the same prefix, and strict checking would drop what
+arrives on all but one of them.
+
+**What it changes on the system:**
+
+- `/usr/local/sbin/quux-taps`, a copy of the script;
+- `/etc/systemd/system/quux-taps.service`, a oneshot unit, enabled and
+  started. At boot it runs `quux-taps --up`, which makes the taps, waits for
+  udev to settle, and then sets each one up as above. At shutdown, and when
+  stopped, it runs `quux-taps --down`, which deletes them.
+
+Nothing else: no firewall rule, no `sysctl.d` file, no network manager's
+configuration. `--uninstall` stops and disables the unit, deletes any tap
+left, and removes both files. Installing again replaces the pool: the old
+unit is stopped first, and the new one makes the pool afresh.
+
+The pool is a systemd unit rather than systemd-networkd's `.netdev` and
+`.network` files because the unit works whichever program manages the
+rest of the network, NetworkManager or networkd, and does the same thing
+at boot as by hand. It needs systemd and the `ip` command of iproute2.
+
+`tests/quux_taps.rs` holds the dry run's commands and the unit, line for
+line, for one tap, two and 32, and the refusals.
 
 ## `soap4/`
 

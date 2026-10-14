@@ -1,0 +1,278 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Mete Balci
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Install a pool of taps for QUUX's Ethernet link, owned by one user, made
+# again at every boot.
+#
+# Run once as root. After that the user opens a tap, quux0 to quux<N-1>,
+# with no privilege at all: a tap made with an owner is opened by that
+# owner. A process takes a tap with TUNSETIFF (IFF_TAP | IFF_NO_PI); a tap
+# already held refuses a second open with EBUSY, so the next one is tried,
+# and the kernel frees a tap when its holder dies.
+#
+# **Every tap is the same**: the same host-side address, the same MAC
+# address, the same MTU. A checkpoint holds the band's address and its ARP
+# entry for the host side, so a checkpoint resumed behind any tap of the
+# pool finds the link it was saved on.
+#
+# On each tap, before it comes up:
+#   - IPv6 is off (net.ipv6.conf.quuxN.disable_ipv6=1), so Linux sends
+#     nothing of IPv6 on the link: no router solicitation, no MLD report,
+#     no address probe. QUUX's Ethernet device takes IPv4 and ARP only.
+#   - rp_filter is 2, loose. Every tap carries the same prefix, so the
+#     kernel's route back to the guest's address names one tap only, and
+#     strict checking (1) would drop what arrives on every other. Linux
+#     uses the larger of conf.all and the device's own value, so 2 holds
+#     whatever conf.all is.
+#   - the host side is the address given, the MAC address 02:00:00:00:00:02
+#     and the MTU 1500.
+#
+# **Why a systemd oneshot unit.** A tap made by `ip tuntap` is gone at the
+# next boot. A systemd-networkd .netdev would make it again, but only where
+# networkd manages the network, and many desktops run NetworkManager
+# instead. A oneshot unit that runs this script works under either, and
+# every setting is the same command whether run at boot or by hand. The
+# unit waits for udev to settle after making the taps, so that udev's own
+# handling of a new link (a MAC address policy, sysctl.d settings for the
+# device) is done before the settings above are made, and cannot undo them.
+#
+# What it installs:
+#   /usr/local/sbin/quux-taps               a copy of this script
+#   /etc/systemd/system/quux-taps.service   the unit, enabled and started
+# and nothing else: no firewall rule, no sysctl.d file, no network
+# manager's configuration. --uninstall stops the unit, which deletes the
+# taps, and removes both files.
+#
+# usage:
+#   quux-taps [--count N] [--address A.B.C.D/P] [--user U] [--dry-run]
+#   quux-taps --uninstall [--dry-run]
+#   quux-taps --help
+#
+#   --count N    taps quux0 to quux<N-1>, 1 to 256; default 2
+#   --address A  the host side's address and prefix, the same on every
+#                tap; default 169.254.0.1/30, so the guest is 169.254.0.2
+#   --user U     the taps' owner; default the user who ran sudo, or the
+#                user running this with --dry-run
+#   --dry-run    print every command and the file it would write, and
+#                change nothing; needs no root
+#
+# The unit itself runs `quux-taps --up ...` at boot and `quux-taps --down`
+# at shutdown; those two are the unit's and not for use by hand.
+set -eu
+
+sbin=/usr/local/sbin/quux-taps
+unit=/etc/systemd/system/quux-taps.service
+mac=02:00:00:00:00:02
+mtu=1500
+
+usage() {
+    sed -n '/^# usage:/,/^# The unit itself/p' "$0" | sed '$d; s/^# \{0,1\}//'
+}
+
+die() {
+    echo "quux-taps: $1" >&2
+    exit "${2:-2}"
+}
+
+mode=install
+count=2
+address=169.254.0.1/30
+user=
+dry=0
+while [ $# -gt 0 ]; do
+    case $1 in
+    --count) [ $# -ge 2 ] || die "--count needs a number"; count=$2; shift 2 ;;
+    --address) [ $# -ge 2 ] || die "--address needs A.B.C.D/P"; address=$2; shift 2 ;;
+    --user) [ $# -ge 2 ] || die "--user needs a user"; user=$2; shift 2 ;;
+    --dry-run) dry=1; shift ;;
+    --uninstall) mode=uninstall; shift ;;
+    --up) mode=up; shift ;;
+    --down) mode=down; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) die "unknown argument: $1 (see --help)" ;;
+    esac
+done
+
+# --- the arguments ---------------------------------------------------------
+
+case $count in
+'' | *[!0-9]*) die "--count wants a number from 1 to 256, not '$count'" ;;
+esac
+# A leading zero would read as octal in the shell's arithmetic.
+case $count in 0?*) die "--count wants a number from 1 to 256, not '$count'" ;; esac
+[ "$count" -ge 1 ] && [ "$count" -le 256 ] ||
+    die "--count wants a number from 1 to 256, not '$count'"
+
+octet() {
+    case $1 in '' | *[!0-9]* | 0?*) return 1 ;; esac
+    [ "$1" -le 255 ]
+}
+check_address() {
+    a=$1
+    case $a in */*) ;; *) return 1 ;; esac
+    p=${a#*/}
+    ip4=${a%/*}
+    case $p in '' | *[!0-9]* | 0?*) return 1 ;; esac
+    [ "$p" -ge 1 ] && [ "$p" -le 30 ] || return 1
+    old_ifs=$IFS
+    IFS=.
+    # shellcheck disable=SC2086
+    set -- $ip4
+    IFS=$old_ifs
+    [ $# -eq 4 ] || return 1
+    case $ip4 in *..* | .* | *.) return 1 ;; esac
+    for o in "$@"; do octet "$o" || return 1; done
+}
+check_address "$address" ||
+    die "--address wants A.B.C.D/P with P from 1 to 30, not '$address'"
+
+root=0
+[ "$(id -u)" -eq 0 ] && root=1
+
+if [ "$mode" = install ] || [ "$mode" = up ]; then
+    if [ -z "$user" ]; then
+        if [ -n "${SUDO_USER:-}" ]; then
+            user=$SUDO_USER
+        elif [ "$root" -eq 0 ]; then
+            user=$(id -un)
+        else
+            die "name the taps' owner with --user"
+        fi
+    fi
+    id -u -- "$user" >/dev/null 2>&1 || die "no such user: $user"
+fi
+
+if [ "$root" -eq 0 ] && [ "$dry" -eq 0 ]; then
+    die "this changes the system and must run as root (sudo), or with --dry-run to see what it would do" 1
+fi
+
+# --- doing, or saying ------------------------------------------------------
+
+# Every command is printed; with --dry-run it is only printed.
+run() {
+    echo "$*"
+    [ "$dry" -eq 1 ] || "$@"
+}
+
+# The taps this pool owns now: tun devices named quux<digits>.
+pool_now() {
+    for d in /sys/class/net/quux*; do
+        [ -e "$d/tun_flags" ] || continue
+        n=${d##*/}
+        case ${n#quux} in '' | *[!0-9]*) continue ;; esac
+        echo "$n"
+    done
+}
+
+down() {
+    for n in $(pool_now); do
+        run ip link delete dev "$n"
+    done
+}
+
+up() {
+    # Whatever is left of an earlier pool goes first, so the pool is exactly
+    # quux0 to quux<count-1>, each made afresh.
+    down
+    make_pool
+}
+
+make_pool() {
+    k=0
+    while [ "$k" -lt "$count" ]; do
+        run ip tuntap add dev "quux$k" mode tap user "$user"
+        k=$((k + 1))
+    done
+    # udev handles each new link; its settings must land before ours.
+    if [ "$dry" -eq 1 ] || command -v udevadm >/dev/null 2>&1; then
+        run udevadm settle
+    fi
+    k=0
+    while [ "$k" -lt "$count" ]; do
+        n=quux$k
+        # A kernel booted without IPv6 has no such sysctl, and nothing to
+        # turn off.
+        if [ "$dry" -eq 1 ] || [ -d "/proc/sys/net/ipv6/conf/$n" ]; then
+            run sysctl -q -w "net.ipv6.conf.$n.disable_ipv6=1"
+        fi
+        run sysctl -q -w "net.ipv4.conf.$n.rp_filter=2"
+        run ip link set dev "$n" address "$mac" mtu "$mtu"
+        run ip address add "$address" dev "$n"
+        run ip link set dev "$n" up
+        k=$((k + 1))
+    done
+}
+
+unit_text() {
+    taps=quux0
+    [ "$count" -eq 1 ] || taps="quux0 to quux$((count - 1))"
+    cat <<EOF
+# Written by quux-taps; \`quux-taps --uninstall\` removes it.
+[Unit]
+Description=QUUX tap pool: $taps, owned by $user
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$sbin --up --count $count --address $address --user $user
+ExecStop=$sbin --down
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+install_pool() {
+    command -v systemctl >/dev/null 2>&1 || [ "$dry" -eq 1 ] ||
+        die "systemd's systemctl is not here; the pool is a systemd unit" 1
+    self=$(readlink -f "$0")
+    # A pool already running is taken down by its own unit before either
+    # file changes.
+    if [ "$dry" -eq 1 ] || [ -e "$unit" ]; then
+        run systemctl stop quux-taps.service
+    fi
+    if [ "$self" != "$sbin" ]; then
+        run install -D -m 0755 "$self" "$sbin"
+    fi
+    echo "# write $unit, mode 0644:"
+    unit_text | sed 's/^/| /'
+    echo "# end of $unit"
+    if [ "$dry" -eq 0 ]; then
+        umask 022
+        unit_text >"$unit.new"
+        chmod 0644 "$unit.new"
+        mv "$unit.new" "$unit"
+    fi
+    run systemctl daemon-reload
+    run systemctl enable --now quux-taps.service
+    echo "# starting the unit runs $sbin --up --count $count --address $address --user $user:"
+    # Say what the unit will do; it does it itself. The stop above took any
+    # earlier pool down, so there is nothing for its first step to delete.
+    real_dry=$dry
+    dry=1
+    make_pool | sed 's/^/>   /'
+    dry=$real_dry
+}
+
+uninstall_pool() {
+    if [ "$dry" -eq 1 ] || [ -e "$unit" ]; then
+        run systemctl disable --now quux-taps.service
+    fi
+    # The unit's stop deletes the taps; this catches a unit that was not
+    # running.
+    down
+    if [ "$dry" -eq 1 ] || [ -e "$unit" ]; then
+        run rm -f "$unit"
+        run systemctl daemon-reload
+    fi
+    if [ "$dry" -eq 1 ] || [ -e "$sbin" ]; then
+        run rm -f "$sbin"
+    fi
+}
+
+case $mode in
+install) install_pool ;;
+uninstall) uninstall_pool ;;
+up) up ;;
+down) down ;;
+esac
