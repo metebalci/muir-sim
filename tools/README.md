@@ -2,7 +2,8 @@
 
 Scripts that make the committed fixtures in `data/`, from MIT's files in
 `mit/` or, for QUUX's disks, with standard tools, four that fetch what is not committed, one that checks the
-first lot still make what is committed, and `quux-taps`, which installs the
+first lot still make what is committed, one that checks QUUX's Ethernet
+checksum vectors, and `quux-taps`, which installs the
 taps QUUX's Ethernet link runs over (below). None of them runs as part of the
 build --- CI runs `check-netlists.sh` on every push, which is what says the
 fixtures and the drawings have not drifted apart. `data/README.md` says
@@ -25,6 +26,7 @@ Ubuntu, `gcc` on Fedora --- and only when a netlist has to be made again.
 | `newdsk-proms.sh` | `data/newdsk-d0?.prom`, the disk controller's control store, assembled from `mit/cadrdc/newdsk.31` by `examples/dcmicro.rs` |
 | `trident-tables.sh` | `data/trident-connectors.txt` and `data/trident-bus.txt`, by `examples/trident-tables.rs` |
 | `quux-disk-fixtures.sh` | `data/quux-disk*`, QUUX's disk raw, as a fixed and a dynamic VHD, and grown: with sgdisk, dd, qemu-img and qemu-io, not muir. `QEMU_IMG` and `QEMU_IO` name the qemu tools when they are not on the path |
+| `ethernet-vectors.py` | `tests/ethernet_vectors.txt`, QUUX's Ethernet checksum and type vectors: `generate LINUX` makes it, the named edge cases plus the frames Linux made, read from `LINUX`. `check tests/ethernet_vectors.txt` works every line out again and exits non-zero on a disagreement. Python's standard library only, written from RFC 791, 768, 792, 9293 and 1071, sharing no code with muir; `tests/ethernet_vectors.rs` runs every vector through the device's rules |
 | `quux-taps` | nothing in the tree. Run once as root, it installs a pool of taps for QUUX's Ethernet link on the computer it runs on; see below |
 
 ## `quux-taps`

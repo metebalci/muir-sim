@@ -30,6 +30,7 @@ pub mod disk_unit;
 pub mod diskpack;
 pub mod dm;
 pub mod engine;
+pub mod ethernet_offload;
 pub mod fabric;
 pub mod file_device;
 pub mod ioboard;
