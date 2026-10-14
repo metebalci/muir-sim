@@ -2551,7 +2551,15 @@ QEMU's `-netdev stream` format. A record of length 0 is skipped. A received
 Ethernet frame is delivered, or dropped, at the first edge after it arrives,
 by the host's clock (`plain_framing_carries_ethernet_frames_both_ways`).
 muir holds at most 1,024 that the machine has not taken, and drops what
-arrives beyond them, saying so once until it takes one.
+arrives beyond them, saying so once until it takes one. What the device
+sends is written by a thread of its own, in order, as the socket takes it:
+muir holds at most 1,024 that the socket has not taken, and drops what is
+sent beyond them, saying so once until the socket takes some, so a peer
+that stops reading never stalls the machine. A dropped Ethernet frame is
+counted nowhere in the device, either way
+(`plain_mode_holds_1024_frames_for_a_peer_that_reads_nothing_and_runs_on`).
+At the run's end, what muir still holds is written if the socket takes it
+within a second, and what it does not take is said.
 
 **Clocked mode**, `--ethernet-socket <path>,clocked`: every record carries
 the machine's time.
@@ -2588,6 +2596,17 @@ the same band gives the same records bit for bit
 `two_runs_of_one_clocked_script_give_the_same_bytes`,
 `quux_waits_in_clocked_mode_on_both_engines_and_repeats_itself`). The peer
 reads what muir sends while it waits for "reached".
+
+The wait wakes every 100 ms of the host's time, and at a signal, without a
+"run until", so ^C reaches a run whose peer has gone silent: between two
+microcycles the run loop looks at ^C, the prompt and its stops, as it does
+every 4,096 microcycles of a run, and waits again, the microcycles and the
+records being those of an unbroken wait. A wait that `rtl`'s clocks reach
+inside a microcycle goes on until a ^C, which ends the microcycle without
+the peer and is taken at once after it; a run held there and continued
+waits for the peer again, and what the peer sent for the rest of that
+microcycle is delivered at the next edge
+(`a_c_ends_a_run_waiting_on_a_silent_clocked_peer_within_a_second`).
 
 **In either mode** the device takes the socket at every edge, enabled or
 not: an Ethernet frame arriving while it is disabled is discarded and

@@ -628,7 +628,10 @@ Ethernet frame, either way, is a 32-bit big-endian length and its bytes,
 QEMU's `-netdev stream` format, and one arriving is delivered at the first
 edge after it arrives. With `,clocked` each record also carries the
 machine's time, and muir runs only until the time the peer names: a run
-repeats bit for bit whatever the host does. [The host
+repeats bit for bit whatever the host does. A plain peer that stops
+reading never stalls the machine: muir holds 1,024 Ethernet frames for it
+and drops what is sent beyond them. ^C reaches a clocked run whose peer
+has gone silent. [The host
 side](quux.md#the-host-side---ethernet-socket) gives the records. A socket
 muir cannot connect to stops the run; the peer closing it is said once,
 and the run goes on as without the flag. The CADR and revisions below 16

@@ -227,8 +227,21 @@ pub trait Peer: Send {
         false
     }
     /// The machine at an engine's edge, the device advanced to `now`: where
-    /// a clocked peer waits once `now` has reached the time it may run to.
-    fn edge(&mut self, _now: u64) {}
+    /// a clocked peer says "reached" once `now` has reached the time it may
+    /// run to. Whether it now waits for the peer: [`Peer::ready`] ends the
+    /// wait between microcycles, and the next advance of the device does
+    /// first if nothing has.
+    fn edge(&mut self, _now: u64) -> bool {
+        false
+    }
+    /// Between two microcycles, after an edge at which the peer began to
+    /// wait: whether the machine may run on. A clocked socket's wait ends
+    /// with the peer's "run until"; without one by
+    /// [`crate::ethernet_socket::WAKE`], or at a signal, it says no, so
+    /// that the run loop can look at ^C and its stops and ask again.
+    fn ready(&mut self) -> bool {
+        true
+    }
 }
 
 /// Where a line of `--ethernet-trace`, or a transport's notice, goes.
@@ -321,6 +334,8 @@ pub struct EthernetDevice {
     edges: bool,
     /// The peer asks for every edge.
     peer_edges: bool,
+    /// The peer waits since the last edge ([`Peer::edge`]).
+    peer_waits: bool,
     interrupt_enable: bool,
     refused: bool,
     index_fault: bool,
@@ -360,6 +375,7 @@ impl Clone for EthernetDevice {
             enabled: self.enabled,
             edges: self.enabled,
             peer_edges: false,
+            peer_waits: false,
             interrupt_enable: self.interrupt_enable,
             refused: self.refused,
             index_fault: self.index_fault,
@@ -413,6 +429,7 @@ impl EthernetDevice {
             enabled: false,
             edges: false,
             peer_edges: false,
+            peer_waits: false,
             interrupt_enable: false,
             refused: false,
             index_fault: false,
@@ -489,8 +506,19 @@ impl EthernetDevice {
     /// it ([`Peer::edge`]).
     pub fn edge(&mut self, now: u64) {
         if let Some(p) = self.peer.as_mut() {
-            p.edge(now);
+            self.peer_waits = p.edge(now);
         }
+    }
+
+    /// Between two microcycles: whether the machine may run on, its peer
+    /// asked only if it began to wait at the last edge ([`Peer::ready`]).
+    #[inline]
+    pub fn ready(&mut self) -> bool {
+        if !self.peer_waits {
+            return true;
+        }
+        self.peer_waits = !self.peer.as_mut().is_none_or(|p| p.ready());
+        !self.peer_waits
     }
 
     /// Status `<8>`: a filled entry not taken back.

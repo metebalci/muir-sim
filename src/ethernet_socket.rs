@@ -12,7 +12,14 @@
 //! received Ethernet frame is delivered, or dropped, at the first edge
 //! after it arrives (§2.8), so its time is the host's: a thread reads the
 //! socket, and holds at most [`WAITING`] Ethernet frames the machine has
-//! not taken, dropping what arrives beyond them.
+//! not taken, dropping what arrives beyond them. Another writes what the
+//! device sends, in order, as the socket takes it, and holds at most
+//! [`WAITING`] the socket has not taken, dropping what is sent beyond
+//! them, so that a peer that stops reading never stalls the machine. Each
+//! hold says once that it is full, until it is taken from; a frame dropped
+//! from either is counted nowhere in the device. At the run's end what is
+//! still held is written if the socket takes it within a second, and what
+//! it does not take is said.
 //!
 //! **Clocked mode.** Every record carries machine time:
 //!
@@ -27,6 +34,16 @@
 //! waits, so the band's time and every delivery are independent of the
 //! host's scheduling, and a script rerun on the same band gives the same
 //! records bit for bit.
+//!
+//! **muir never waits deaf.** The wait wakes every [`WAKE`] of the host's
+//! time, and at a signal, without a "run until": between two microcycles
+//! the run loop then looks at ^C, the prompt and its stops before it waits
+//! again ([`Peer::ready`]), and the microcycles and every record are those
+//! of an unbroken wait. A wait the pipeline's clocks reach inside a
+//! microcycle goes on until a ^C: the microcycle then ends without the
+//! peer, and the run loop takes the ^C at once after it. Held there and
+//! continued, the run waits for the peer again, what the peer sent for
+//! the rest of that microcycle delivered at the next edge.
 //!
 //! - muir runs until the time the peer last named, 0 at the start. At the
 //!   first edge at or after it --- the first of the run, at the start ---
@@ -49,11 +66,12 @@
 
 use crate::ethernet_device::{Peer, Say};
 use std::collections::VecDeque;
-use std::io::{BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// The longest record muir takes: a longer one is not an Ethernet frame,
 /// and ends the socket.
@@ -199,20 +217,59 @@ impl Inbox {
     }
 }
 
+/// What the machine hands the writing thread: its sent Ethernet frames,
+/// as records, until the socket takes them.
+struct Outbox {
+    held: Mutex<Held>,
+    /// Records to write, or the hold emptied.
+    moved: Condvar,
+}
+
+struct Held {
+    records: VecDeque<Vec<u8>>,
+    /// Records the writing thread has taken and the socket has not.
+    writing: usize,
+    /// [`WAITING`] reached, and said, since the socket last took some.
+    full: bool,
+    /// The machine is gone: what is held is written, and the thread ends.
+    ending: bool,
+}
+
+impl Held {
+    fn count(&self) -> usize {
+        self.records.len() + self.writing
+    }
+}
+
+/// How long the end of a plain run gives the socket to take what muir
+/// still holds for it.
+const LAST_WRITES: Duration = Duration::from_secs(1);
+
 struct Plain {
     out: UnixStream,
     inbox: Arc<Inbox>,
+    outbox: Arc<Outbox>,
     say: Say,
 }
 
 impl Plain {
     fn new(stream: UnixStream, say: Say) -> std::io::Result<Plain> {
         let mut input = stream.try_clone()?;
+        let mut output = stream.try_clone()?;
         let inbox = Arc::new(Inbox {
             frames: Mutex::new(VecDeque::new()),
             count: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             full: AtomicBool::new(false),
+        });
+        let outbox = Arc::new(Outbox {
+            held: Mutex::new(Held {
+                records: VecDeque::new(),
+                writing: 0,
+                full: false,
+                ending: false,
+            }),
+            moved: Condvar::new(),
         });
         let (from, said) = (inbox.clone(), say.clone());
         std::thread::Builder::new().name("ethernet-socket".into()).spawn(move || {
@@ -247,7 +304,36 @@ impl Plain {
             };
             from.close(&said, &why);
         })?;
-        Ok(Plain { out: stream, inbox, say })
+        let (to, closing, said) = (outbox.clone(), inbox.clone(), say.clone());
+        std::thread::Builder::new().name("ethernet-socket-out".into()).spawn(move || {
+            loop {
+                let batch = {
+                    let mut h = to.held.lock().unwrap();
+                    while h.records.is_empty() && !h.ending {
+                        h = to.moved.wait(h).unwrap();
+                    }
+                    if h.records.is_empty() {
+                        return;
+                    }
+                    h.writing = h.records.len();
+                    h.records.drain(..).collect::<Vec<_>>().concat()
+                };
+                let wrote = output.write_all(&batch);
+                let mut h = to.held.lock().unwrap();
+                h.writing = 0;
+                h.full = false;
+                if wrote.is_err() {
+                    h.records.clear();
+                }
+                to.moved.notify_all();
+                drop(h);
+                if let Err(e) = wrote {
+                    closing.close(&said, &failed(&e));
+                    return;
+                }
+            }
+        })?;
+        Ok(Plain { out: stream, inbox, outbox, say })
     }
 }
 
@@ -264,6 +350,8 @@ impl Peer for Plain {
         f
     }
 
+    /// Held for the writing thread, at most [`WAITING`], so that a peer
+    /// that stops reading never stalls the machine.
     fn sent(&mut self, _at: u64, frame: Vec<u8>) {
         if self.inbox.closed.load(Ordering::SeqCst) {
             return;
@@ -271,8 +359,16 @@ impl Peer for Plain {
         let mut r = Vec::with_capacity(4 + frame.len());
         r.extend_from_slice(&(frame.len() as u32).to_be_bytes());
         r.extend_from_slice(&frame);
-        if let Err(e) = self.out.write_all(&r) {
-            self.inbox.close(&self.say, &failed(&e));
+        let mut h = self.outbox.held.lock().unwrap();
+        if h.count() < WAITING {
+            h.records.push_back(r);
+            self.outbox.moved.notify_all();
+        } else if !h.full {
+            h.full = true;
+            drop(h);
+            (self.say)(&format!(
+                "ethernet: {WAITING} Ethernet frames wait for the peer; what the device sends is dropped until it takes them"
+            ));
         }
     }
 
@@ -282,8 +378,25 @@ impl Peer for Plain {
 }
 
 impl Drop for Plain {
-    /// The reading thread ends with the socket, saying nothing.
+    /// What muir holds is written, if the socket takes it within
+    /// [`LAST_WRITES`], and what it does not is said; then both threads end
+    /// with the socket, saying nothing more.
     fn drop(&mut self) {
+        let mut h = self.outbox.held.lock().unwrap();
+        h.ending = true;
+        self.outbox.moved.notify_all();
+        let until = Instant::now() + LAST_WRITES;
+        while h.count() > 0 && !self.inbox.closed.load(Ordering::SeqCst) {
+            let Some(left) = until.checked_duration_since(Instant::now()) else { break };
+            h = self.outbox.moved.wait_timeout(h, left).unwrap().0;
+        }
+        let left = h.count();
+        drop(h);
+        if left > 0 && !self.inbox.closed.swap(true, Ordering::SeqCst) {
+            (self.say)(&format!(
+                "ethernet: {left} Ethernet frames the peer had not taken are dropped as the run ends"
+            ));
+        }
         self.inbox.closed.store(true, Ordering::SeqCst);
         let _ = self.out.shutdown(std::net::Shutdown::Both);
     }
@@ -291,9 +404,15 @@ impl Drop for Plain {
 
 // --- clocked mode --------------------------------------------------------
 
+/// How often a clocked wait wakes, without a "run until", for the run loop
+/// to look at ^C, the prompt and its stops ([`Peer::ready`]).
+pub const WAKE: Duration = Duration::from_millis(100);
+
 struct Clocked {
-    input: BufReader<UnixStream>,
-    out: UnixStream,
+    /// Read with a timeout of [`WAKE`]; written as the machine reaches.
+    stream: UnixStream,
+    /// What has been read and is not yet a whole record.
+    input: Vec<u8>,
     /// The records to send at the next "reached".
     pending: Vec<u8>,
     /// The peer's Ethernet frames not yet delivered, by their times in the
@@ -301,6 +420,9 @@ struct Clocked {
     queue: VecDeque<(u64, Vec<u8>)>,
     /// The time muir may run to, in the machine's units.
     limit: u64,
+    /// "Reached" sent, at this time, and "run until" not yet read; and the
+    /// ^Cs counted then ([`crate::cli::interrupts_counted`]).
+    waits: Option<(u64, u32)>,
     per_ns: u64,
     closed: bool,
     say: Say,
@@ -308,12 +430,14 @@ struct Clocked {
 
 impl Clocked {
     fn new(stream: UnixStream, per_ns: u64, say: Say) -> std::io::Result<Clocked> {
+        stream.set_read_timeout(Some(WAKE))?;
         Ok(Clocked {
-            input: BufReader::new(stream.try_clone()?),
-            out: stream,
+            stream,
+            input: Vec::new(),
             pending: Vec::new(),
             queue: VecDeque::new(),
             limit: 0,
+            waits: None,
             per_ns,
             closed: false,
             say,
@@ -326,30 +450,95 @@ impl Clocked {
         self.pending.extend_from_slice(frame);
     }
 
-    /// The socket ended: said, and nothing more delivered.
+    /// The socket ended: said, and nothing more delivered or waited for.
     fn close(&mut self, why: &str) {
         self.closed = true;
+        self.waits = None;
         self.queue.clear();
         self.pending.clear();
-        let _ = self.out.shutdown(std::net::Shutdown::Both);
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
         (self.say)(&ended(why));
     }
 
+    /// What was sent since the last "reached", and "reached" at `now`.
+    fn reached(&mut self, now: u64) {
+        self.record(now, &[]);
+        let sent = self.stream.write_all(&self.pending);
+        self.pending.clear();
+        match sent {
+            Ok(()) => self.waits = Some((now, crate::cli::interrupts_counted())),
+            Err(e) => self.close(&failed(&e)),
+        }
+    }
+
     /// One record from the peer: its time in the machine's units and its
-    /// Ethernet frame, empty for "run until".
-    fn read(&mut self) -> Result<(u64, Vec<u8>), String> {
-        let mut head = [0u8; 12];
-        self.input.read_exact(&mut head).map_err(|e| failed(&e))?;
-        let n = length(head[..4].try_into().unwrap())?;
-        let t = u64::from_be_bytes(head[4..].try_into().unwrap());
-        let mut f = vec![0u8; n];
-        self.input.read_exact(&mut f).map_err(|e| failed(&e))?;
-        Ok((t.saturating_mul(self.per_ns), f))
+    /// Ethernet frame, empty for "run until". `None` when the socket had
+    /// none whole within [`WAKE`], or a signal came; a record cut by either
+    /// is kept and finished by the next read.
+    fn read(&mut self) -> Result<Option<(u64, Vec<u8>)>, String> {
+        use std::io::ErrorKind::*;
+        loop {
+            if self.input.len() >= 4 {
+                let n = length(self.input[..4].try_into().unwrap())?;
+                if self.input.len() >= 12 + n {
+                    let t = u64::from_be_bytes(self.input[4..12].try_into().unwrap());
+                    let f = self.input[12..12 + n].to_vec();
+                    self.input.drain(..12 + n);
+                    return Ok(Some((t.saturating_mul(self.per_ns), f)));
+                }
+            }
+            let mut chunk = [0u8; 16_384];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err(failed(&UnexpectedEof.into())),
+                Ok(k) => self.input.extend_from_slice(&chunk[..k]),
+                Err(e) if matches!(e.kind(), WouldBlock | TimedOut | Interrupted) => {
+                    return Ok(None);
+                }
+                Err(e) => return Err(failed(&e)),
+            }
+        }
+    }
+
+    /// The wait after "reached": records read until a "run until" past the
+    /// time reached. Whether it is over. Between microcycles (`!block`) it
+    /// is not when [`WAKE`] passes without one, and the run loop asks
+    /// again. Inside one (`block`) it goes on until a ^C has come since
+    /// "reached": the microcycle then ends without the peer, and the wait
+    /// is the run loop's after it, which acts on the ^C.
+    fn wait(&mut self, block: bool) -> bool {
+        while let Some((at, asked)) = self.waits {
+            if block && crate::cli::interrupts_counted() != asked {
+                return false;
+            }
+            match self.read() {
+                Ok(None) if block => {}
+                Ok(None) => return false,
+                Ok(Some((t, f))) if f.is_empty() => {
+                    self.limit = t;
+                    self.waits = None;
+                    if at >= t {
+                        self.reached(at);
+                    }
+                }
+                Ok(Some((t, f))) => {
+                    let k = self.queue.iter().position(|(u, _)| *u > t).unwrap_or(self.queue.len());
+                    self.queue.insert(k, (t, f));
+                }
+                Err(why) => self.close(&why),
+            }
+        }
+        true
     }
 }
 
 impl Peer for Clocked {
+    /// A wait still open is finished first, the machine standing: the run
+    /// loop finishes it before the next microcycle ([`Peer::ready`]), and
+    /// any other driver of the machine here.
     fn arrival(&mut self, now: u64) -> Option<u64> {
+        if self.waits.is_some() {
+            self.wait(true);
+        }
         self.queue.front().map(|(t, _)| *t).filter(|&t| t <= now)
     }
 
@@ -367,28 +556,17 @@ impl Peer for Clocked {
         true
     }
 
-    fn edge(&mut self, now: u64) {
-        while !self.closed && now >= self.limit {
-            self.record(now, &[]);
-            let sent = self.out.write_all(&self.pending);
-            self.pending.clear();
-            if let Err(e) = sent {
-                return self.close(&failed(&e));
-            }
-            loop {
-                match self.read() {
-                    Ok((t, f)) if f.is_empty() => {
-                        self.limit = t;
-                        break;
-                    }
-                    Ok((t, f)) => {
-                        let k =
-                            self.queue.iter().position(|(u, _)| *u > t).unwrap_or(self.queue.len());
-                        self.queue.insert(k, (t, f));
-                    }
-                    Err(why) => return self.close(&why),
-                }
-            }
+    fn edge(&mut self, now: u64) -> bool {
+        if self.waits.is_some() {
+            self.wait(true);
         }
+        if self.waits.is_none() && !self.closed && now >= self.limit {
+            self.reached(now);
+        }
+        self.waits.is_some()
+    }
+
+    fn ready(&mut self) -> bool {
+        self.wait(false)
     }
 }

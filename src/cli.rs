@@ -3003,6 +3003,12 @@ trait Stepper {
     fn holds_on_self_halt(&self) -> bool {
         true
     }
+    /// Whether a turn that ran no microcycle is one at which the run loop
+    /// looks at ^C, the prompt and its stops: a machine waiting for its
+    /// clocked Ethernet peer ([`Clocked`]). Not the cable's waits.
+    fn checks_while_waiting(&self) -> bool {
+        false
+    }
     /// Debug cycles over the cable, if there was ever one.
     fn debug_cycles(&self) -> Option<u64> {
         None
@@ -3027,6 +3033,36 @@ impl<E: Engine> Stepper for Alone<E> {
     fn step(&mut self) -> Result<bool, crate::lashup::Error> {
         self.0.step()?;
         Ok(true)
+    }
+}
+
+/// A machine with no end of the cable whose Ethernet socket is clocked
+/// (QUUX's Ethernet contract, §3): before each microcycle, the wait for the
+/// peer's "run until" that the last edge began, if it did. A wait with
+/// none by [`crate::ethernet_socket::WAKE`], or at a signal, is a turn with
+/// no microcycle, at which the run loop looks at ^C, the prompt and its
+/// stops before it waits again; the microcycles and every record are the
+/// same as one wait's. [`Alone`] for every other machine, whose turns test
+/// nothing more.
+struct Clocked<E: Engine>(E);
+
+impl<E: Engine> Stepper for Clocked<E> {
+    type E = E;
+    fn engine(&self) -> &E {
+        &self.0
+    }
+    fn engine_mut(&mut self) -> &mut E {
+        &mut self.0
+    }
+    fn step(&mut self) -> Result<bool, crate::lashup::Error> {
+        if !self.0.machine_mut().ethernet.ready() {
+            return Ok(false);
+        }
+        self.0.step()?;
+        Ok(true)
+    }
+    fn checks_while_waiting(&self) -> bool {
+        true
     }
 }
 
@@ -3597,14 +3633,20 @@ fn time_engine<S: Stepper>(
     let mut hold = Hold::open(held);
     catch_interrupts();
     while !hold.quit && ran < stop.after && !stop.reached(stop_pc(s.engine())) {
-        if hold.on {
+        let due = if hold.on {
             std::thread::sleep(TERMINAL_INTERVAL / 4);
+            true
         } else {
             match s.step() {
                 Ok(true) => {
                     ran += 1;
                     hold.stepped(s.engine(), ran);
+                    hold.check(ran)
                 }
+                // The clocked Ethernet peer's wait woke: what is below is
+                // due, so that ^C and the stops are not the peer's to
+                // delay.
+                Ok(false) if s.checks_while_waiting() => true,
                 // The other end's message was waited for, or the cable
                 // went: no microcycle ran, so nothing below is due.
                 Ok(false) => continue,
@@ -3617,8 +3659,8 @@ fn time_engine<S: Stepper>(
                     break;
                 }
             }
-        }
-        if !hold.check(ran) {
+        };
+        if !due {
             continue;
         }
         // The connector's listener, held or not: a debugger may come to a
@@ -3835,6 +3877,13 @@ fn asked_where(seen: &mut u32) -> bool {
     let asked = now > *seen;
     *seen = now;
     asked
+}
+
+/// The ^Cs counted so far: what a clocked Ethernet peer's wait inside a
+/// microcycle looks at, to end the microcycle and give the run loop its
+/// turn (QUUX's Ethernet contract, §3).
+pub(crate) fn interrupts_counted() -> u32 {
+    INTERRUPTS.load(Ordering::SeqCst)
 }
 
 /// Whether ^C has been pressed since this was last asked.
@@ -6647,7 +6696,11 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     });
     // The Ethernet device's socket (QUUX's Ethernet contract, §3),
     // connected here for the same reason: a peer that is not there stops
-    // the run. The machine's units are revision 16's, 0.5 ns.
+    // the run. The machine's units are revision 16's, 0.5 ns. A clocked
+    // socket's machine waits for its peer between microcycles, where the
+    // run loop looks at ^C while it does ([`Clocked`]).
+    let clocked =
+        ethernet_socket.as_ref().is_some_and(|s| s.mode == crate::ethernet_socket::Mode::Clocked);
     let mut ethernet_peer = ethernet_socket.as_ref().map(|s| {
         let per_ns = crate::clock::TimeBase::half_ns(crate::clock::PERIOD_15).per_ns;
         crate::ethernet_socket::connect(&s.path, s.mode, per_ns, crate::ethernet_device::stderr())
@@ -7194,14 +7247,25 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 clocks: capture_tv_time,
                 color: color_screen.as_mut(),
             };
-            time_engine(
-                "micro",
-                Alone(e),
-                terminal.as_mut(),
-                Some(&mut glass),
-                serial.as_mut(),
-                run,
-            );
+            if clocked {
+                time_engine(
+                    "micro",
+                    Clocked(e),
+                    terminal.as_mut(),
+                    Some(&mut glass),
+                    serial.as_mut(),
+                    run,
+                );
+            } else {
+                time_engine(
+                    "micro",
+                    Alone(e),
+                    terminal.as_mut(),
+                    Some(&mut glass),
+                    serial.as_mut(),
+                    run,
+                );
+            }
         }
         Which::Rtl if geometry.extended() => {
             // Revision 15's `rtl` is its pipeline (contract G3 revision 15,
@@ -7252,7 +7316,25 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 clocks: capture_tv_time,
                 color: color_screen.as_mut(),
             };
-            time_engine("rtl", Alone(e), terminal.as_mut(), Some(&mut glass), serial.as_mut(), run);
+            if clocked {
+                time_engine(
+                    "rtl",
+                    Clocked(e),
+                    terminal.as_mut(),
+                    Some(&mut glass),
+                    serial.as_mut(),
+                    run,
+                );
+            } else {
+                time_engine(
+                    "rtl",
+                    Alone(e),
+                    terminal.as_mut(),
+                    Some(&mut glass),
+                    serial.as_mut(),
+                    run,
+                );
+            }
         }
         Which::Rtl => {
             let mut m = machine(

@@ -306,6 +306,158 @@ fn the_peer_closing_leaves_the_device_as_without_a_socket() {
     assert_eq!(get(&mut m, eth::STATUS) >> 16, 0, "nothing dropped or refused");
 }
 
+/// The ARP Ethernet frame numbered `k`, its number in bytes 14-15.
+fn numbered(k: u16) -> Vec<u8> {
+    let mut f = frame(PEER, 0x0806, 60, 0);
+    f[14..16].copy_from_slice(&k.to_be_bytes());
+    f
+}
+
+/// The socket's buffer filled from muir's end before muir has it, so that
+/// what waits for the peer is muir's hold and nothing more; the bytes put
+/// in it.
+fn filled(ours: &UnixStream) -> usize {
+    ours.set_nonblocking(true).unwrap();
+    let mut junk = 0;
+    for piece in [4096, 1] {
+        loop {
+            match (&*ours).write(&vec![0u8; piece]) {
+                Ok(n) => junk += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+    ours.set_nonblocking(false).unwrap();
+    junk
+}
+
+/// **At a plain run's end, what muir holds for the peer is written if the
+/// socket takes it within a second, and what it does not take is said**
+/// (§3): the socket's buffer full and eight transmits sent and held, the
+/// machine is dropped. With the peer reading, the eight come in order and
+/// nothing is said; with the peer reading nothing, the end takes a second
+/// and says the eight are dropped. **Fails** an end that shuts the socket
+/// on what it holds, or one that waits on the peer without end.
+#[test]
+fn a_plain_run_ends_writing_what_it_holds_within_a_second() {
+    for reads in [true, false] {
+        let (ours, mut theirs) = pair();
+        let junk = filled(&ours);
+        let (say, kept) = lines();
+        let mut m = rev16();
+        m.attach_ethernet_peer(sock::over(ours, Mode::Plain, 2, say).unwrap());
+        enable(&mut m, 3, 0);
+        // On a thread of its own, so that a stall fails the test rather
+        // than hanging it.
+        let (done, machine) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for k in 0..8 {
+                post(&mut m, k, &numbered(k));
+            }
+            edges_until(&mut m, "sent", |m| get(m, eth::TX_CONS) == 8);
+            let _ = done.send(m);
+        });
+        let m =
+            machine.recv_timeout(WALL).expect("the machine stalled on a peer that reads nothing");
+        // The peer's end kept open either way: one that closed would end
+        // the socket instead.
+        let reader = if reads {
+            Some(std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                let mut j = vec![0u8; junk];
+                theirs.read_exact(&mut j).unwrap();
+                (0..8).map(|_| read_plain(&mut theirs)).collect::<Vec<_>>()
+            }))
+        } else {
+            None
+        };
+        let t = Instant::now();
+        drop(m);
+        let took = t.elapsed();
+        let s = said(&kept);
+        if let Some(reader) = reader {
+            let frames = reader.join().unwrap();
+            assert_eq!(frames, (0..8).map(numbered).collect::<Vec<_>>(), "the eight, in order");
+            assert!(s.is_empty(), "nothing said: {s:?}");
+        } else {
+            assert!(
+                (Duration::from_millis(900)..Duration::from_secs(3)).contains(&took),
+                "the end took {took:?}"
+            );
+            assert_eq!(
+                s,
+                vec![
+                    "ethernet: 8 Ethernet frames the peer had not taken are dropped as the run ends"
+                ]
+            );
+        }
+    }
+}
+
+/// **Plain mode never stalls the machine on a peer that stops reading**
+/// (§3): the socket's own buffer filled first and the peer reading
+/// nothing, the driver posts 1,100 transmits, one sent every 20 us, and
+/// the machine runs 30 ms of its time, within 10 s of the host's. When the
+/// peer reads, the first 1,024 come, whole and in order, and nothing after
+/// them: the other 76 were dropped beyond the hold, said once, and counted
+/// nowhere in the device, whose 245 passed all 1,100. **Fails** a write
+/// on the machine's thread, a hold of another size, Ethernet frames
+/// reordered, or a drop said for each.
+#[test]
+fn plain_mode_holds_1024_frames_for_a_peer_that_reads_nothing_and_runs_on() {
+    let (ours, mut theirs) = pair();
+    let junk = filled(&ours);
+    let (say, kept) = lines();
+    let mut m = rev16();
+    m.attach_ethernet_peer(sock::over(ours, Mode::Plain, 2, say).unwrap());
+    enable(&mut m, 3, 0);
+    const SENT: u16 = 1_100;
+    // The machine on a thread of its own, so that a stall fails the test
+    // rather than hanging it.
+    let (done, machine) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut posted = 0u16;
+        while m.ns < 2 * 30_000_000 {
+            for _ in 0..64 {
+                edge(&mut m);
+            }
+            while posted < SENT && posted.wrapping_sub(get(&mut m, eth::TX_CONS) as u16) < 8 {
+                post(&mut m, posted, &numbered(posted));
+                posted += 1;
+            }
+        }
+        let _ = done.send(m);
+    });
+    let mut m = machine
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the machine stalled on a peer that reads nothing");
+    assert_eq!(get(&mut m, eth::TX_CONS), u32::from(SENT), "245 passed every one");
+    let s: Vec<String> = said(&kept).into_iter().filter(|l| l.contains("wait for")).collect();
+    assert_eq!(
+        s,
+        vec![
+            "ethernet: 1024 Ethernet frames wait for the peer; what the device sends is dropped until it takes them"
+        ],
+        "said once"
+    );
+    let mut j = vec![0u8; junk];
+    theirs.read_exact(&mut j).unwrap();
+    for k in 0..1_024u16 {
+        assert_eq!(read_plain(&mut theirs), numbered(k), "Ethernet frame {k}");
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    theirs.set_nonblocking(true).unwrap();
+    let mut more = [0u8; 1];
+    let after = theirs.read(&mut more);
+    assert!(
+        after.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::WouldBlock),
+        "nothing after the 1,024th: {after:?}"
+    );
+    let status = get(&mut m, eth::STATUS);
+    assert_eq!(status >> 4, 0, "no counter moved: {status:x}");
+}
+
 /// **In plain mode an Ethernet frame is delivered at the first edge after
 /// it arrives** (§2.8), so one that arrives while the device is disabled is
 /// dropped at an edge, with no register read: the trace says so before the
@@ -523,7 +675,8 @@ fn clocked_mode_reports_each_transmit_with_its_time_before_reached() {
 
 /// One run of the echo script: the peer sends six Ethernet frames at named
 /// times and three "run until"s, writing them at once or, `slow`, a few
-/// bytes at a time with pauses; the driver sends each frame it receives
+/// bytes at a time with pauses, some past [`sock::WAKE`] inside a record;
+/// the driver sends each frame it receives
 /// back to the peer. Every byte muir sent.
 fn echo_run(slow: bool) -> Vec<u8> {
     let (ours, mut theirs) = pair();
@@ -547,9 +700,16 @@ fn echo_run(slow: bool) -> Vec<u8> {
         let mut sent = 0;
         for (k, r) in script.iter().enumerate() {
             if slow {
-                for piece in r.chunks(5) {
+                for (j, piece) in r.chunks(5).enumerate() {
                     theirs.write_all(piece).unwrap();
-                    std::thread::sleep(Duration::from_millis(1));
+                    // Past the clocked wait's wake, in the middle of a
+                    // record, now and then.
+                    let pause = if j == 1 && k % 3 == 0 {
+                        3 * sock::WAKE / 2
+                    } else {
+                        Duration::from_millis(1)
+                    };
+                    std::thread::sleep(pause);
                 }
             } else {
                 theirs.write_all(r).unwrap();
@@ -583,10 +743,12 @@ fn echo_run(slow: bool) -> Vec<u8> {
 
 /// **Two runs of one clocked script give the same bytes, bit for bit**
 /// (§3), whatever the host's timing: the peer writes it at once in one run
-/// and a few bytes at a time in the other, and every record muir sent ---
-/// the six echoes with their times, and each "reached" --- is the same.
-/// **Fails** a clocked peer that reads the socket as bytes arrive rather
-/// than at its waits, which delivers by the host's clock.
+/// and a few bytes at a time in the other, pausing past the wait's wake
+/// inside a record, and every record muir sent --- the six echoes with
+/// their times, and each "reached" --- is the same. **Fails** a clocked
+/// peer that reads the socket as bytes arrive rather than at its waits,
+/// which delivers by the host's clock, or one that loses a record a wake
+/// cut.
 #[test]
 fn two_runs_of_one_clocked_script_give_the_same_bytes() {
     let fast = echo_run(false);
@@ -811,11 +973,22 @@ fn started(
     args: &[&str],
     clocked: bool,
 ) -> (support::Child, UnixStream) {
+    started_from(quux(), dir, name, args, clocked)
+}
+
+/// [`started`], from the command `c`.
+fn started_from(
+    mut c: std::process::Command,
+    dir: &std::path::Path,
+    name: &str,
+    args: &[&str],
+    clocked: bool,
+) -> (support::Child, UnixStream) {
     let path = dir.join(format!("{name}.sock"));
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).unwrap();
     let spec = format!("{}{}", path.display(), if clocked { ",clocked" } else { "" });
-    let child = quux()
+    let child = c
         .env("MUIR_QUUX_REVISION", "16")
         .args(["--main-memory-size", "2MW"])
         .args(args)
@@ -889,6 +1062,133 @@ fn quux_waits_in_clocked_mode_on_both_engines_and_repeats_itself() {
             "{engine}: the trace:\n{t}"
         );
         assert!(t.contains("the peer closed the socket"), "{engine}:\n{t}");
+    }
+}
+
+/// Whether `child` has closed its stdout and stderr, which it does as it
+/// ends, within `within`.
+fn ends_within(child: &support::Child, within: Duration) -> bool {
+    let t = Instant::now();
+    while t.elapsed() < within {
+        if child.stdout().closed() && child.stderr().closed() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// **A ^C ends a run that waits on a silent clocked peer as it ends any
+/// run** (§3), on both engines: muir has said "reached" at its first edge
+/// and the peer sends nothing more; `kill -INT`, and the run quits as one
+/// without a socket quits at a ^C --- "quit at PC", the same exit status
+/// --- within a second. **Fails** a wait that reads the socket until the
+/// peer sends, deaf to ^C.
+#[test]
+fn a_c_ends_a_run_waiting_on_a_silent_clocked_peer_within_a_second() {
+    let dir = scratch("ethernet-interrupt");
+    let prom = prom_16(&dir);
+    let p = prom.to_str().unwrap();
+    for engine in ["--micro", "--rtl"] {
+        let normal = quux()
+            .env("MUIR_QUUX_REVISION", "16")
+            .args(["--main-memory-size", "2MW", engine, "--prom", p])
+            .args(["--terminal", "127.0.0.1:0"])
+            .start();
+        let setup = |t: &str| t.contains("ethernet: MAC address");
+        assert!(
+            normal.stdout().wait_for(setup, WALL) || normal.stderr().wait_for(setup, WALL),
+            "{engine}: no setup"
+        );
+        // The handler is put on as the run loop starts, after the setup.
+        std::thread::sleep(Duration::from_millis(300));
+        normal.interrupt();
+        let normal = normal.wait();
+        let n = text(&normal);
+        assert!(n.contains("quit at PC"), "{engine}: a run without a socket, at ^C:\n{n}");
+
+        let (child, mut s) =
+            started(&dir, "interrupt", &[engine, "--prom", p, "--terminal", "127.0.0.1:0"], true);
+        let mut raw = Vec::new();
+        let (_, r0) = until_reached(&mut s, &mut raw);
+        assert!(r0 < 100, "{engine}: the first edge: {r0}");
+        std::thread::sleep(Duration::from_millis(300));
+        child.interrupt();
+        let ended = ends_within(&child, Duration::from_secs(1));
+        if !ended {
+            let so_far = format!("{}{}", child.stdout().so_far(), child.stderr().so_far());
+            child.kill();
+            panic!("{engine}: still waiting on the peer a second after ^C:\n{so_far}");
+        }
+        let out = child.wait();
+        let t = text(&out);
+        assert_eq!(out.status.code(), normal.status.code(), "{engine}: the exit status:\n{t}");
+        assert!(t.contains("quit at PC"), "{engine}: quit as at a ^C:\n{t}");
+        drop(s);
+    }
+}
+
+/// A clocked script on the looping PROM: "run until" 20,000, 40,000, 60,000
+/// and 80,000 ns, an Ethernet frame 500 ns after each time reached, then
+/// the close. `held`: before the third "run until" the peer is silent, and
+/// the run is ^C'd, held at the prompt, and continued. Every byte muir
+/// sent, and its trace.
+fn script_run(
+    dir: &std::path::Path,
+    engine: &str,
+    prom: &str,
+    held: bool,
+) -> (Vec<u8>, Vec<String>) {
+    let mut c = quux();
+    c.stdin(std::process::Stdio::piped());
+    let args = [engine, "--prom", prom, "--ethernet-trace", "--stop-after", "40000"];
+    let (mut child, mut s) =
+        started_from(c, dir, "held", &[&args[..], &["--terminal", "127.0.0.1:0"]].concat(), true);
+    let mut typed = child.stdin();
+    let mut raw = Vec::new();
+    let (_, mut r) = until_reached(&mut s, &mut raw);
+    for (k, t) in [20_000, 40_000, 60_000, 80_000].into_iter().enumerate() {
+        if held && k == 2 {
+            std::thread::sleep(Duration::from_millis(300));
+            child.interrupt();
+            assert!(
+                child.stdout().wait_for(|t| t.contains("held at ^C"), WALL),
+                "{engine}: not held:\n{}",
+                child.stdout().so_far()
+            );
+            std::thread::sleep(Duration::from_millis(300));
+            typed.write_all(b"continue\n").unwrap();
+        }
+        let mut w = timed(r + 500, &arp(60, k as u8));
+        w.extend(run_until(t));
+        s.write_all(&w).unwrap();
+        r = until_reached(&mut s, &mut raw).1;
+    }
+    drop(s);
+    drop(typed);
+    let out = child.wait();
+    let t = text(&out);
+    assert!(out.status.success(), "{engine}:\n{t}");
+    (raw, t.lines().filter(|l| l.starts_with("ethernet ")).map(String::from).collect())
+}
+
+/// **A clocked run held at ^C while it waits on its peer, and continued,
+/// sends the bytes of one never held** (§3), on both engines: the wait
+/// woken for the run loop's turns is the same wait, its records and its
+/// deliveries the machine's, however long the hold. **Fails** a run that
+/// goes on past the time named while ^C waits for the run loop, or a wait
+/// whose wakes move a record.
+#[test]
+fn a_clocked_run_held_at_c_and_continued_sends_the_same_bytes() {
+    let dir = scratch("ethernet-held");
+    let prom = prom_16(&dir);
+    let p = prom.to_str().unwrap();
+    for engine in ["--micro", "--rtl"] {
+        let (a, ta) = script_run(&dir, engine, p, false);
+        let (b, tb) = script_run(&dir, engine, p, true);
+        assert_eq!(ta.len(), 4, "{engine}: the four frames traced: {ta:?}");
+        assert!(a == b, "{engine}: the held run's bytes differ");
+        assert_eq!(ta, tb, "{engine}: the held run's trace differs");
     }
 }
 
