@@ -304,7 +304,8 @@ impl Mcr {
     /// section 6 (contract G3 revision 14, appendix A14.13). A file with
     /// section 6 is revision 14's: below 14, and on the CADR, no boot PROM
     /// reads section 6 (PROM 2001 halts at ERROR-BAD-SECTION-TYPE), and on
-    /// revision 14 its word must be 14. A `microcode` file without one is
+    /// revision 14 its word must be 14. On revision 16 it must be 15, the
+    /// microinstruction's revision. A `microcode` file without one is
     /// revision 13's, which revision 14's PROM 2002 refuses; a boot PROM
     /// without one is not refused here.
     pub fn check_revision(
@@ -336,6 +337,11 @@ impl Mcr {
             }
             _ => {}
         }
+        // Section 6 names the microinstruction's revision, so revision 16,
+        // revision 15's microinstruction with the Ethernet device, loads
+        // revision 15's files: one microcode runs on both (QUUX's
+        // Ethernet contract, §10).
+        let says = |ours: u32| if ours >= 16 { 15 } else { ours };
         match (self.hardware_revision, geometry.revision()) {
             (Some(r), None) => Err(format!(
                 "section 6 says hardware revision {r}, and the CADR reads no section 6"
@@ -344,12 +350,19 @@ impl Mcr {
                 "section 6 says hardware revision {r}, and this is revision {ours}, \
                  which reads no section 6"
             )),
-            (Some(r), Some(ours)) if r != ours => {
-                Err(format!("section 6 says hardware revision {r}, and this is revision {ours}"))
-            }
+            (Some(r), Some(ours)) if r != says(ours) => Err(if ours == says(ours) {
+                format!("section 6 says hardware revision {r}, and this is revision {ours}")
+            } else {
+                format!(
+                    "section 6 says hardware revision {r}, and this is revision {ours}, \
+                     which loads revision {}'s",
+                    says(ours)
+                )
+            }),
             (None, Some(ours)) if ours >= 14 && microcode => Err(format!(
                 "no section 6 first: microcode for revision 13 or below, \
-                 and revision {ours} loads microcode whose section 6 says {ours}"
+                 and revision {ours} loads microcode whose section 6 says {}",
+                says(ours)
             )),
             _ => Ok(()),
         }

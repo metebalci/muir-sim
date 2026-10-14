@@ -2731,9 +2731,10 @@ fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry, resuming: 
             return vec![Insn::extended(0); crate::machine::PROM_WORDS];
         }
         if geometry.extended() {
+            // Revision 16 loads revision 15's files (QUUX's Ethernet contract, §10).
             usage(&format!(
-                "QUUX revision {r} has no built-in boot PROM: --prom <file>, a revision-{r} .mcr",
-                r = geometry.revision().unwrap_or(15)
+                "QUUX revision {} has no built-in boot PROM: --prom <file>, a revision-15 .mcr",
+                geometry.revision().unwrap_or(15)
             ));
         }
         return if geometry == crate::machine::Geometry::CADR {

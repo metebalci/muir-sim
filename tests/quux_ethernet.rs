@@ -499,6 +499,76 @@ fn a_full_receive_ring_drops_and_counts() {
     assert_eq!(counters(&mut m)[2], 1, "257 drops read 1");
 }
 
+/// **A received Ethernet frame longer than 1,514 bytes is dropped as too
+/// long** (QUUX's Ethernet contract, §2.3): counted in
+/// `<23:16>`, nothing written and 251 staying, though its buffer has room;
+/// one of 1,514 bytes is delivered into the same buffer. **Fails** a device
+/// that delivers whatever fits its buffer.
+#[test]
+fn a_received_frame_over_1514_bytes_is_dropped_and_counted() {
+    let (mut m, s) = enabled(0, 0);
+    give(&mut m, 0, BUFFER_BYTES);
+    let before = m.main.clone();
+    for n in [1515, 1536] {
+        s.arrive(0, arp(n, 1));
+    }
+    at(&mut m, 10);
+    assert_eq!(get(&mut m, eth::RX_CONS), 0, "neither taken");
+    assert_eq!(counters(&mut m), [0, 0, 2, 0], "both counted in <23:16>");
+    assert!(m.main == before, "nothing written");
+    s.arrive(0, arp(1514, 2));
+    at(&mut m, 20);
+    assert_eq!(get(&mut m, eth::RX_CONS), 1, "1,514 bytes taken");
+    assert_eq!(bytes_at(&m, rx_buffer(&m, 0, 0), 1514), arp(1514, 2));
+}
+
+/// **A buffer off a line, or running past main memory, is taken as too
+/// short** (QUUX's Ethernet contract, §2.3): the Ethernet frame
+/// is dropped and counted in `<23:16>`, nothing is written, and 251 stays,
+/// so the next drops too. **Fails** a device that writes a buffer it
+/// cannot hold whole, or skips the bad entry.
+#[test]
+fn a_buffer_off_a_line_or_past_memory_is_too_short() {
+    let words = rev16().main.len() as u32;
+    for (buffer, what) in [(BUFFERS + 1, "off a line"), (words - 8, "past main memory")] {
+        let (mut m, s) = enabled(0, 1);
+        let e = RX_RING as usize;
+        m.main[e] = Word::from(buffer);
+        m.main[e + 1] = Word::from(BUFFER_BYTES);
+        put(&mut m, eth::RX_PROD, 1);
+        give(&mut m, 1, BUFFER_BYTES);
+        let before = m.main.clone();
+        s.arrive(0, arp(60, 1));
+        s.arrive(0, arp(60, 2));
+        at(&mut m, 10);
+        assert_eq!(get(&mut m, eth::RX_CONS), 0, "{what}: 251 stays");
+        assert_eq!(counters(&mut m), [0, 0, 2, 0], "{what}: both counted");
+        assert!(m.main == before, "{what}: nothing written");
+    }
+}
+
+/// **A refused transmit entry takes its 20 µs as a sent one does** (QUUX's
+/// Ethernet contract, §2.8): transmits are serial, so an
+/// entry after a refused one is due 20 µs after the refusal, rounded once
+/// to the grid. **Fails** a refusal that passes the entry at once.
+#[test]
+fn a_refused_transmit_entry_takes_20_us() {
+    let (mut m, s) = enabled(2, 0);
+    let grid = m.time_base();
+    m.ns = grid.grid(3 * PERIOD);
+    entry_tx(&mut m, 0, &arp(60, 0));
+    m.main[TX_RING as usize + 1] = 13;
+    put(&mut m, eth::TX_PROD, 1);
+    post(&mut m, 1, &arp(60, 1));
+    let refused = grid.grid(m.ns + SEND);
+    let sent = grid.grid(refused + SEND);
+    at(&mut m, sent - PERIOD);
+    assert_eq!(get(&mut m, eth::TX_CONS), 1, "the refusal passed, the next not yet due");
+    assert_eq!(counters(&mut m)[3], 1, "refused");
+    at(&mut m, sent);
+    assert_eq!(s.sent(), vec![(sent, arp(60, 1))], "20 us after the refusal");
+}
+
 /// **A received Ethernet frame is written as the file device writes**
 /// (§2.2, §2.3): byte k in `<8(k mod 4)+7:8(k mod 4)>` of word k/4, every
 /// word a fixnum, the bytes past its end in the last word 0, no word past
@@ -1083,25 +1153,73 @@ fn revision_15_s_checkpoint_has_no_ethernet_device() {
 
 // --- the switch -------------------------------------------------------------------
 
-/// A revision-16 boot PROM: section 6 saying 16, and a jump to itself at
-/// 36000.
-fn prom_16(dir: &std::path::Path) -> std::path::PathBuf {
+/// A revision-15 `.mcr` whose section 6 says `revision`: a boot PROM, a
+/// jump to itself at 36000, or microcode, a jump to itself at 100 and A
+/// memory's version at 40.
+fn mcr_saying(revision: u32, prom: bool) -> Vec<u8> {
     use muir::mcr;
+    let at = if prom { 0o36000 } else { 0o100 };
     let jump = muir::isa::asm::JUMP
-        | muir::isa::asm::target(0o36000)
+        | muir::isa::asm::target(at)
         | muir::isa::asm::ALWAYS
         | muir::isa::asm::N;
-    let mut w = vec![mcr::FORMAT_WORD, 2];
-    w.extend_from_slice(&[6, 1, 32, 32, 0, 0, 0, 0, 16]);
-    w.extend_from_slice(&[1, 1, 64, 64, 0o36000, 0, 0, 0, jump as u32, (jump >> 32) as u32]);
+    let mut w = vec![mcr::FORMAT_WORD, if prom { 2 } else { 3 }];
+    w.extend_from_slice(&[6, 1, 32, 32, 0, 0, 0, 0, revision]);
+    w.extend_from_slice(&[1, 1, 64, 64, at as u32, 0, 0, 0, jump as u32, (jump >> 32) as u32]);
+    if !prom {
+        w.extend_from_slice(&[4, 1, 40, 64, 0o40, 0, 0, 0, 2002, 0o005]);
+    }
     let mut b: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
     b.resize(b.len().div_ceil(mcr::BLOCK_BYTES) * mcr::BLOCK_BYTES, 0);
+    b
+}
+
+/// Revision 16's boot PROM: a revision-15 `.mcr`, section 6 saying 15,
+/// a jump to itself at 36000.
+fn prom_16(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("prom-16.mcr");
-    std::fs::write(&path, b).unwrap();
+    std::fs::write(&path, mcr_saying(15, true)).unwrap();
     path
 }
 
-/// **`MUIR_QUUX_REVISION=16` runs revision 16 on both engines**: the start
+/// **Revision 16 loads revision 15's `.mcr`, and only that** (QUUX's
+/// Ethernet contract, §10): section 6 names the microinstruction's
+/// revision, so one microcode runs on 15 and 16. On 16 a PROM and a
+/// microcode file saying 15 are taken, and ones saying 16 or 14 are
+/// refused, naming 15; on 15, 15 is taken and 16 refused, as before.
+/// **Fails** a reader that takes 15 on the PROM only, or that takes 15 or
+/// 16 on 16.
+#[test]
+fn revision_16_loads_a_revision_15_mcr_and_refuses_others() {
+    use muir::mcr::parse_quux_microcode;
+    use muir::prom::parse_quux_mcr;
+    let (g15, g16) = (Geometry::QUUX_15, Geometry::QUUX_16);
+    for g in [g15, g16] {
+        let m = parse_quux_microcode(&mcr_saying(15, false), g).unwrap();
+        assert_eq!((m.hardware_revision, m.version()), (Some(15), Some(2002)), "{g:?}");
+        parse_quux_mcr(&mcr_saying(15, true), g).unwrap();
+    }
+    for r in [16, 14] {
+        for e in [
+            parse_quux_microcode(&mcr_saying(r, false), g16).map(|_| ()).unwrap_err(),
+            parse_quux_mcr(&mcr_saying(r, true), g16).map(|_| ()).unwrap_err(),
+        ] {
+            assert!(
+                e.contains(&format!("section 6 says hardware revision {r}, and this is revision 16, which loads revision 15's"), ),
+                "{r}: {e}"
+            );
+        }
+    }
+    for e in [
+        parse_quux_microcode(&mcr_saying(16, false), g15).map(|_| ()).unwrap_err(),
+        parse_quux_mcr(&mcr_saying(16, true), g15).map(|_| ()).unwrap_err(),
+    ] {
+        assert!(e.contains("section 6 says hardware revision 16, and this is revision 15"), "{e}");
+    }
+}
+
+/// **`MUIR_QUUX_REVISION=16` runs revision 16 on both engines**, from a
+/// boot PROM whose section 6 says 15 (QUUX's Ethernet contract, §10): the start
 /// names it, the checkpoint records it at its own version, and revisions
 /// 15 and 16 refuse each other's checkpoints, naming the revision.
 #[test]

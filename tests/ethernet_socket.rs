@@ -719,8 +719,8 @@ fn ethernet_mac_takes_six_hex_pairs_and_no_group_address() {
 
 use support::{Run, quux, scratch, text};
 
-/// A revision-16 boot PROM that loops: section 6 saying 16, and a jump to
-/// itself at 36000.
+/// Revision 16's boot PROM that loops: a revision-15 `.mcr`, section 6
+/// saying 15, and a jump to itself at 36000.
 fn prom_16(dir: &std::path::Path) -> std::path::PathBuf {
     use muir::mcr;
     let jump = muir::isa::asm::JUMP
@@ -728,7 +728,7 @@ fn prom_16(dir: &std::path::Path) -> std::path::PathBuf {
         | muir::isa::asm::ALWAYS
         | muir::isa::asm::N;
     let mut w = vec![mcr::FORMAT_WORD, 2];
-    w.extend_from_slice(&[6, 1, 32, 32, 0, 0, 0, 0, 16]);
+    w.extend_from_slice(&[6, 1, 32, 32, 0, 0, 0, 0, 15]);
     w.extend_from_slice(&[1, 1, 64, 64, 0o36000, 0, 0, 0, jump as u32, (jump >> 32) as u32]);
     let mut b: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
     b.resize(b.len().div_ceil(mcr::BLOCK_BYTES) * mcr::BLOCK_BYTES, 0);

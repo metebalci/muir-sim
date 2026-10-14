@@ -58,7 +58,8 @@
 //! address or to broadcast, and drops any other with no count; then the
 //! rules' type filter, counted in `<7:4>`, and their IPv4 checks, counted in
 //! `<15:9>`; then a buffer: none given (250 = 251), or one shorter than the
-//! Ethernet frame, drops it, counted in `<23:16>`. A dropped Ethernet frame
+//! Ethernet frame, drops it, counted in `<23:16>`, as does an Ethernet
+//! frame longer than 1,514 bytes. A dropped Ethernet frame
 //! takes no buffer and writes nothing. A taken one is written into the
 //! buffer at slot 251, the bytes past its end in the last word 0 and no
 //! word past it; its length goes into the entry's word 2, the cache is made
@@ -749,9 +750,15 @@ impl EthernetDevice {
         let (buf, room) = (main[e].low() & ADDRESS, main[e + 1].low());
         let n = f.len();
         let words = n.div_ceil(4);
-        if n > room as usize || buf & LINE != 0 || buf as usize + words > main.len() {
+        if n > MAX_FRAME as usize
+            || n > room as usize
+            || buf & LINE != 0
+            || buf as usize + words > main.len()
+        {
             self.rx_drops = (self.rx_drops + 1) & 0xff;
-            let why = if n > room as usize {
+            let why = if n > MAX_FRAME as usize {
+                format!("longer than {MAX_FRAME} bytes")
+            } else if n > room as usize {
                 format!("entry {index}'s buffer of {room} bytes is too short")
             } else if buf & LINE != 0 {
                 format!("entry {index}'s buffer at {buf:o}, off a line")

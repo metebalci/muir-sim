@@ -2392,8 +2392,11 @@ when `MUIR_QUUX_REVISION` is `16`. It is revision 15 with the Ethernet
 device, `muir::ethernet_device`; everything this section does not mention
 is revision 15's, its Chaosnet interface at 140-157 included. MACHINE-ID
 says 16, feature word 15 reads 7, its `<2>` the device, and word 100 `<8>`
-is its interrupt. Its `.mcr` files say 16 in section 6, as revision 15's say
-15, and no boot PROM for it is built in. A checkpoint of it is version 52,
+is its interrupt. It loads revision 15's `.mcr` files, whose section 6
+says 15, the microinstruction's revision, and refuses any other, so one
+microcode runs on 15 and 16
+(`revision_16_loads_a_revision_15_mcr_and_refuses_others`); no boot PROM
+for it is built in. A checkpoint of it is version 52,
 the device's state after revision 15's, and revisions 15 and 16 refuse
 each other's. What holds it is `tests/quux_ethernet.rs` and, for the
 posted writes and the cache, the last tests of `tests/revision_15_rtl.rs`.
@@ -2467,8 +2470,12 @@ rules' type filter, counted in `<7:4>`, and their IPv4 checks, counted in
 (`the_type_filter_and_the_ipv4_checks_count_and_take_no_buffer`). Then a
 buffer: none given (250 = 251), or one shorter than the Ethernet frame,
 drops it, counted in `<23:16>`, and the buffer stays for the next
-(`a_full_receive_ring_drops_and_counts`). A buffer off a line, or running
-past main memory, is taken as too short. A taken Ethernet frame is written
+(`a_full_receive_ring_drops_and_counts`); so does an Ethernet frame longer
+than 1,514 bytes, whatever its buffer's room
+(`a_received_frame_over_1514_bytes_is_dropped_and_counted`). A buffer off a
+line, or running past main memory, is taken as too short: nothing is
+written and 251 stays, so later Ethernet frames drop too
+(`a_buffer_off_a_line_or_past_memory_is_too_short`). A taken Ethernet frame is written
 into the buffer at slot 251 as the file device writes a buffer, byte k in
 `<8(k mod 4)+7:8(k mod 4)>` of word k/4, every word a fixnum, the bytes past
 its end in the last word 0 and no word past it; its length goes into the
@@ -2504,7 +2511,8 @@ it, and at power-on it is disabled. The four counters run free from
 power-on (`reset_devices_disables_it_and_clears_the_fault_bits`).
 
 **Time.** A transmit entry is sent 20 µs after it is due: after the later of
-the producer write that posts it and the previous entry's sending,
+the producer write that posts it and the previous entry's sending, a
+refused entry's included (`a_refused_transmit_entry_takes_20_us`),
 reckoned exactly in units of 0.5 ns and rounded up once to the first clock
 at or after its end, as a file device command's time is. A received
 Ethernet frame is delivered at the first clock at or after it arrives,
