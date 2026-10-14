@@ -472,6 +472,9 @@ impl Micro {
         // QUUX's file device completes what is due at this edge, before
         // the next microcycle begins (contract Q9).
         self.m.advance_file_device();
+        // And the Ethernet device, revision 16's: its transmits due and
+        // what has arrived (QUUX's Ethernet contract, §2.8).
+        self.m.advance_ethernet_at_edge();
         let boot = std::mem::take(&mut self.m.prog_boot);
         let reset = std::mem::take(&mut self.m.prog_reset) || boot;
         if reset {

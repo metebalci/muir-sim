@@ -8,9 +8,10 @@ is the CADR as MIT built it; muir-fpga and muir-sys choose it with
 This page says where QUUX, revision 13, differs from the CADR. Everything
 it does not mention is the CADR's. Its word is 40 bits, the tag `<39:32>`
 over the field `<31:0>` (contract G2). Revision 13 is what `quux` runs by
-default; [revision 14](#revision-14-a-page-table-behind-a-tlb) and
-[revision 15](#revision-15-the-64-bit-microinstruction), at the end, are
-what it runs when `MUIR_QUUX_REVISION` is `14` or `15`.
+default; [revision 14](#revision-14-a-page-table-behind-a-tlb),
+[revision 15](#revision-15-the-64-bit-microinstruction) and
+[revision 16](#revision-16-the-ethernet-device), at the end, are what it
+runs when `MUIR_QUUX_REVISION` is `14`, `15` or `16`.
 
 QUUX's software is numbered in the 2000s and the CADR's in the 1000s: QUUX
 runs muir-sys's System 2001 on microcode 2001 and boots on PROM 2001.
@@ -152,7 +153,7 @@ They are read-only and read like any device register, through the map:
 | 12 | the main screen: bits a pixel in 31:16, words a line in 15:0 |
 | 13 | the main screen: its buffer's first physical address, the frame buffer window's, `1760000000` |
 | 14 | the microsecond clock: 1 |
-| 15 | the optional devices, a bit each: 3, bit 0 the real-time clock and bit 1 the file device; a later optional device takes the next bit |
+| 15 | the optional devices, a bit each: 3, bit 0 the real-time clock and bit 1 the file device; on revision 16 7, bit 2 the Ethernet device |
 | 16 | the number of interval timers: 3 |
 | 17 | the MACRO DISPATCH MEMORY's entries: 1,024 |
 | 20-24 | the board name, 4 characters a word in 31:0 |
@@ -913,7 +914,9 @@ port](#the-memory-port-and-the-device-registers)).
 | 160-177 | the file device | 160-171 (below); 172-177 reserved |
 | 200-207 | block-disk | 200: status when read, command when written. 201: the last memory address when read, the command list pointer when written. 202: the disk address, read and written. 203: START, written; reads 0. The bits are [block-disk's](#block-disk), the done interrupt's enable command `<11>`. 204-207 reserved |
 | 210-217 | the video controller | 210: mode, `<2>` black-on-white reads back, the other bits read 0 and a write of them is dropped. 211-217 reserved |
-| 220-377 | none | reserved |
+| 220-237 | the memory system, revision 14 on | 220-227 ([revision 14](#revision-14-a-page-table-behind-a-tlb)); 230-237 reserved; on revision 13 all reserved |
+| 240-257 | the Ethernet device, revision 16 | 240-257 ([revision 16](#revision-16-the-ethernet-device)); below revision 16 reserved |
+| 260-377 | none | reserved |
 
 **Reserved** means a read gives 0 and a write changes nothing. Everything
 past main memory's end below the frame buffer window, past the frame
@@ -938,7 +941,8 @@ Unibus NXM bit, `766044` `<3>`.
 | `<5>` | the mouse | 123 `<0>` and 123 `<8>` | reading 122; `<8>` off |
 | `<6>` | the network | the Chaosnet interface's request, as the CADR's CSR gives it | as on the CADR, through 140-145; `RESET-DEVICES` |
 | `<7>` | the file device | 170 ≠ 171 and 160 `<8>` | writing 171 up to 170; `<8>` off; a disable; `RESET-DEVICES` |
-| `<31:8>` | reserved | never | --- |
+| `<8>` | the Ethernet device, revision 16 | 251 ≠ 252 and 240 `<8>` | writing 252 up to 251; `<8>` off; a disable; `RESET-DEVICES` |
+| `<31:9>` | reserved | never | --- |
 
 Each bit is a level, and their OR is the interrupt pending that jump
 conditions 5 and 6 test. So one write turns any of them off: 112 or 114
@@ -1537,8 +1541,8 @@ and the band reaches its listener on it with 2001 in `A-VERSION`
 
 ## The checkpoint
 
-**A checkpoint of QUUX is a 40-bit machine's, version 50**, and revision
-15's version 51, which say the width: every word 5 bytes, `<7:0>` first and the tag last, so that main
+**A checkpoint of QUUX is a 40-bit machine's, version 50**, revision
+15's version 51 and revision 16's version 52, which say the width: every word 5 bytes, `<7:0>` first and the tag last, so that main
 memory in it is packed storage byte for byte (contract G2 appendix A1.13);
 the dispatch memory of 4,096 entries, the map's 8,192 and 4,096 entries,
 the overflow flag, and the rest. A checkpoint of the CADR is version 49,
@@ -2379,6 +2383,147 @@ dispatch KEY KIND TARGET EXECUTIONS
 The coverage comments give, for each class, the sites in the control store
 the run loaded and those executed, which the file keys, and the share of
 their executions whose outcome is the one the record predicts.
+
+## Revision 16: the Ethernet device
+
+muir has QUUX revision 16 beside revisions 13 to 15 (QUUX's Ethernet
+contract, §2 and §10): `Geometry::QUUX_16` in the library, which `quux` runs
+when `MUIR_QUUX_REVISION` is `16`. It is revision 15 with the Ethernet
+device, `muir::ethernet_device`; everything this section does not mention
+is revision 15's, its Chaosnet interface at 140-157 included. MACHINE-ID
+says 16, feature word 15 reads 7, its `<2>` the device, and word 100 `<8>`
+is its interrupt. Its `.mcr` files say 16 in section 6, as revision 15's say
+15, and no boot PROM for it is built in. A checkpoint of it is version 52,
+the device's state after revision 15's, and revisions 15 and 16 refuse
+each other's. What holds it is `tests/quux_ethernet.rs` and, for the
+posted writes and the cache, the last tests of `tests/revision_15_rtl.rs`.
+
+**The registers**, words 240-257:
+
+| Word | | |
+|---|---|---|
+| 240 | control, read and written | `<0>` enable, `<8>` interrupt enable |
+| 241 | status, read only | `<0>` enabled, `<1>` quiet, `<2>` configuration refused, `<3>` index fault, `<7:4>` received Ethernet frames dropped by the type filter mod 16, `<8>` an Ethernet frame waiting (251 ≠ 252), `<15:9>` received Ethernet frames dropped by the IPv4 checks mod 128, `<23:16>` received Ethernet frames dropped mod 256, `<31:24>` transmit entries refused mod 256 |
+| 242 | transmit ring base | `<27:0>` a physical word address on an 8-word line |
+| 243 | transmit ring size | `<3:0>` the log2 of its entries, 0 to 8 |
+| 244 | transmit producer, the processor's | `<15:0>` |
+| 245 | transmit consumer, the device's, read only | `<15:0>` |
+| 246 | receive ring base | as 242 |
+| 247 | receive ring size | as 243 |
+| 250 | receive producer, the processor's | `<15:0>`: buffers given to the device |
+| 251 | receive consumer, the device's, read only | `<15:0>`: buffers filled |
+| 252 | receive taken, the processor's | `<15:0>`: filled entries taken back |
+| 253 | the MAC address, high, read only | `<15:0>`: bytes 0-1, byte 0 in `<15:8>` |
+| 254 | the MAC address, low, read only | `<31:0>`: bytes 2-5, byte 2 in `<31:24>` |
+| 255 | the IPv4 address, read only | `<31:0>`: a.b.c.d as `a<<24 \| b<<16 \| c<<8 \| d` |
+| 256 | the netmask, read only | as 255 |
+| 257 | the gateway, read only | as 255; 0 for none |
+
+253-257 are the host's (`ethernet_device::Host`): `02:00:00:00:00:01` and
+169.254.0.2/30 by 169.254.0.1 unless the run says otherwise. No reset
+changes them, and a checkpoint does not keep them. Writes of the read-only
+words are ignored
+(`the_page_has_240_to_257_on_revision_16_and_reserves_them_on_15`).
+
+**Configuration** is the file device's. 242, 243, 246 and 247 are written
+while disabled and ignored while enabled. The enable checks them: a base
+off a line, a size over 8, or a ring past main memory is refused, status
+`<2>`, and the device stays disabled
+(`the_enable_refuses_a_ring_off_a_line_too_big_or_past_memory`). While
+disabled the indexes read 0 and writes of 244, 250 and 252 go nowhere
+(`the_configuration_words_read_back_and_the_indexes_go_nowhere_while_disabled`).
+A write of 240 clears `<2>` and `<3>`; 240 `<8>` is taken only by a write
+that enables the device or leaves it enabled.
+
+**The rings.** Each index is 16 bits and runs free, and an entry's slot is
+its index mod the ring's size (`the_rings_wrap_at_1_2_and_256_entries`,
+`the_indexes_run_free_across_2_to_the_16`). An entry is 8 words. A transmit
+entry's word 0 is the Ethernet frame's address, `<27:0>`, on a line, and
+word 1 its length in bytes, 14 to 1514; its other words are 0. A receive
+entry's word 0 is the buffer's address, on a line, and word 1 its length in
+bytes, both the processor's; word 2 is the received Ethernet frame's
+length, the device's. There is no response ring: a transmit is done when
+245 passes it. An index write is ignored, and sets `<3>`, if it makes
+244 − 245 more than the transmit ring's size or 250 − 252 more than the
+receive ring's, takes 252 past 251, or moves an index backwards
+(`an_index_write_against_the_rules_is_ignored_and_faults`).
+
+**Transmit.** The device takes entries from 245 up to 244 in order, sends
+each Ethernet frame and advances 245. An entry whose length is outside
+14-1514, or whose Ethernet frame is off a line or past main memory, is not
+sent: it is counted in `<31:24>`, and 245 passes it. The checksum and type
+rules (contract §2.4, `muir::ethernet_offload`) fill in the checksums in
+the copy the device sends, or refuse the Ethernet frame, which is counted
+the same way (`transmit_refusals_are_counted_and_passed`). A transmit
+writes no memory (`a_transmit_writes_no_memory`). With nothing behind the
+device, a transmitted Ethernet frame goes nowhere and 245 still advances.
+
+**Receive.** The device takes an Ethernet frame addressed to its MAC address
+or to broadcast; any other is dropped and counted nowhere, and there is no
+promiscuous bit
+(`the_mac_address_filter_takes_its_own_address_and_broadcast`). Then the
+rules' type filter, counted in `<7:4>`, and their IPv4 checks, counted in
+`<15:9>`; a frame either drops takes no buffer
+(`the_type_filter_and_the_ipv4_checks_count_and_take_no_buffer`). Then a
+buffer: none given (250 = 251), or one shorter than the Ethernet frame,
+drops it, counted in `<23:16>`, and the buffer stays for the next
+(`a_full_receive_ring_drops_and_counts`). A buffer off a line, or running
+past main memory, is taken as too short. A taken Ethernet frame is written
+into the buffer at slot 251 as the file device writes a buffer, byte k in
+`<8(k mod 4)+7:8(k mod 4)>` of word k/4, every word a fixnum, the bytes past
+its end in the last word 0 and no word past it; its length goes into the
+entry's word 2, the cache is made coherent, and 251 advances
+(`a_received_frame_is_written_as_fixnums_with_its_tail_zero`). The driver
+keeps a buffer within one 1,024-word page: the device cannot see pages.
+
+**Coherence** follows revision 15's rules. On the pipeline a write of 244
+or 250 moves only once every earlier write is answered, as CMD_PROD's does
+(`a_transmit_entry_in_the_posted_writes_is_read_whole`,
+`a_receive_entry_in_the_posted_writes_is_taken_once_it_lands`). Before 251
+moves, the cache holds nothing stale: by default through the whole-cache
+sweep, as for a file device completion; with
+`EthernetDevice::coherence` set to `LineClearing`, a measurement switch,
+through clearing the sets of the buffer's lines it wrote and of the entry's
+line, as block-disk's words clear theirs, at once
+(`a_delivery_asks_for_the_sweep_or_for_its_lines`,
+`a_received_frame_is_seen_after_251_moves_under_both_mechanisms`). `micro`
+has no cache.
+
+**The interrupt**, word 100 `<8>`, is up while 240 `<8>` is on and 251 ≠
+252: a level, cleared by writing 252 up to 251, by `<8>` off, by a disable
+and by `RESET-DEVICES`. Status `<8>` is the same, ungated
+(`word_100_bit_8_is_a_frame_waiting_under_the_interrupt_enable`).
+
+**Reset and quiet.** Disable is the reset: transmit entries not yet sent
+are dropped, nothing more is received, the indexes and the interrupt
+enable go to 0, and the bases, the sizes and 253-257 stay. Quiet, `<1>`,
+is not enabled, and on muir it is up at once
+(`disable_drops_what_waits_and_keeps_the_configuration`). `RESET-DEVICES`
+disables it and clears `<2>` and `<3>`; `PROG.UNIBUS.RESET` does not reach
+it, and at power-on it is disabled. The four counters run free from
+power-on (`reset_devices_disables_it_and_clears_the_fault_bits`).
+
+**Time.** A transmit entry is sent 20 µs after it is due: after the later of
+the producer write that posts it and the previous entry's sending,
+reckoned exactly in units of 0.5 ns and rounded up once to the first clock
+at or after its end, as a file device command's time is. A received
+Ethernet frame is delivered at the first clock at or after it arrives,
+and never before the time the device has reached
+(`time_is_on_the_grid`, `a_transmit_takes_20_us_at_every_period`). The
+20 µs is **unverified**: the file device's estimate of the boards' round
+trip, which the boards' own measurement settles.
+
+**The host side** is what sits behind the device, `ethernet_device::Peer`:
+a test attaches a scripted one in the process with
+`Machine::attach_ethernet_peer` (`ethernet_device::Script`). A copy of the
+machine has nothing behind its device.
+
+**A checkpoint** never refuses on the device's account: waiting transmit
+entries are in main memory and their indexes are registers, so a resume
+sends them, at the times an unbroken run would
+(`a_checkpoint_with_transmits_waiting_resumes_and_sends_them`). Revision
+15's checkpoint has no device in it
+(`revision_15_s_checkpoint_has_no_ethernet_device`).
 
 ## Not modeled
 

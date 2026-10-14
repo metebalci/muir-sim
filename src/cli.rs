@@ -2674,7 +2674,10 @@ fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry, resuming: 
             return vec![Insn::extended(0); crate::machine::PROM_WORDS];
         }
         if geometry.extended() {
-            usage("QUUX revision 15 has no built-in boot PROM: --prom <file>, a revision-15 .mcr");
+            usage(&format!(
+                "QUUX revision {r} has no built-in boot PROM: --prom <file>, a revision-{r} .mcr",
+                r = geometry.revision().unwrap_or(15)
+            ));
         }
         return if geometry == crate::machine::Geometry::CADR {
             crate::prom::boot_prom()
@@ -4384,9 +4387,9 @@ fn refuse_other_executable((path, c): &(PathBuf, Checkpoint), exe: &str) {
 }
 
 /// **Which revision `quux` runs** (contract G3 revision 14): `geometry`
-/// as it is, revision 13, unless `MUIR_QUUX_REVISION` says 14 or 15. Unset
-/// or `13` is revision 13, the released machine; any other value is refused
-/// at the start, naming the three. `cadr` does not read it. The switch is
+/// as it is, revision 13, unless `MUIR_QUUX_REVISION` says 14, 15 or 16.
+/// Unset or `13` is revision 13, the released machine; any other value is
+/// refused at the start, naming the four. `cadr` does not read it. The switch is
 /// not a documented flag: a bitstream, which muir-fpga builds for one
 /// revision, could not carry it.
 fn quux_revision(geometry: crate::machine::Geometry) -> crate::machine::Geometry {
@@ -4399,9 +4402,10 @@ fn quux_revision(geometry: crate::machine::Geometry) -> crate::machine::Geometry
         Some(v) if v == "13" => geometry,
         Some(v) if v == "14" => Geometry::QUUX_14,
         Some(v) if v == "15" => Geometry::QUUX_15,
+        Some(v) if v == "16" => Geometry::QUUX_16,
         Some(v) => {
             eprintln!(
-                "{}: MUIR_QUUX_REVISION={:?}: revision 13, 14 or 15",
+                "{}: MUIR_QUUX_REVISION={:?}: revision 13, 14, 15 or 16",
                 executable(),
                 v.to_string_lossy()
             );
@@ -4424,7 +4428,7 @@ fn refuse_other_revision((path, c): &(PathBuf, Checkpoint), geometry: crate::mac
     };
     // A retired revision, 11 or 12, is refused by what it is when the
     // checkpoint is read.
-    if let (Some(theirs @ (13..=15)), Some(ours)) = (saved.revision(), geometry.revision())
+    if let (Some(theirs @ (13..=16)), Some(ours)) = (saved.revision(), geometry.revision())
         && theirs != ours
     {
         let p = path.display();
@@ -6702,6 +6706,13 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 s,
                 "cache: {} words, lines of {}, {}-way, a hit in {} ns",
                 c.words, c.line_words, c.ways, c.hit_ns
+            )
+            .unwrap();
+        }
+        if geometry.revision() == Some(16) {
+            writeln!(
+                s,
+                "machine: quux, revision 16: revision 15 with the Ethernet device at register-page words 240-257, its interrupt word 100 <8>; rtl is its four-stage pipeline"
             )
             .unwrap();
         }

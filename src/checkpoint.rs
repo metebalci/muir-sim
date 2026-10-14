@@ -52,9 +52,15 @@ pub const VERSION_40: u32 = 50;
 /// [`VERSION_40`], which has them, still loads.
 pub const VERSION_15: u32 = 51;
 
+/// QUUX revision 16's: revision 15's, with the Ethernet device's state
+/// after it (QUUX's Ethernet contract, §2.9). Revision 15 keeps
+/// [`VERSION_15`].
+pub const VERSION_16: u32 = 52;
+
 /// The version a checkpoint of a machine of `geometry` is written at.
 pub fn version_for(geometry: &crate::machine::Geometry) -> u32 {
     match geometry.word_bits {
+        _ if geometry.ethernet() => VERSION_16,
         _ if geometry.extended() => VERSION_15,
         40 => VERSION_40,
         _ => VERSION,
@@ -436,7 +442,8 @@ impl io::Read for Reader<'_> {
 /// A checkpoint read back: what its header says, and its body.
 #[derive(Debug)]
 pub struct Checkpoint {
-    /// The format's version: [`VERSION`], [`VERSION_40`] or [`VERSION_15`].
+    /// The format's version: [`VERSION`], [`VERSION_40`], [`VERSION_15`] or
+    /// [`VERSION_16`].
     pub version: u32,
     /// The machine's word, as the version says: 32 or 40 bits.
     pub word_bits: u32,
@@ -503,10 +510,10 @@ pub fn read(path: &Path) -> io::Result<Checkpoint> {
     let version = r.u32()?;
     let word_bits = match version {
         VERSION => 32,
-        VERSION_40 | VERSION_15 => 40,
+        VERSION_40 | VERSION_15 | VERSION_16 => 40,
         _ => {
             return Err(bad(format!(
-                "format version {version}; this build reads {VERSION}, {VERSION_40} and {VERSION_15}"
+                "format version {version}; this build reads {VERSION}, {VERSION_40}, {VERSION_15} and {VERSION_16}"
             )));
         }
     };

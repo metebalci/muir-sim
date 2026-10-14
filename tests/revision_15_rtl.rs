@@ -6429,3 +6429,223 @@ fn d_s_wait_is_metered() {
     assert_eq!(e.meters.d_wait, gaps.iter().sum::<u64>(), "the meter, against the commits");
     assert_eq!(on.d_wait, e.meters.d_wait, "the same run");
 }
+
+// --- Revision 16's Ethernet device behind the posted writes and the cache ------
+
+/// Revision 16 (QUUX's Ethernet contract, §10).
+const REV16: Geometry = Geometry::QUUX_16;
+
+/// The Ethernet device's rings, buffers and frame, physical word
+/// addresses, each on a line: one entry a ring; buffers A and B; a word
+/// elsewhere.
+const ETH_TX: u64 = 0o1000;
+const ETH_RX: u64 = 0o1100;
+const ETH_A: u64 = 0o1200;
+const ETH_B: u64 = 0o1300;
+const ETH_FRAME: u64 = 0o1400;
+const ELSEWHERE: u64 = 0o5000;
+
+/// A 60-byte ARP Ethernet frame to the device's own MAC address, its bytes
+/// from 14 on counting from `seed`.
+fn eth_frame(seed: u8) -> Vec<u8> {
+    let mut f = vec![0x02, 0, 0, 0, 0, 0x01, 0x02, 0, 0, 0, 0, 0x02, 0x08, 0x06];
+    f.extend((0..46).map(|k| seed.wrapping_add(k)));
+    f
+}
+
+/// Word `k` of `f` as the device writes it: bytes 4k to 4k + 3, the first
+/// in `<7:0>`.
+fn eth_word(f: &[u8], k: usize) -> Word {
+    Word::from(u32::from_le_bytes(f[4 * k..4 * k + 4].try_into().unwrap()))
+}
+
+/// The register-page word `w`'s virtual address.
+fn eth_reg(w: u32) -> Word {
+    REGISTER_PAGE | Word::from(w)
+}
+
+/// The rings set up through the registers and the device enabled.
+fn eth_enable(p: &mut Prog) {
+    use muir::ethernet_device::{CONTROL, RX_BASE, RX_SIZE, TX_BASE, TX_SIZE};
+    p.write(ETH_TX, eth_reg(TX_BASE));
+    p.write(0, eth_reg(TX_SIZE));
+    p.write(ETH_RX, eth_reg(RX_BASE));
+    p.write(0, eth_reg(RX_SIZE));
+    p.write(1, eth_reg(CONTROL));
+}
+
+/// Rounds until the register-page word `w` reads `v`.
+fn eth_wait(p: &mut Prog, w: u32, v: Word) {
+    let (at, want) = (p.k(eth_reg(w)), p.k(v));
+    let round = p.at();
+    p.op(ALU | SETA | a_src(at) | START_READ);
+    p.fill(1);
+    p.op(jcond(3) | 1 << 6 | SRC_MD | a_src(want) | target(round));
+    p.fill(1);
+}
+
+/// The receive program: the device enabled; receive entry 0 given buffer
+/// A of 64 bytes; buffer A's word 3, the entry's word 2 and the word
+/// elsewhere read into M 24, 25 and 27, so that their lines are cached;
+/// 250 written 1; a round until 251 reads 1; the three read again into M
+/// 26, 30 and 31.
+fn eth_receive_program() -> Prog {
+    let mut p = Prog::default();
+    p.main.push((ETH_A as usize + 3, 0o1111));
+    p.main.push((ETH_RX as usize + 2, 0o2222));
+    p.main.push((ELSEWHERE as usize, 0o3333));
+    eth_enable(&mut p);
+    p.write(ETH_A, PHYS | ETH_RX);
+    p.write(64, PHYS | (ETH_RX + 1));
+    p.read(PHYS | (ETH_A + 3), 0o24);
+    p.read(PHYS | (ETH_RX + 2), 0o25);
+    p.read(PHYS | ELSEWHERE, 0o27);
+    p.write(1, eth_reg(muir::ethernet_device::RX_PROD));
+    eth_wait(&mut p, muir::ethernet_device::RX_CONS, 1);
+    p.read(PHYS | (ETH_A + 3), 0o26);
+    p.read(PHYS | (ETH_RX + 2), 0o30);
+    p.read(PHYS | ELSEWHERE, 0o31);
+    p.stop();
+    p
+}
+
+/// `p`'s machine on revision 16 under `coherence`, its scripted peer
+/// sending `frames` at their times.
+fn eth_machine(
+    p: &Prog,
+    coherence: muir::ethernet_device::Coherence,
+    frames: &[(u64, Vec<u8>)],
+) -> (Machine, muir::ethernet_device::Script) {
+    let mut m = machine(p, REV16);
+    m.ethernet.coherence = coherence;
+    let s = muir::ethernet_device::Script::default();
+    for (t, f) in frames {
+        s.arrive(*t, f.clone());
+    }
+    m.attach_ethernet_peer(Box::new(s.clone()));
+    (m, s)
+}
+
+/// **A received Ethernet frame over lines the cache holds is read after
+/// 251 moves, under either mechanism** (QUUX's Ethernet contract, §2.5):
+/// the processor has caught buffer A's word, the entry's word 2 and a word
+/// elsewhere; the frame arrives while it rounds on 251; after it, it reads
+/// the frame's word and its length, on the pipeline as on `micro`. The
+/// sweep swept, and the word elsewhere missed again; line clearing swept
+/// nothing, and the word elsewhere still hit.
+#[test]
+fn a_received_frame_is_seen_after_251_moves_under_both_mechanisms() {
+    use muir::ethernet_device::Coherence;
+    let p = eth_receive_program();
+    let f = eth_frame(0x40);
+    let frames = [(200_000, f.clone())];
+    let mut misses = Vec::new();
+    for coherence in [Coherence::Sweep, Coherence::LineClearing] {
+        let (m, _) = eth_machine(&p, coherence, &frames);
+        let u = match run_engine(Micro::new(m)) {
+            Ok(u) => u,
+            Err((h, _)) => panic!("micro halted: {h:?}"),
+        };
+        let (m, _) = eth_machine(&p, coherence, &frames);
+        let e = ends_on(m, &|_| {});
+        let (m, um) = (e.machine(), u.machine());
+        for (name, m) in [("micro", um), ("rtl", m)] {
+            assert_eq!(
+                (m.mmem[0o24], m.mmem[0o25], m.mmem[0o27]),
+                (0o1111, 0o2222, 0o3333),
+                "{coherence:?} {name}: before"
+            );
+            assert_eq!(
+                m.mmem[0o26] & 0xffff_ffff,
+                eth_word(&f, 3),
+                "{coherence:?} {name}: the frame"
+            );
+            assert_eq!(m.mmem[0o26] >> 32, 0o005, "{coherence:?} {name}: a fixnum");
+            assert_eq!(m.mmem[0o30] & 0xffff_ffff, 60, "{coherence:?} {name}: its length");
+            assert_eq!(m.mmem[0o31], 0o3333, "{coherence:?} {name}: the word elsewhere");
+        }
+        assert_eq!(state(m), state(um), "{coherence:?}: the pipeline against micro");
+        let sweeps = e.port.meters.sweeps;
+        assert_eq!(sweeps > 0, coherence == Coherence::Sweep, "{coherence:?}: sweeps {sweeps}");
+        misses.push(e.port.cache.misses);
+    }
+    assert_eq!(misses[0], misses[1] + 1, "the sweep's one more miss is the word elsewhere");
+}
+
+/// **A transmit entry still in the posted writes when 244 is written is
+/// read whole** (QUUX's Ethernet contract, §2.5): main memory answers a
+/// write in 25 µs, so the entry and the frame are still going in when the
+/// producer write is made; the device takes 244 once every earlier write
+/// is answered, and sends the frame as written.
+#[test]
+fn a_transmit_entry_in_the_posted_writes_is_read_whole() {
+    use muir::ethernet_device::{Coherence, TX_CONS, TX_PROD};
+    let f = eth_frame(0x50);
+    let mut p = Prog::default();
+    eth_enable(&mut p);
+    for k in 0..15 {
+        p.write(eth_word(&f, k), PHYS | (ETH_FRAME + k as u64));
+    }
+    p.write(ETH_FRAME, PHYS | ETH_TX);
+    p.write(60, PHYS | (ETH_TX + 1));
+    p.write(1, eth_reg(TX_PROD));
+    eth_wait(&mut p, TX_CONS, 1);
+    p.stop();
+    let slow = |e: &mut Pipeline| {
+        e.skip_sweep();
+        let t = muir::pipeline::PortTiming { read_ns: 247, write_ns: 25_000, occupancy_ns: 10 };
+        e.configure(e.period(), t, 65_536);
+    };
+    let (m, s) = eth_machine(&p, Coherence::Sweep, &[]);
+    let e = ends_on(m, &slow);
+    assert_eq!(s.sent().len(), 1, "one frame sent");
+    assert_eq!(s.sent()[0].1, f, "the entry and the frame read whole");
+    assert!(e.meters.cmd_prod_wait > 0, "244 waited for the writes");
+}
+
+/// **A receive entry still in the posted writes when 250 is written is not
+/// taken before it lands** (QUUX's Ethernet contract, §2.5): entry 0 names
+/// buffer A, and the program posts a transmit, then writes B over the
+/// entry and 250 at once, with main memory answering a write in 25 µs. The
+/// peer answers the transmit, sent 20 µs after 244, at once: that frame
+/// finds no buffer given and is dropped; its second answer, 100 µs later,
+/// goes into B. A device that took 250 at once would put the first into A.
+#[test]
+fn a_receive_entry_in_the_posted_writes_is_taken_once_it_lands() {
+    use muir::ethernet_device::{Coherence, RX_CONS, RX_PROD, STATUS, TX_PROD};
+    let (one, two) = (eth_frame(0x11), eth_frame(0x22));
+    let mut p = Prog::default();
+    p.main.push((ETH_RX as usize, ETH_A));
+    p.main.push((ETH_RX as usize + 1, 64));
+    p.main.push((ETH_A as usize + 3, 0o1111));
+    p.main.push((ETH_B as usize + 3, 0o2222));
+    p.main.push((ETH_TX as usize, ETH_FRAME));
+    p.main.push((ETH_TX as usize + 1, 60));
+    for (k, w) in (0..15).map(|k| (k, eth_word(&eth_frame(0x33), k))) {
+        p.main.push((ETH_FRAME as usize + k, w));
+    }
+    eth_enable(&mut p);
+    p.write(1, eth_reg(TX_PROD));
+    p.write(ETH_B, PHYS | ETH_RX);
+    p.write(1, eth_reg(RX_PROD));
+    eth_wait(&mut p, RX_CONS, 1);
+    p.read(PHYS | (ETH_B + 3), 0o26);
+    p.read(PHYS | (ETH_A + 3), 0o27);
+    p.read(eth_reg(STATUS), 0o30);
+    p.stop();
+    let slow = |e: &mut Pipeline| {
+        e.skip_sweep();
+        let t = muir::pipeline::PortTiming { read_ns: 247, write_ns: 25_000, occupancy_ns: 10 };
+        e.configure(e.period(), t, 65_536);
+    };
+    let (m, s) = eth_machine(&p, Coherence::Sweep, &[]);
+    s.reply(0, one);
+    s.reply(200_000, two.clone());
+    let e = ends_on(m, &slow);
+    assert_eq!(s.sent().len(), 1, "the transmit sent");
+    let m = e.machine();
+    assert_eq!(m.mmem[0o26] & 0xffff_ffff, eth_word(&two, 3), "the second frame in B");
+    assert_eq!(m.mmem[0o27], 0o1111, "nothing in A");
+    assert_eq!(m.mmem[0o30] >> 16 & 0xff, 1, "the first dropped, no buffer given");
+    assert!(e.meters.cmd_prod_wait > 0, "250 waited for the write");
+}

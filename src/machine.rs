@@ -297,6 +297,14 @@ impl Geometry {
     pub const QUUX_15: Geometry =
         Geometry { machine_id: Some((0x5155 << 16) | (15 << 4) | 4), ..Geometry::QUUX_14 };
 
+    /// **QUUX's, revision 16** (QUUX's Ethernet contract, §10): revision
+    /// 15 with the Ethernet device, register-page words 240-257, word 100
+    /// `<8>` and feature word 15 `<2>` ([`crate::ethernet_device`]), and a
+    /// checkpoint version of its own. All of it keyed on
+    /// [`Geometry::ethernet`]. Its Chaosnet interface is revision 15's.
+    pub const QUUX_16: Geometry =
+        Geometry { machine_id: Some((0x5155 << 16) | (16 << 4) | 4), ..Geometry::QUUX_15 };
+
     /// Whether the machine translates through the TLB, revision 14's
     /// ([`Geometry::QUUX_14`]), rather than through two map levels.
     pub fn paged(self) -> bool {
@@ -307,6 +315,12 @@ impl Geometry {
     /// of IMOD, revision 15's ([`Geometry::QUUX_15`]).
     pub fn extended(self) -> bool {
         self.revision().is_some_and(|r| r >= 15)
+    }
+
+    /// Whether the machine has the Ethernet device, revision 16's
+    /// ([`Geometry::QUUX_16`]).
+    pub fn ethernet(self) -> bool {
+        self.revision().is_some_and(|r| r >= 16)
     }
 
     /// The level-1 entry a CADR's map store writes: `VMA<31:27>`
@@ -417,9 +431,9 @@ impl Geometry {
     /// which of `MUL` (bit 0) and `DIV` (bit 1) it has, and whether it has
     /// the tick, timer 0 (1); words 11 to 13, the main screen, are the
     /// display's ([`Machine::bus_read`]); word 14 the microsecond clock;
-    /// word 15 the optional devices, a bit each, `<0>` the real-time clock
-    /// and `<1>` the file device, a later optional device taking the next
-    /// bit; word 16 the number of interval timers, 3; word 17 the MACRO
+    /// word 15 the optional devices, a bit each, `<0>` the real-time clock,
+    /// `<1>` the file device and on revision 16 `<2>` the Ethernet device;
+    /// word 16 the number of interval timers, 3; word 17 the MACRO
     /// DISPATCH MEMORY's entries, 1,024; words 20 to 24 the board name, the
     /// machine's ([`Machine::set_board_name`]); every other word 0.
     /// Read-only, as every word 0-77 is.
@@ -448,7 +462,12 @@ impl Geometry {
             0o14 => self.tick as u32,
             // The optional devices, a bit each (contracts Q9, Q13): `<0>`
             // the real-time clock, `<1>` the file device.
-            0o15 => self.rtc as u32 | (self.file_device as u32) << 1,
+            // `<2>` the Ethernet device, revision 16's.
+            0o15 => {
+                self.rtc as u32
+                    | (self.file_device as u32) << 1
+                    | (self.ethernet() as u32) << crate::ethernet_device::FEATURE_BIT
+            }
             // The number of interval timers (contract Q11, revision 10).
             0o16 => self.tick as u32 * Timers::COUNT,
             // The MACRO DISPATCH MEMORY's entries (contract H8a).
@@ -1160,6 +1179,9 @@ pub const DMEM_WORDS: usize = 4096;
 /// no level-1 entry's width takes.
 pub const REVISION_15_MARK: u8 = 0o200 | 15;
 
+/// Revision 16's mark in the same place (QUUX's Ethernet contract, §2.9).
+pub const REVISION_16_MARK: u8 = 0o200 | 16;
+
 /// Why a microcycle could not complete.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Halt {
@@ -1414,6 +1436,9 @@ pub struct Machine {
     /// QUUX's file device ([`crate::file_device`]), which answers where the
     /// geometry has one ([`Geometry::file_device`]).
     pub file_device: crate::file_device::FileDevice,
+    /// QUUX's Ethernet device ([`crate::ethernet_device`]), which answers
+    /// where the geometry has one ([`Geometry::ethernet`]).
+    pub ethernet: crate::ethernet_device::EthernetDevice,
     /// When the processor's write buffer is next empty, on the machine's
     /// clock: `rtl` sets it before each write it lands, from QUUX's memory
     /// port; `micro` has no buffer and leaves it 0. The file device takes a
@@ -1512,6 +1537,7 @@ impl Machine {
             dma_written: false,
             block_disk: None,
             file_device: crate::file_device::FileDevice::new(),
+            ethernet: crate::ethernet_device::EthernetDevice::new(),
             write_buffer_empty_at: 0,
             period: 0,
             posted_write_errors: 0,
@@ -1664,7 +1690,9 @@ impl Machine {
     /// under its enable, command `<11>`; `<4>` the keyboard and `<5>` the
     /// mouse ([`crate::quux_input`]); `<6>` the network, the Chaosnet
     /// interface's request (contract Q4); `<7>` the file device, a response
-    /// waiting under its interrupt enable (contract Q9). Every bit is a
+    /// waiting under its interrupt enable (contract Q9); `<8>` on revision
+    /// 16 the Ethernet device, an Ethernet frame waiting under its interrupt
+    /// enable (QUUX's Ethernet contract, §2.6). Every bit is a
     /// level cleared at its source, so one write turns each off: a stray's
     /// handler in the microcode relies on it (contract Q13, section 2).
     pub fn interrupt_sources(&self) -> u32 {
@@ -1675,6 +1703,8 @@ impl Machine {
                 << 6
             | ((self.geometry.file_device && self.file_device.interrupt_at(self.ns)) as u32)
                 << crate::file_device::INTERRUPT_BIT
+            | ((self.geometry.ethernet() && self.ethernet.interrupt()) as u32)
+                << crate::ethernet_device::INTERRUPT_BIT
     }
 
     /// Runs the file device's commands due by the machine's clock: what
@@ -1687,6 +1717,46 @@ impl Machine {
         if self.geometry.file_device && self.file_device.advance(self.ns, &mut self.main, time) {
             self.dma_written = true;
         }
+    }
+
+    /// Runs the Ethernet device's transmits due and delivers what has
+    /// arrived by the machine's clock: what each engine calls at the edge
+    /// between two microcycles, beside [`Machine::advance_file_device`]. A
+    /// delivery under the sweep invalidates QUUX's cache before the next
+    /// cycle, as a file device completion does; under line clearing the
+    /// engine with a cache clears [`crate::ethernet_device::Written`]'s
+    /// lines' sets.
+    pub fn advance_ethernet(&mut self) {
+        if !self.geometry.ethernet() {
+            return;
+        }
+        self.advance_ethernet_now();
+    }
+
+    /// [`Machine::advance_ethernet`] at an engine's edge, which a disabled
+    /// device skips: what has arrived while it is disabled is dropped at
+    /// the next register access, which advances it first, and nothing is
+    /// due. So a machine below revision 16, whose device is never enabled,
+    /// pays one test an edge.
+    #[inline]
+    pub fn advance_ethernet_at_edge(&mut self) {
+        if self.ethernet.enabled() {
+            self.advance_ethernet_now();
+        }
+    }
+
+    #[inline(never)]
+    fn advance_ethernet_now(&mut self) {
+        let time = self.time_base();
+        if self.ethernet.advance(self.ns, &mut self.main, time) && self.ethernet.written.sweep {
+            self.dma_written = true;
+        }
+    }
+
+    /// The Ethernet device's host side, from now on: a scripted peer of a
+    /// test's, or a run's transport. A copy of the machine has none.
+    pub fn attach_ethernet_peer(&mut self, peer: Box<dyn crate::ethernet_device::Peer>) {
+        self.ethernet.attach(peer);
     }
 
     /// Why a checkpoint of this machine cannot be written now, if it
@@ -2197,6 +2267,10 @@ impl Machine {
             // The file device's, word 100's <6> (contract Q9), from its due
             // times.
             || (self.geometry.file_device && self.file_device.interrupt_at(now.max(self.ns)))
+            // The Ethernet device's, word 100's <8>, as advanced to the
+            // last edge: never below revision 16, whose page has no device
+            // to enable.
+            || self.ethernet.interrupt()
     }
 
     /// `XBUS INTR IN`: the disk controller's request, or either display's
@@ -2546,7 +2620,14 @@ impl Machine {
     /// section 4).
     pub fn reset_devices(&mut self) {
         self.advance_file_device();
+        self.advance_ethernet();
         self.bus_reset();
+        // The Ethernet device, which `PROG.UNIBUS.RESET` does not reach:
+        // disabled, status `<2>` and `<3>` cleared (QUUX's Ethernet
+        // contract, §2.7).
+        if self.geometry.ethernet() {
+            self.ethernet.reset();
+        }
         self.timers = Timers::new();
     }
 
@@ -2626,6 +2707,12 @@ impl Machine {
                 k @ 0o160..=0o171 if self.geometry.file_device => {
                     self.advance_file_device();
                     self.file_device.read(k, self.ns)
+                }
+                // The Ethernet device (QUUX's Ethernet contract, §2.2), at
+                // the machine's clock.
+                k @ 0o240..=0o257 if self.geometry.ethernet() => {
+                    self.advance_ethernet();
+                    self.ethernet.read(k)
                 }
                 // The network (contract Q4): the Chaosnet interface's five
                 // registers (contract Q13).
@@ -2773,6 +2860,14 @@ impl Machine {
                     let (ns, drained) = (self.ns, self.write_buffer_empty_at);
                     let time = self.time_base();
                     self.file_device.write(k, value, (ns, time), drained, &self.main);
+                }
+                // The Ethernet device (QUUX's Ethernet contract, §2.2):
+                // what was due is done first. The pipeline holds a write of
+                // 244 or 250 until every earlier write is answered (§2.5).
+                k @ 0o240..=0o257 if self.geometry.ethernet() => {
+                    self.advance_ethernet();
+                    let time = self.time_base();
+                    self.ethernet.write(k, value, self.ns, time, &self.main);
                 }
                 // The network: the CSR and the write buffer; writes of its
                 // other words are ignored (contract Q13).
@@ -3013,6 +3108,7 @@ impl Machine {
             dma_written,
             block_disk,
             file_device,
+            ethernet,
             write_buffer_empty_at: _,
             period: _,
             posted_write_errors,
@@ -3075,7 +3171,13 @@ impl Machine {
         // The level-1 entry's bits, 0 on revision 14, which has no level-1
         // map; revision 15, which has none either, writes its revision
         // with `<7>` set, [`REVISION_15_MARK`] (A15b.13).
-        w.u8(if geometry.extended() { REVISION_15_MARK } else { geometry.l1_bits as u8 });
+        w.u8(if geometry.ethernet() {
+            REVISION_16_MARK
+        } else if geometry.extended() {
+            REVISION_15_MARK
+        } else {
+            geometry.l1_bits as u8
+        });
         w.u8(geometry.pdl_bits as u8);
         w.bool(geometry.muldiv);
         w.bool(geometry.tick);
@@ -3129,6 +3231,10 @@ impl Machine {
         // control store's 64 bits are in its words above.
         if geometry.extended() {
             w.u32(*posted_write_errors);
+        }
+        // Revision 16's own, after revision 15's: the Ethernet device.
+        if geometry.ethernet() {
+            ethernet.save(w);
         }
     }
 
@@ -3222,10 +3328,13 @@ impl Machine {
             (40, l1, 10..=14, true, true, true) if l1 == u32::from(REVISION_15_MARK) => {
                 Geometry { pdl_bits, ..Geometry::QUUX_15 }
             }
+            (40, l1, 10..=14, true, true, true) if l1 == u32::from(REVISION_16_MARK) => {
+                Geometry { pdl_bits, ..Geometry::QUUX_16 }
+            }
             (32, 6, 10..=14, true, true, fused) => {
                 let revision = if fused { 12 } else { 11 };
                 return Err(crate::checkpoint::bad(format!(
-                    "a checkpoint of QUUX revision {revision}, which this build no longer runs: it runs the CADR and QUUX revisions 13 to 15, and a revision-{revision} checkpoint resumes only on an earlier muir-sim"
+                    "a checkpoint of QUUX revision {revision}, which this build no longer runs: it runs the CADR and QUUX revisions 13 to 16, and a revision-{revision} checkpoint resumes only on an earlier muir-sim"
                 )));
             }
             _ => {
@@ -3343,6 +3452,10 @@ impl Machine {
         }
         if self.geometry.extended() {
             self.posted_write_errors = r.u32()?;
+        }
+        if self.geometry.ethernet() {
+            self.ethernet.load(r)?;
+            self.ethernet.check(self.main.len())?;
         }
         Ok(())
     }

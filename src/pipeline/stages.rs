@@ -70,6 +70,9 @@ pub(crate) struct Back {
     /// CMD_PROD's write, waiting for every earlier write (A15b.5): the
     /// word and its microcycle.
     pub cmd_prod: Option<(u32, u64)>,
+    /// The register-page word [`Back::cmd_prod`]'s write is of: CMD_PROD,
+    /// or on revision 16 the Ethernet device's 244 or 250.
+    pub held_word: u32,
     /// The prefetch's word (H8a §3.5): its virtual and physical word
     /// addresses and the word.
     pub prefetched: Option<(u32, u32, Word)>,
@@ -432,18 +435,52 @@ impl Pipeline {
                 }
             }
         }
-        // CMD_PROD, once every earlier write is answered (A15b.5).
+        // CMD_PROD, once every earlier write is answered (A15b.5); and
+        // on revision 16 the Ethernet device's 244 and 250 the same way
+        // (QUUX's Ethernet contract, §2.5).
         if let Some((v, mc)) = self.b.cmd_prod {
             if self.port.empty() || self.mutation == Mutation::NoCmdProdWait {
                 self.b.cmd_prod = None;
                 let keep = self.m.ns;
                 self.m.ns = self.device_time(mc);
-                let bus = crate::tlb::REGISTER_PAGE_BUS | crate::file_device::CMD_PROD;
+                let bus = crate::tlb::REGISTER_PAGE_BUS | self.b.held_word;
                 self.m.bus_write(bus, Word::from(v));
+                self.ethernet_coherence();
                 self.m.ns = keep;
             } else {
                 self.meters.cmd_prod_wait += 1;
             }
+        }
+    }
+
+    /// Whether a register-page word's write waits for every earlier write:
+    /// the file device's CMD_PROD (A15b.5), and on revision 16 the Ethernet
+    /// device's 244 and 250 (QUUX's Ethernet contract, §2.5).
+    fn waits_for_writes(&self, off: u32) -> bool {
+        off == crate::file_device::CMD_PROD
+            || (self.m.geometry.ethernet()
+                && matches!(off, crate::ethernet_device::TX_PROD | crate::ethernet_device::RX_PROD))
+    }
+
+    /// The cache made coherent with what the Ethernet device last wrote,
+    /// before 251's move is seen (QUUX's Ethernet contract, §2.5): the
+    /// sweep, as a file device completion's, or the sets of the lines it
+    /// wrote, as block-disk's. Revision 16's alone.
+    pub(crate) fn ethernet_coherence(&mut self) {
+        if !self.m.geometry.ethernet() {
+            return;
+        }
+        let w = std::mem::take(&mut self.m.ethernet.written);
+        if w.sweep {
+            self.m.dma_written = false;
+            self.port.sweep(self.clock, None);
+            self.drop_prefetch();
+        }
+        if !w.lines.is_empty() {
+            for line in w.lines {
+                self.port.cache.clear_set(line);
+            }
+            self.drop_prefetch();
         }
     }
 
@@ -454,6 +491,10 @@ impl Pipeline {
         self.m.advance_ioboard();
         self.m.dma_written = false;
         self.m.advance_file_device();
+        if self.m.ethernet.enabled() {
+            self.m.advance_ethernet_at_edge();
+            self.ethernet_coherence();
+        }
         if std::mem::take(&mut self.m.dma_written) {
             let missing = (self.mutation == Mutation::SweepMissesASet)
                 .then_some(self.port.last_filled)
@@ -980,6 +1021,7 @@ impl Pipeline {
                     // word right after the start (the register read ruling),
                     // released at once when that word has left EX already.
                     let word = self.m.register_read_15(bus);
+                    self.ethernet_coherence();
                     self.b.register_read = Some(RegisterRead {
                         at_clock: now + 1,
                         seq,
@@ -1650,14 +1692,22 @@ impl Pipeline {
             return;
         }
         let word = r.word;
-        self.b.register_write = None;
         let page = crate::tlb::REGISTER_PAGE_BUS;
         let (on_page, off) = (r.bus & !0o377 == page, r.bus & 0o377);
-        if on_page && off == crate::file_device::CMD_PROD {
-            // CMD_PROD waits for every earlier write (A15b.5).
+        if on_page && self.waits_for_writes(off) {
+            // CMD_PROD waits for every earlier write (A15b.5), and so do
+            // revision 16's 244 and 250. One such write waits at a time: one
+            // of another word stays granted behind it, and one of the same
+            // word replaces it, as CMD_PROD's always has.
+            if self.b.cmd_prod.is_some() && self.b.held_word != off {
+                return;
+            }
+            self.b.register_write = None;
             self.b.cmd_prod = Some((word as u32, r.mc));
+            self.b.held_word = off;
             return;
         }
+        self.b.register_write = None;
         let keep = self.m.ns;
         self.m.ns = self.device_time(r.mc);
         self.event(super::Event::Register(r.bus));
@@ -1665,6 +1715,7 @@ impl Pipeline {
             self.block_disk_write(r.bus, word);
         } else {
             self.m.bus_write(r.bus, word);
+            self.ethernet_coherence();
         }
         self.m.ns = keep;
     }
