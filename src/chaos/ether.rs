@@ -605,6 +605,18 @@ impl Ether {
         Some(self.decoder.stored().to_vec())
     }
 
+    /// The bits of the run now on the cable the decoder has sampled, in
+    /// the order they came: what the behavioral board's receiver stores
+    /// and checks as `RBCT` reaches them.
+    pub fn board_bits(&self) -> &[bool] {
+        self.decoder.bits()
+    }
+
+    /// The cell of the run on the cable now open: [`Decoder::open_cell`].
+    pub fn board_open_cell(&self) -> Option<(u64, bool)> {
+        self.decoder.open_cell()
+    }
+
     /// Whether the behavioral board's receiver has refused the run now on
     /// the cable: at its `START^` `RACT` stayed down, the buffer being
     /// full, or `RRESET` has taken it down since.

@@ -76,6 +76,18 @@ fn wire_words(r: &Received) -> Vec<u16> {
     words.split_off(words.len().saturating_sub(r.bits.div_ceil(16)))
 }
 
+/// The receive check register, the 9401 at LMRBUF 0C07 on its code 1 while
+/// `RACT` is up, carried over one bit as it comes off the line: division by
+/// `x^16 + x^14 + x + 1`, the reciprocal of the transmitter's CRC-16, which
+/// a frame sent in reverse bit order is divided by. Its zeros are the
+/// board's: `CRCERR` falls at a good frame's last bit and rises at its
+/// second (`crc_error_while_a_frame_comes_in_is_the_check_register_on_both_alike`).
+fn check_reverse_bit(check: u16, bit: bool) -> u16 {
+    let fb = bit ^ (check >> 15 != 0);
+    let next = check << 1;
+    if fb { next ^ (1 | 1 << 1 | 1 << 14) } else { next }
+}
+
 /// The check register, [`check_on`], carried over one bit.
 fn check_bit(check: u16, bit: bool) -> u16 {
     let fb = bit ^ (check >> 15 != 0);
@@ -399,6 +411,14 @@ pub struct Interface {
     /// LMRBUF 0C07, is clocked by `RICLK^`, which is `RACT` with the cell
     /// clock, and cleared by `RRESET`.
     cable_refused: bool,
+    /// The receive check register, the 9401 at LMRBUF 0C07, after each bit
+    /// of the run now on the cable, as far as the cable has been brought
+    /// here: what CRC Error reads while the receiver takes the run
+    /// ([`Interface::running_check`]).
+    rx_checks: Vec<u16>,
+    /// And the cell of that run now open: its opening edge, and whether
+    /// its bit is among them ([`wire::Decoder::open_cell`]).
+    rx_cell: Option<(u64, bool)>,
     /// A frame looped back whose `START^` is to come: when, and when it
     /// lands if it is taken ([`Interface::looped_start`]).
     looped_start: Option<(u64, u64)>,
@@ -452,6 +472,8 @@ impl Clone for Interface {
             time: self.time,
             dropped: self.dropped,
             cable_refused: self.cable_refused,
+            rx_checks: self.rx_checks.clone(),
+            rx_cell: self.rx_cell,
             looped_start: self.looped_start,
             rd: self.rd,
             down: self.down,
@@ -500,6 +522,8 @@ impl Interface {
             time: TimeBase::NS,
             dropped: None,
             cable_refused: false,
+            rx_checks: Vec::new(),
+            rx_cell: None,
             looped_start: None,
             rd: 0,
             down: None,
@@ -569,7 +593,7 @@ impl Interface {
             | if self.transmit_done { csr::TRANSMIT_DONE } else { 0 }
             | ((self.lost as u16) << 9) & csr::LOST_COUNT
             | if self.crc_error
-                || self.taking()
+                || self.taking() && self.running_check() != Some(0)
                 || self.down_here().is_some_and(|(_, _, check)| check != 0)
             {
                 csr::CRC_ERROR
@@ -790,6 +814,16 @@ impl Interface {
         let time = self.time;
         let Some(e) = self.ether.as_mut() else { return };
         self.cable_refused = e.board_refused();
+        let bits = e.board_bits();
+        if bits.len() < self.rx_checks.len() {
+            self.rx_checks.clear();
+        }
+        let mut check = self.rx_checks.last().copied().unwrap_or(0);
+        for &bit in &bits[self.rx_checks.len()..] {
+            check = check_reverse_bit(check, bit);
+            self.rx_checks.push(check);
+        }
+        self.rx_cell = e.board_open_cell();
         let loop_back = self.csr & csr::LOOP_BACK != 0;
         while let Some((start, source, end)) = e.board_cable_frame() {
             if source == self.address {
@@ -1173,6 +1207,38 @@ impl Interface {
             }
     }
 
+    /// The receive check register while the receiver takes the frame on
+    /// the line: cleared by `RRESET` before it, and clocked on each
+    /// `RICLK^` with the bit stored, so over the first
+    /// [`Interface::stored_now`] bits of the frame. It divides by CRC-16's
+    /// reciprocal, the frame coming in reverse bit order
+    /// ([`check_reverse_bit`]), and a good frame leaves it 0 once its last
+    /// bit is in. Off the cable the bits are the ones the ether's decoder
+    /// sampled, as brought here; looped back, the frame's own. `None` where
+    /// they are not known: a copy of the interface, which has no cable,
+    /// past the bits it was copied with.
+    ///
+    /// **Revision 15 keeps CRC Error reading the cable busy** from the
+    /// frame's first edge, as its interface, QUUX's own, has it (MP2b
+    /// ruling Q19's tests read the busy line there).
+    fn running_check(&self) -> Option<u16> {
+        if self.time.period != 0 {
+            return None;
+        }
+        let k = self.stored_now();
+        if k == 0 {
+            return Some(0);
+        }
+        if self.csr & csr::LOOP_BACK != 0 {
+            let (_, r) = self.incoming.front()?;
+            let cells = line(&wire_words(r));
+            return Some(
+                cells[..k.min(cells.len())].iter().fold(0, |c, &b| check_reverse_bit(c, b)),
+            );
+        }
+        self.rx_checks.get(k - 1).copied()
+    }
+
     /// The frame on the line now, from the interface's turn timer: its
     /// first edge and nominal end.
     fn frame_now(&self) -> Option<(u64, u64)> {
@@ -1192,8 +1258,19 @@ impl Interface {
     /// on the netlist board, `RBCT0` stepping 310, 560, 810 ns after the
     /// frame's first edge, and held by
     /// `the_bit_count_while_a_frame_comes_in_on_both_alike`.
+    ///
+    /// Off the cable the cells are the decoder's, which a frame with
+    /// another over it does not keep to the cell's length: the bits it has
+    /// sampled, but the open cell's, and the one before that until
+    /// `RICLK^` has stored it.
     fn stored_now(&self) -> usize {
         let (cell, late) = (self.time.ns(wire::CELL_NS), self.time.ns(RACT_NS));
+        if self.csr & csr::LOOP_BACK == 0
+            && let Some((open, sampled)) = self.rx_cell
+        {
+            let n = self.rx_checks.len();
+            return if sampled || self.now < open + late { n.saturating_sub(1) } else { n };
+        }
         self.frame_now().map_or(0, |(s, e)| {
             let k = if self.now >= s + late { (self.now - s - late) / cell } else { 0 };
             (k as usize).min(((e - s) / cell) as usize - 1)
@@ -1523,6 +1600,8 @@ impl Interface {
             time: _,
             dropped: _,
             cable_refused: _,
+            rx_checks: _,
+            rx_cell: _,
             looped_start: _,
             rd: _,
             down: _,
@@ -1643,6 +1722,8 @@ impl Interface {
         self.next_event = None;
         self.dropped = None;
         self.cable_refused = false;
+        self.rx_checks.clear();
+        self.rx_cell = None;
         self.looped_start = None;
         self.down = None;
         self.looped_busy = None;

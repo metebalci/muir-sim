@@ -730,10 +730,31 @@ board's own address presets its own transmitter's `ABORT` through
 polls the CSR every 5 µs on both, for frames to the board's own address, to
 zero, to another station under Spy and without, and for a frame for another
 station at a full buffer on the cable, and lands the next frame after the
-abort at the board's poll. While a frame is taken, the model's CRC Error
-reads 1 throughout; the board's is the check register as it runs, 0 over the
-first few bits and again once the last bit of a good frame is in. That
-difference is not taken up.
+abort at the board's poll.
+
+**While a frame is taken, CRC Error is the check register as it runs.** The
+receive generator, the 9401 at LMRBUF `0C07`, is cleared by `RRESET` before
+the frame, clocked on `RICLK^` with each bit the receiver stores --- dividing
+by `x^16 + x^14 + x + 1`, CRC-16's reciprocal, the frame coming in reverse
+bit order --- and read straight onto the CSR's bit 14 through the 74LS244 at
+LMDATP `0D17`. So it reads 0 until the bits stored leave a remainder, 1 from
+then, and 0 again once the last bit of a good frame is in, before `-CBLBSY`
+lifts and the frame lands: on the board `CRCERR` rises at the second
+`RICLK^` of a frame of 14 words, 560 ns in, and falls at the 224th, 56,060
+ns in. Off the cable the bits are the ones the decoder sampled, counted as
+it took them, which a frame with another over it does not keep to the
+cell's length.
+`tests/chaos_rtl.rs::crc_error_while_a_frame_comes_in_is_the_check_register_on_both_alike`
+reads the CSR back to back through a good frame, one for another station,
+the board's own looped back, a bad one of 64 bits looped back, and one with
+another over it, at three phases. **From an abort signal on, a frame with
+another over it is not held**: `-CRC.PRE`, the 74S00 at LMRBUF `0D07` on
+`ABORTSIG` and `RACT`, presets the register to ones while the line is held
+high, which muir does not model; on the board that brought it to 0 once,
+sixteen cells after the last such preset, where muir's stays at 1. **On
+revision 15** CRC Error reads the cable busy from a frame's first edge, as
+before: its interface is QUUX's own, and MP2b ruling Q19's tests read the
+busy line there.
 
 **Reset does not clear Lost Count.** The 74LS161 at LMMYNM `0F04` has
 `-11.SAYS.GO` alone on its clear, pin 1, and MIT's wire list has the same,

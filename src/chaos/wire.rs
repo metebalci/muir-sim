@@ -159,6 +159,12 @@ impl Decoder {
         }
     }
 
+    /// The cell now open, if the line is in a run: its opening edge, and
+    /// whether its sample has been taken.
+    pub fn open_cell(&self) -> Option<(u64, bool)> {
+        self.cell.map(|c| (c, self.sample.is_none()))
+    }
+
     /// The bits sampled so far of the run now on the line: what a
     /// receiver on the cable has taken of it. A receiver decides on a
     /// frame's destination word long before the run ends

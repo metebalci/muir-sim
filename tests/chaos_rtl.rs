@@ -1494,6 +1494,106 @@ fn a_read_with_receive_done_down_is_the_read_paths_on_both_alike() {
     assert!(wrong.is_empty(), "{} reads unlike the board:\n{}", wrong.len(), wrong.join("\n"));
 }
 
+/// **CRC Error while a frame comes in is the check register as it runs, on
+/// both alike.** The receive generator, the 9401 at LMRBUF 0C07, is
+/// cleared by `RRESET` before the frame, clocked on `RICLK^` with each bit
+/// the receiver stores, and read straight onto the CSR's bit 14 through the
+/// 74LS244 at LMDATP 0D17: it reads 1 once the bits stored leave a
+/// remainder, and a good frame brings it back to 0 with its last bit,
+/// before `-CBLBSY` lifts. Measured on the netlist board, `CRCERR` rising
+/// at the second `RICLK^` of a good frame of 14 words, 560 ns in, and
+/// falling at the 224th, 56,060 ns in. The CSR read back to back through
+/// the frame at three phases, the model's read at the instant the board
+/// answers: a good frame to this address, one for another station, the
+/// board's own looped back, a bad one --- 258 words written, which go out
+/// as 64 bits of the check word and what the wrap left, wreckage --- and
+/// one with another put over it 64 cells in, up to the first abort signal.
+///
+/// **From an abort signal on, a frame with another over it is not held**:
+/// `-CRC.PRE`, the 74S00 at LMRBUF 0D07 on `ABORTSIG` and `RACT`, presets
+/// the register to ones while the line is held high, which the model does
+/// not do; on the board that brought it to 0 once, sixteen cells after the
+/// last such preset, where the model's stays at 1.
+#[test]
+fn crc_error_while_a_frame_comes_in_is_the_check_register_on_both_alike() {
+    let n = cadrio();
+    let mut wrong = Vec::new();
+    let mut polls = 0;
+    for lead in [0u64, 233, 466] {
+        for case in ["good", "another station's", "looped back", "bad", "wreckage"] {
+            let (mut b, mut m) = on_a_cable(&n);
+            let (t0, until) = match case {
+                "looped back" | "bad" => {
+                    both(
+                        &mut b,
+                        &mut m,
+                        chaos::CSR,
+                        Some(csr::CLEAR_RECEIVER | csr::LOOP_BACK),
+                        "lb",
+                    );
+                    let n = if case == "bad" { 258 } else { 12 };
+                    for &w in &numbered(n, MY_ADDRESS) {
+                        both(&mut b, &mut m, chaos::WRITE_BUFFER, Some(w), "a word in");
+                    }
+                    both(&mut b, &mut m, chaos::START, None, "START");
+                    let mut was = b.level("START^");
+                    let t0 = loop {
+                        let next = b
+                            .chip
+                            .next_tap()
+                            .map_or(b.now + 25, |t| t.max(b.now + 1))
+                            .min(b.now + 25);
+                        b.run(next);
+                        m.run(b.now);
+                        let level = b.level("START^");
+                        if level == Level::High && was == Level::Low {
+                            break b.now - muir::chaos::ether::RACT_NS;
+                        }
+                        was = level;
+                    };
+                    (t0, t0 + if case == "bad" { 20_000 } else { 60_000 })
+                }
+                _ => {
+                    let dest = if case == "another station's" { 0o3070 } else { MY_ADDRESS };
+                    let t0 = send_both(&mut b, &mut m, &numbered(12, dest));
+                    if case == "wreckage" {
+                        b.run(t0 + 64 * wire::CELL_NS);
+                        m.run(b.now);
+                        let over = rfc_time(0o3061, 0o3070);
+                        b.chaos.as_mut().unwrap().ether.send_now(b.now, 0o3061, over.clone());
+                        m.io.chaos
+                            .as_mut()
+                            .unwrap()
+                            .ether_mut()
+                            .unwrap()
+                            .send_now(b.now, 0o3061, over);
+                    }
+                    (t0, t0 + if case == "wreckage" { 16_700 } else { 60_000 })
+                }
+            };
+            b.run(b.now + lead);
+            m.run(b.now);
+            while b.now < until {
+                let (cb, cm) = exact(&mut b, &mut m, chaos::CSR, None);
+                polls += 1;
+                if (cb ^ cm) & csr::CRC_ERROR != 0 {
+                    wrong.push(format!(
+                        "{case}, lead {lead}: +{}: board {cb:06o}, model {cm:06o}",
+                        b.now - t0
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("{polls} polls, {} unlike", wrong.len());
+    assert!(
+        wrong.is_empty(),
+        "{} of {polls} polls unlike the board:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
 /// **Bit Count while a frame comes in, on both alike**: `RBCT` counting
 /// up the bits stored, a step on each `RICLK^`, 60 ns after a cell's
 /// opening edge. Polled every 5 µs through a frame of 44 words, the
