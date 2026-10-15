@@ -188,7 +188,8 @@ fn counters(m: &mut Machine) -> [u32; 4] {
 /// **Revision 16 has words 240-257, and revision 15 reserves them** (§2.1,
 /// §2.2, §10): on 16 each reads its power-on value --- 241 quiet, 253-257
 /// the host's MAC address, IPv4 address, netmask and gateway, by default
-/// `02:00:00:00:00:01` and 169.254.0.2/30 by 169.254.0.1 --- and a write of
+/// `02:00:00:00:00:01` and 169.254.100.2/30 by 169.254.100.1, QUUX's side
+/// of `quux0` and the link's other end (§3, "Flags") --- and a write of
 /// all ones to a read-only word changes nothing; on 15 every one reads 0
 /// and a write of any of them changes nothing. Feature word 0 says 16 and
 /// feature word 15 reads 7 there, 3 on 15; every other word of the page
@@ -215,9 +216,9 @@ fn the_page_has_240_to_257_on_revision_16_and_reserves_them_on_15() {
         (0o252, ReadWrite, 0),
         (0o253, ReadOnly, 0x0200),
         (0o254, ReadOnly, 0x0000_0001),
-        (0o255, ReadOnly, 0xa9fe_0002),
+        (0o255, ReadOnly, 0xa9fe_6402),
         (0o256, ReadOnly, 0xffff_fffc),
-        (0o257, ReadOnly, 0xa9fe_0001),
+        (0o257, ReadOnly, 0xa9fe_6401),
     ];
     for &(w, class, want) in &table {
         let mut m = rev16();
@@ -920,7 +921,7 @@ fn disable_drops_what_waits_and_keeps_the_configuration() {
     for (w, v) in kept {
         assert_eq!(get(&mut m, w), v, "word {w:o} kept");
     }
-    assert_eq!(get(&mut m, eth::IP_ADDRESS), 0xa9fe_0002, "253-257 kept");
+    assert_eq!(get(&mut m, eth::IP_ADDRESS), 0xa9fe_6402, "253-257 kept");
     s.arrive(m.ns, arp(60, 5));
     at(&mut m, 100 * SEND);
     assert!(s.sent().is_empty(), "nothing waiting was sent");
@@ -1136,14 +1137,52 @@ fn a_checkpoint_with_transmits_waiting_resumes_and_sends_them() {
     assert_eq!(g, Geometry::QUUX_16, "the body says revision 16");
 }
 
+/// **Revision 16's checkpoint carries 253-257** (§2.9; §3, "The two
+/// guards"): a machine whose host words are not the defaults, saved and
+/// loaded into a machine at the defaults, reads back its own MAC address,
+/// IPv4 address, netmask and gateway, so that a resume can compare them
+/// with the run's flags. **Fails** a checkpoint that leaves them out, or a
+/// load that keeps the loading machine's.
+#[test]
+fn revision_16_s_checkpoint_carries_253_to_257() {
+    let mut m = rev16();
+    m.ethernet.host = eth::Host {
+        mac: [0x02, 0, 0, 0, 0, 0x07],
+        address: u32::from_be_bytes([192, 0, 2, 6]),
+        netmask: u32::MAX << 3,
+        gateway: u32::from_be_bytes([192, 0, 2, 1]),
+    };
+    let body = state(&m);
+    let mut back = rev16();
+    assert_eq!(back.ethernet.host, eth::Host::default());
+    back.load(&mut muir::checkpoint::Reader::for_word_bits(&body, 40)).unwrap();
+    assert_eq!(back.ethernet.host, m.ethernet.host);
+    for (w, want) in [
+        (eth::MAC_HIGH, 0x0200),
+        (eth::MAC_LOW, 0x0000_0007),
+        (eth::IP_ADDRESS, 0xc000_0206),
+        (eth::NETMASK, 0xffff_fff8),
+        (eth::GATEWAY, 0xc000_0201),
+    ] {
+        assert_eq!(get(&mut back, w), want, "word {w:o} back from the checkpoint");
+    }
+    assert!(state(&back) == body, "the state back as it was");
+}
+
 /// **Revision 15's machine state is what it was**: a checkpoint body of a
 /// revision-15 machine has no Ethernet device in it, byte for byte the
-/// same whatever the device's state, and loads back as revision 15.
+/// same whatever the device's state and whatever 253-257 hold, and loads
+/// back as revision 15.
 #[test]
 fn revision_15_s_checkpoint_has_no_ethernet_device() {
     let mut m = rev(Geometry::QUUX_15);
     let s = state(&m);
-    m.ethernet.host.mac = [9; 6];
+    m.ethernet.host = eth::Host {
+        mac: [9; 6],
+        address: u32::from_be_bytes([192, 0, 2, 6]),
+        netmask: u32::MAX << 3,
+        gateway: u32::from_be_bytes([192, 0, 2, 1]),
+    };
     put(&mut m, 0o242, 0o1000);
     put(&mut m, 0o240, 1);
     assert!(state(&m) == s, "revision 15's body does not carry the device");

@@ -962,6 +962,8 @@ const QUUX_ONLY: &[&str] = &[
     "--ethernet-socket",
     "--ethernet-trace",
     "--file-root",
+    "--ip-address",
+    "--ip-gateway",
     "--main-memory-size",
     "--memory-timing",
     "--microcycle-ns",

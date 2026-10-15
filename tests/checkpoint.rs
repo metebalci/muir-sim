@@ -193,8 +193,9 @@ fn the_file_names_its_engine_and_refuses_other_files() {
 /// `tests/macro_dispatch.rs` holds, with a `micro` PDL buffer write by
 /// PDL-INDEX taking the index where it lands; version 50 is a 40-bit
 /// machine's, QUUX revision 13's ([`checkpoint::VERSION_40`],
-/// `tests/revision_13_memory.rs`); version 51 revision 15's and 52 revision
-/// 16's, with its Ethernet device (`tests/quux_ethernet.rs`). QUUX revision
+/// `tests/revision_13_memory.rs`); version 51 revision 15's and 53 revision
+/// 16's, with its Ethernet device and 253-257 (`tests/quux_ethernet.rs`);
+/// 52, revision 16's before 253-257 were in it, is refused. QUUX revision
 /// 12, retired, wrote version 49 too, and its checkpoint is refused by the machine its body records
 /// (`a_revision_12_checkpoint_is_refused_by_its_machine` in
 /// `tests/quux_revision.rs`).
@@ -203,7 +204,7 @@ fn the_format_is_version_49_and_another_version_is_refused() {
     assert_eq!(checkpoint::VERSION, 49, "a new version needs its own tests");
     assert_eq!(checkpoint::VERSION_40, 50);
     assert_eq!(checkpoint::VERSION_15, 51);
-    assert_eq!(checkpoint::VERSION_16, 52);
+    assert_eq!(checkpoint::VERSION_16, 53);
     let dir = std::env::temp_dir().join(format!("muir-checkpoint-version-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("a.chk");
@@ -212,13 +213,13 @@ fn the_format_is_version_49_and_another_version_is_refused() {
     // The version is the four bytes after the magic line.
     let at = b"muir checkpoint\n".len();
     assert_eq!(&good[at..at + 4], 49u32.to_le_bytes());
-    for other in (1u32..checkpoint::VERSION).chain([53, u32::MAX]) {
+    for other in (1u32..checkpoint::VERSION).chain([52, 54, u32::MAX]) {
         let mut file = good.clone();
         file[at..at + 4].copy_from_slice(&other.to_le_bytes());
         std::fs::write(&path, &file).unwrap();
         let err = checkpoint::read(&path).unwrap_err().to_string();
         assert!(err.contains(&format!("format version {other}")), "{err}");
-        assert!(err.contains("reads 49, 50, 51 and 52"), "{err}");
+        assert!(err.contains("reads 49, 50, 51 and 53"), "{err}");
     }
     std::fs::remove_dir_all(&dir).ok();
 }

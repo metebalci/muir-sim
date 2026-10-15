@@ -2396,8 +2396,8 @@ is its interrupt. It loads revision 15's `.mcr` files, whose section 6
 says 15, the microinstruction's revision, and refuses any other, so one
 microcode runs on 15 and 16
 (`revision_16_loads_a_revision_15_mcr_and_refuses_others`); no boot PROM
-for it is built in. A checkpoint of it is version 52,
-the device's state after revision 15's, and revisions 15 and 16 refuse
+for it is built in. A checkpoint of it is version 53,
+the device's state and 253-257 after revision 15's, and revisions 15 and 16 refuse
 each other's. What holds it is `tests/quux_ethernet.rs` and, for the
 posted writes and the cache, the last tests of `tests/revision_15_rtl.rs`.
 
@@ -2420,12 +2420,15 @@ posted writes and the cache, the last tests of `tests/revision_15_rtl.rs`.
 | 254 | the MAC address, low, read only | `<31:0>`: bytes 2-5, byte 2 in `<31:24>` |
 | 255 | the IPv4 address, read only | `<31:0>`: a.b.c.d as `a<<24 \| b<<16 \| c<<8 \| d` |
 | 256 | the netmask, read only | as 255 |
-| 257 | the gateway, read only | as 255; 0 for none |
+| 257 | the gateway, read only | as 255; always a gateway, by default the link's other end |
 
-253-257 are the host's (`ethernet_device::Host`): `02:00:00:00:00:01` and
-169.254.0.2/30 by 169.254.0.1 unless the run says otherwise. No reset
-changes them, and a checkpoint does not keep them. Writes of the read-only
-words are ignored
+253-257 are the host's (`ethernet_device::Host`): `--ethernet-mac`,
+`--ip-address` and `--ip-gateway`'s, by default `02:00:00:00:00:01` and
+169.254.100.2/30 by 169.254.100.1, QUUX's side of the tap `quux0` and the
+link's other end (QUUX's Ethernet contract, §3). There is always a
+gateway: on the address's subnet, and never 0.0.0.0 or QUUX's own
+address. No reset changes them, and a checkpoint carries them (below).
+Writes of the read-only words are ignored
 (`the_page_has_240_to_257_on_revision_16_and_reserves_them_on_15`).
 
 **Configuration** is the file device's. 242, 243, 246 and 247 are written
@@ -2529,14 +2532,23 @@ behind its device. Without the flag, a transmitted Ethernet frame goes
 nowhere, 245 still advancing, and none arrives
 (`without_a_socket_transmits_go_nowhere_and_245_advances` in
 `tests/ethernet_socket.rs`). `--ethernet-mac` gives 253-254 and the filter's
-address, and `--ethernet-trace` prints every Ethernet frame sent and
+address, `--ip-address` and `--ip-gateway` give 255-257, each checked
+before the run
+(`the_address_flags_are_words_255_to_257_and_default_to_quux0_s`,
+`the_address_flags_values_are_checked_before_the_run`), and `--ethernet-trace` prints every Ethernet frame sent and
 received, and why one is refused or dropped
 (`the_trace_says_what_is_sent_received_refused_and_dropped`).
 
 **A checkpoint** never refuses on the device's account: waiting transmit
 entries are in main memory and their indexes are registers, so a resume
 sends them, at the times an unbroken run would
-(`a_checkpoint_with_transmits_waiting_resumes_and_sends_them`). Revision
+(`a_checkpoint_with_transmits_waiting_resumes_and_sends_them`). It
+carries 253-257 (`revision_16_s_checkpoint_carries_253_to_257`), and a
+resume under another `--ethernet-mac`, `--ip-address` or `--ip-gateway`,
+given or by default, is refused naming each flag that differs, as one
+under another `--rtc` is. A band's addresses are its tap's, so a
+checkpoint resumes only on the tap it was taken on
+(`a_resume_under_other_addresses_is_refused_by_the_flag_s_name`). Revision
 15's checkpoint has no device in it
 (`revision_15_s_checkpoint_has_no_ethernet_device`).
 

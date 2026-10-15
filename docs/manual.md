@@ -618,7 +618,8 @@ MAC address, register-page words 253-254, and the address its filter takes
 besides broadcast. Six pairs of hex digits by colons, in either case; a
 group address, `<0>` of its first byte set, is refused, a station's own
 address never being one. The start says it. The CADR and revisions below 16
-refuse the flag.
+refuse the flag. A checkpoint carries it, and a resume under another,
+given or by default, is refused.
 
 Default: `02:00:00:00:00:01`, a locally administered address.
 
@@ -679,6 +680,42 @@ Default: none; `/` is empty.
 **chip:** the I/O board.
 
 Default: `netlist`.
+
+### `--ip-address A.B.C.D/N`
+
+`quux` only, revision 16.
+
+**QUUX:** the machine's IPv4 address and its prefix length, the [Ethernet
+device's](quux.md#revision-16-the-ethernet-device) register-page words 255
+and 256, which the band reads when its network starts. N is 1 to 30, so
+that the subnet holds the machine's address and its gateway besides its
+network and broadcast addresses. The address is a host's: the subnet's
+network and broadcast addresses are refused, and so are 0.x.x.x, 127.x.x.x
+and every address from 224.0.0.0 up (RFC 1122 §3.2.1.3). Behind the tap
+`quuxN` of [`quux-taps`'s pool](../tools/README.md#quux-taps) it is
+169.254.1NN.2/30, NN the tap's index in two digits; the Ethernet frame
+mover prints the flags for the tap it took. The start says it. A
+checkpoint carries it, and a resume under another, given or by default, is
+refused. The CADR and revisions below 16 refuse the flag.
+
+Default: `169.254.100.2/30`, the machine's side of `quux0`: link-local,
+never routed, and nobody's on any network.
+
+### `--ip-gateway A.B.C.D`
+
+`quux` only, revision 16.
+
+**QUUX:** the gateway's IPv4 address, register-page word 257: where the
+band sends a datagram for an address off its subnet. There is always a
+gateway: it is refused when it is 0.0.0.0, the machine's own address, off
+`--ip-address`'s subnet, since a gateway is on a connected network (RFC
+1122 §3.3.1), or the subnet's network or broadcast address. The default is
+held to the same rule, so an `--ip-address` on another subnet wants an
+`--ip-gateway` beside it. A checkpoint carries it, and a resume under
+another, given or by default, is refused. The CADR and revisions below 16
+refuse the flag.
+
+Default: `169.254.100.1`, the link's other end: `quux0`'s host side.
 
 ### `--keyboard-boot <keys>`
 

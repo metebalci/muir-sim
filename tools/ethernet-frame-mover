@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Mete Balci
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The Ethernet frame mover: a tap at one end, muir's --ethernet-socket at
+the other (QUUX's Ethernet contract, §3).
+
+usage:
+  ethernet-frame-mover [--tap NAME[,NAME...]] PATH
+  ethernet-frame-mover --help
+
+It takes a tap of the pool quux-taps installs, listens at PATH, a UNIX
+stream socket, and moves every Ethernet frame between the two: what the
+tap gives it to the machine connected at PATH, and what the machine sends
+to the tap. muir connects to PATH as a client, so the mover runs first:
+
+  tools/ethernet-frame-mover quux.sock
+  quux --ethernet-socket quux.sock <the flags it printed>
+
+  --tap NAME[,NAME...]  the taps to try, in order. A tap another program
+                        holds is taken, and the next one is tried; a named
+                        tap that is taken, missing or not the user's is
+                        refused with that reason, and no tap outside the
+                        list is tried. [default: the pool from quux0 up, as
+                        far as it goes]
+
+**The line.** Once it holds a tap, listening at PATH, it prints one line
+on stdout: the tap, and the two flags quux wants behind it, for example
+
+  quux1 --ip-address 169.254.101.2/30 --ip-gateway 169.254.101.1
+
+It reads them from the kernel: the tap's own address and prefix, which is
+the host side and so the machine's gateway, and the /30's other host
+address, which is the machine's. The rule that gives each tap its address
+lives in quux-taps alone. quux0's are muir's defaults.
+
+**The warning.** When the machine sends an ARP or IPv4 Ethernet frame
+from another address than its tap's QUUX address, the mover says so once
+for the connection, naming the flags to use. It moves those Ethernet
+frames all the same: refusing a band whose address is not its tap's is
+muir's work (a resume under other addresses) and the tap's (arp_ignore 2).
+
+The plain mode of --ethernet-socket is the format: each Ethernet frame,
+either way, is a 32-bit big-endian length and its bytes; a length of 0 is
+skipped. One machine at a time is connected. While none is, what the tap
+gives is dropped. A machine that closes leaves the mover holding its tap
+for the next. ^C or a SIGTERM ends it; the kernel frees the tap when it
+exits. Exit status: 0 at the end, 2 for a usage error, 75 when every tap
+tried was taken, so that a caller may wait and try again, and 1 otherwise.
+
+Python's standard library only.
+"""
+
+import errno
+import fcntl
+import ipaddress
+import os
+import select
+import signal
+import socket
+import stat
+import struct
+import sys
+
+PROGRAM = "ethernet-frame-mover"
+
+# <linux/if_tun.h>: TUNSETIFF is _IOW('T', 202, int).
+TUNSETIFF = 0x400454CA
+IFF_TAP = 0x0002
+IFF_NO_PI = 0x1000
+# <linux/sockios.h>.
+SIOCGIFADDR = 0x8915
+SIOCGIFNETMASK = 0x891B
+IFNAMSIZ = 16
+
+# The pool quux-taps makes is quux0 to quux<N-1>, N at most 64.
+POOL = "quux"
+POOL_MAX = 64
+
+# The exit status when every tap tried was taken (sysexits.h, EX_TEMPFAIL).
+TAKEN = 75
+
+ETHERTYPE_IPV4 = 0x0800
+ETHERTYPE_ARP = 0x0806
+
+
+class Refused(Exception):
+    """A refusal, with the exit status it ends the run with."""
+
+    def __init__(self, message, status=1):
+        super().__init__(message)
+        self.status = status
+
+
+def text(address):
+    return str(ipaddress.IPv4Address(address))
+
+
+def prefix_length(netmask):
+    return bin(netmask).count("1")
+
+
+def quux_side(name, host, netmask):
+    """QUUX's address behind the tap `name`, whose own address is `host`:
+    the /30's other host address. Anything but a /30 is refused, since
+    quux-taps makes every tap a /30."""
+    n = prefix_length(netmask)
+    if netmask != (0xFFFFFFFF << 2) & 0xFFFFFFFF:
+        raise Refused(f"{name}: {text(host)}/{n} is not a /30, as quux-taps makes every tap")
+    network = host & netmask
+    if host == network + 1:
+        return network + 2
+    if host == network + 2:
+        return network + 1
+    raise Refused(f"{name}: {text(host)}/30 is not one of its /30's two host addresses")
+
+
+def flags_line(name, host, netmask):
+    """The line: the tap, and quux's two flags for it."""
+    quux = quux_side(name, host, netmask)
+    return f"{name} --ip-address {text(quux)}/30 --ip-gateway {text(host)}"
+
+
+def ifreq(name, rest=b""):
+    return struct.pack(f"{IFNAMSIZ}s", name.encode()) + rest.ljust(24, b"\0")
+
+
+def open_tap(name):
+    """The tap `name`, taken: a file descriptor for its Ethernet frames,
+    or OSError (EBUSY: another program holds it)."""
+    fd = os.open("/dev/net/tun", os.O_RDWR | os.O_CLOEXEC)
+    try:
+        fcntl.ioctl(fd, TUNSETIFF, ifreq(name, struct.pack("H", IFF_TAP | IFF_NO_PI)))
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def is_tap(name):
+    return os.path.exists(f"/sys/class/net/{name}/tun_flags")
+
+
+def take(names, named):
+    """The first of `names` that can be taken, as (name, fd). A tap that is
+    taken is passed for the next; when none is left, the refusal says why
+    for each."""
+    why = []
+    for name in names:
+        if len(name.encode()) >= IFNAMSIZ or "/" in name or not name:
+            why.append(f"{name}: not a network interface's name")
+            continue
+        if not os.path.exists(f"/sys/class/net/{name}"):
+            why.append(f"{name}: no such tap")
+            continue
+        if not is_tap(name):
+            why.append(f"{name}: not a tap")
+            continue
+        try:
+            return name, open_tap(name)
+        except OSError as e:
+            if e.errno == errno.EBUSY:
+                why.append(f"{name}: taken: another program holds it")
+            elif e.errno == errno.EPERM:
+                why.append(f"{name}: not this user's: quux-taps --user names the taps' owner")
+            else:
+                why.append(f"{name}: {e.strerror}")
+    every_taken = bool(why) and all(": taken: " in w for w in why)
+    where = "the taps named" if named else "the pool"
+    raise Refused(f"no tap of {where} could be taken: " + "; ".join(why), TAKEN if every_taken else 1)
+
+
+def pool():
+    """The pool from quux0 up, as far as it goes."""
+    names = []
+    for k in range(POOL_MAX):
+        name = f"{POOL}{k}"
+        if not os.path.exists(f"/sys/class/net/{name}"):
+            break
+        names.append(name)
+    if not names:
+        raise Refused(f"no tap {POOL}0: the pool is not installed; tools/quux-taps installs it")
+    return names
+
+
+def tap_addresses(name):
+    """The tap's own IPv4 address and netmask, from the kernel."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        out = []
+        for request in (SIOCGIFADDR, SIOCGIFNETMASK):
+            try:
+                r = fcntl.ioctl(s.fileno(), request, ifreq(name))
+            except OSError as e:
+                raise Refused(f"{name}: no IPv4 address: {e.strerror}; quux-taps gives each tap one")
+            out.append(struct.unpack("!I", r[20:24])[0])
+        return out[0], out[1]
+    finally:
+        s.close()
+
+
+def sender(frame):
+    """The IPv4 sender address an ARP or IPv4 Ethernet frame names, or
+    None for another type or a frame too short to name one."""
+    if len(frame) < 14:
+        return None
+    ethertype = struct.unpack("!H", frame[12:14])[0]
+    if ethertype == ETHERTYPE_ARP and len(frame) >= 42:
+        htype, ptype, hlen, plen = struct.unpack("!HHBB", frame[14:20])
+        if (htype, ptype, hlen, plen) == (1, ETHERTYPE_IPV4, 6, 4):
+            return struct.unpack("!I", frame[28:32])[0]
+    if ethertype == ETHERTYPE_IPV4 and len(frame) >= 34 and frame[14] >> 4 == 4:
+        return struct.unpack("!I", frame[26:30])[0]
+    return None
+
+
+class Mover:
+    """The Ethernet frames between a tap's descriptor and one connection
+    at a time. `err` takes the notices and the warning."""
+
+    def __init__(self, tap_fd, name, host, netmask, err=sys.stderr):
+        self.tap_fd = tap_fd
+        self.name = name
+        self.host = host
+        self.quux = quux_side(name, host, netmask)
+        self.line = flags_line(name, host, netmask)
+        self.err = err
+
+    def say(self, what):
+        print(f"{PROGRAM}: {what}", file=self.err, flush=True)
+
+    def to_tap(self, frame, warned):
+        """An Ethernet frame the machine sent, to the tap. Returns whether
+        the warning has been given on this connection."""
+        s = sender(frame)
+        if not warned and s is not None and s != 0 and s != self.quux:
+            flags = self.line.split(" ", 1)[1]
+            self.say(
+                f"warning: the machine sends from {text(s)}, and {self.name}'s QUUX address is "
+                f"{text(self.quux)}: run quux with {flags}; its Ethernet frames are moved all the same"
+            )
+            warned = True
+        try:
+            os.write(self.tap_fd, frame)
+        except OSError as e:
+            self.say(f"{self.name}: an Ethernet frame of {len(frame)} bytes not taken: {e.strerror}")
+        return warned
+
+    def pump(self, conn):
+        """One connection, until it closes."""
+        held = b""
+        warned = False
+        while True:
+            ready, _, _ = select.select([self.tap_fd, conn], [], [])
+            if self.tap_fd in ready:
+                frame = os.read(self.tap_fd, 65536)
+                conn.sendall(struct.pack("!I", len(frame)) + frame)
+            if conn in ready:
+                got = conn.recv(65536)
+                if not got:
+                    return
+                held += got
+                while len(held) >= 4:
+                    n = struct.unpack("!I", held[:4])[0]
+                    if len(held) < 4 + n:
+                        break
+                    frame, held = held[4 : 4 + n], held[4 + n :]
+                    if n:
+                        warned = self.to_tap(frame, warned)
+
+    def serve(self, listener):
+        """Connections one after another, for ever; while none is open,
+        what the tap gives is dropped."""
+        while True:
+            ready, _, _ = select.select([self.tap_fd, listener], [], [])
+            if self.tap_fd in ready:
+                os.read(self.tap_fd, 65536)
+            if listener in ready:
+                conn, _ = listener.accept()
+                self.say(f"{self.name}: a machine connected")
+                try:
+                    self.pump(conn)
+                except OSError as e:
+                    self.say(f"{self.name}: the connection failed: {e.strerror}")
+                finally:
+                    conn.close()
+                self.say(f"{self.name}: the machine closed; waiting for the next")
+
+
+def listen(path):
+    """A UNIX stream socket listening at `path`. A socket file left there
+    that nobody listens at is replaced; anything else is refused."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        st = None
+    if st is not None:
+        if not stat.S_ISSOCK(st.st_mode):
+            raise Refused(f"{path}: exists and is not a socket")
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(path)
+        except ConnectionRefusedError:
+            os.unlink(path)
+        except OSError as e:
+            raise Refused(f"{path}: {e.strerror}")
+        else:
+            raise Refused(f"{path}: another program listens there")
+        finally:
+            probe.close()
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.bind(path)
+    except OSError as e:
+        s.close()
+        raise Refused(f"{path}: {e.strerror}")
+    s.listen(1)
+    return s
+
+
+def usage(message=None):
+    if message:
+        print(f"{PROGRAM}: {message}", file=sys.stderr)
+    print("usage: ethernet-frame-mover [--tap NAME[,NAME...]] PATH", file=sys.stderr)
+    sys.exit(2)
+
+
+def parse(argv):
+    names, path = None, None
+    args = list(argv)
+    while args:
+        a = args.pop(0)
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            sys.exit(0)
+        elif a == "--tap":
+            if not args or not args[0] or args[0].startswith("-"):
+                usage("--tap wants NAME[,NAME...]")
+            names = args.pop(0).split(",")
+            if not all(names):
+                usage("--tap wants NAME[,NAME...]")
+        elif a.startswith("-"):
+            usage(f"{a} is not a flag of {PROGRAM}")
+        elif path is None:
+            path = a
+        else:
+            usage(f"{a}: one PATH only")
+    if path is None:
+        usage("PATH wanted: the socket muir's --ethernet-socket names")
+    return names, path
+
+
+def main(argv):
+    names, path = parse(argv)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    listener = None
+    try:
+        name, fd = take(names if names is not None else pool(), names is not None)
+        host, netmask = tap_addresses(name)
+        mover = Mover(fd, name, host, netmask)
+        listener = listen(path)
+        print(mover.line, flush=True)
+        mover.serve(listener)
+    except Refused as e:
+        print(f"{PROGRAM}: {e}", file=sys.stderr)
+        return e.status
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        if listener is not None:
+            listener.close()
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -23,9 +23,9 @@
 //! taken back (the processor's); 253 the MAC address's bytes 0-1, byte 0 in
 //! `<15:8>`, and 254 its bytes 2-5, byte 2 in `<31:24>`; 255 the IPv4
 //! address, 256 the netmask and 257 the gateway, a.b.c.d as `a<<24 | b<<16
-//! | c<<8 | d`, 0 for no gateway. 253-257 are the host's ([`Host`]): read
-//! only, and no reset changes them. Writes of the read-only words are
-//! ignored.
+//! | c<<8 | d`; there is always a gateway. 253-257 are the host's
+//! ([`Host`]): read only, and no reset changes them; a checkpoint carries
+//! them. Writes of the read-only words are ignored.
 //!
 //! **The rings.** Indexes are 16 bits and run free; an entry's slot is its
 //! index mod the ring's size, and an entry is 8 words. A transmit entry is
@@ -137,27 +137,30 @@ const LINE: u32 = 7;
 const FIXNUM: u8 = 0o005;
 
 /// What the host gives the machine in 253-257: `--ethernet-mac`,
-/// `--ip-address` and `--ip-gateway`'s, read only to the machine. The run's
-/// say, not a checkpoint's.
+/// `--ip-address` and `--ip-gateway`'s, read only to the machine. A
+/// checkpoint carries them, and a resume under others is refused by the
+/// flag's name (QUUX's Ethernet contract, §2.9; §3, "The two guards").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Host {
     pub mac: [u8; 6],
     /// a.b.c.d as `a<<24 | b<<16 | c<<8 | d`.
     pub address: u32,
     pub netmask: u32,
-    /// 0 for none.
+    /// As `address`. There is always a gateway, on the subnet and not
+    /// QUUX's own address (§3, "Flags"): never 0.
     pub gateway: u32,
 }
 
 impl Default for Host {
-    /// The defaults: `02:00:00:00:00:01`, a locally administered address,
-    /// and 169.254.0.2/30 by 169.254.0.1, a link-local /30.
+    /// The defaults (§3, "Flags"): `02:00:00:00:00:01`, a locally
+    /// administered address, and 169.254.100.2/30 by 169.254.100.1, QUUX's
+    /// side of the tap `quux0` and the link's other end.
     fn default() -> Host {
         Host {
             mac: [0x02, 0, 0, 0, 0, 0x01],
-            address: u32::from_be_bytes([169, 254, 0, 2]),
+            address: u32::from_be_bytes([169, 254, 100, 2]),
             netmask: u32::MAX << 2,
-            gateway: u32::from_be_bytes([169, 254, 0, 1]),
+            gateway: u32::from_be_bytes([169, 254, 100, 1]),
         }
     }
 }
@@ -831,10 +834,17 @@ impl EthernetDevice {
             w.u32(v);
         }
         w.opt(self.head_due, |w, d| w.u64(d));
+        for b in self.host.mac {
+            w.u8(b);
+        }
+        for v in [self.host.address, self.host.netmask, self.host.gateway] {
+            w.u32(v);
+        }
     }
 
-    /// Back from a checkpoint: the registers, the counters and the
-    /// transmit due. The host's words and the peer stay the run's.
+    /// Back from a checkpoint: the registers, the counters, the transmit
+    /// due and 253-257. The peer stays the run's; a resume compares the
+    /// host's words with the run's flags and refuses others.
     pub fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()> {
         let on = r.bool()?;
         self.set_enabled(on);
@@ -855,6 +865,12 @@ impl EthernetDevice {
         self.rx_drops = r.u32()? & 0xff;
         self.tx_refusals = r.u32()? & 0xff;
         self.head_due = r.opt(|r| r.u64())?;
+        for b in &mut self.host.mac {
+            *b = r.u8()?;
+        }
+        self.host.address = r.u32()?;
+        self.host.netmask = r.u32()?;
+        self.host.gateway = r.u32()?;
         self.reached = 0;
         self.delivered_at = None;
         if self.tx_log2 > 0o17 || self.rx_log2 > 0o17 {

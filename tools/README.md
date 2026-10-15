@@ -3,8 +3,9 @@
 Scripts that make the committed fixtures in `data/`, from MIT's files in
 `mit/` or, for QUUX's disks, with standard tools, four that fetch what is not committed, one that checks the
 first lot still make what is committed, one that checks QUUX's Ethernet
-checksum vectors, and `quux-taps`, which installs the
-taps QUUX's Ethernet link runs over (below). None of them runs as part of the
+checksum vectors, `quux-taps`, which installs the
+taps QUUX's Ethernet link runs over, and `ethernet-frame-mover`, which
+connects muir to one of them (below). None of them runs as part of the
 build --- CI runs `check-netlists.sh` on every push, which is what says the
 fixtures and the drawings have not drifted apart. `data/README.md` says
 which test holds each output to its source.
@@ -28,6 +29,7 @@ Ubuntu, `gcc` on Fedora --- and only when a netlist has to be made again.
 | `quux-disk-fixtures.sh` | `data/quux-disk*`, QUUX's disk raw, as a fixed and a dynamic VHD, and grown: with sgdisk, dd, qemu-img and qemu-io, not muir. `QEMU_IMG` and `QEMU_IO` name the qemu tools when they are not on the path |
 | `ethernet-vectors.py` | `tests/ethernet_vectors.txt`, QUUX's Ethernet checksum and type vectors: `generate LINUX` makes it, the named edge cases plus the frames Linux made, read from `LINUX`. `check tests/ethernet_vectors.txt` works every line out again and exits non-zero on a disagreement. Python's standard library only, written from RFC 791, 768, 792, 9293 and 1071, sharing no code with muir; `tests/ethernet_vectors.rs` runs every vector through the device's rules |
 | `quux-taps` | nothing in the tree. Run once as root, it installs a pool of taps for QUUX's Ethernet link on the computer it runs on; see below |
+| `ethernet-frame-mover` | nothing in the tree. It takes a tap of that pool and moves Ethernet frames between it and muir's `--ethernet-socket`, as an unprivileged user; see below. Python's standard library only |
 
 ## `quux-taps`
 
@@ -87,6 +89,47 @@ at boot as by hand. It needs systemd and the `ip` command of iproute2.
 
 `tests/quux_taps.rs` holds the dry run's commands and the unit, line for
 line, for one tap, two, 32 and 64, and the refusals.
+
+## `ethernet-frame-mover`
+
+The Ethernet frame mover puts a machine behind a tap: a tap of
+`quux-taps`'s pool at one end, and at the other a UNIX stream socket that
+muir's `--ethernet-socket` connects to, in its plain mode. muir connects
+as a client, so the mover runs first:
+
+    tools/ethernet-frame-mover quux.sock
+    quux --ethernet-socket quux.sock
+
+Once it holds a tap and listens at the socket, it prints one line: the
+tap, and the two flags to give `quux` for it, for example
+
+    quux1 --ip-address 169.254.101.2/30 --ip-gateway 169.254.101.1
+
+It reads them from the kernel, from the tap's own address: that is the
+host side and the machine's gateway, and the machine's address is the
+/30's other host address. For `quux0` they are muir's defaults, so the
+first machine needs no flags at all; a second mover takes the next free
+tap, and its `quux` takes the flags the line names.
+
+`--tap NAME[,NAME...]` names the taps to try, in order; without it the
+mover tries the pool from `quux0` up. A tap another program holds is
+passed for the next. A named tap that is taken, missing or another user's
+is refused, saying which and why, and no tap outside the list is tried.
+When every tap tried was taken it exits with status 75, so that a script
+may wait and try again; another refusal is 1, and a usage error 2.
+
+The mover moves every Ethernet frame, whatever it holds. When the machine
+sends ARP or IPv4 from another address than its tap's, it warns once for
+the connection and names the flags to use; the tap itself answers no ARP
+request from an address off its /30 (`arp_ignore` 2), and muir refuses to
+resume a checkpoint under other addresses than its own. One machine is
+connected at a time. When it closes, the mover keeps its tap and waits for
+the next; while none is connected, what the tap gives is dropped. ^C ends
+it, and the kernel frees the tap.
+
+`tests/ethernet_frame_mover.rs` holds the line, the warning, the framing
+both ways and the refusals that need no tap, against a socket pair in
+place of the tap; it runs `python3`.
 
 ## `soap4/`
 

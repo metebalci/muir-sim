@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! **How muir reaches a network** (QUUX's Ethernet contract, §3):
-//! `--ethernet-socket PATH[,clocked]`, `--ethernet-mac` and
-//! `--ethernet-trace` ([`muir::ethernet_socket`]).
+//! `--ethernet-socket PATH[,clocked]`, `--ethernet-mac`, `--ip-address`,
+//! `--ip-gateway` and `--ethernet-trace` ([`muir::ethernet_socket`]), and
+//! the guard on a resume (§3, "The two guards").
 //!
 //! The library's tests put the device's host side on one end of a socket
 //! pair and play the peer at the other, moving the machine's clock an edge
@@ -902,9 +903,11 @@ fn prom_16(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
-const FLAGS: [(&str, &str); 3] = [
+const FLAGS: [(&str, &str); 5] = [
     ("--ethernet-socket", "/nowhere/socket"),
     ("--ethernet-mac", "02:00:00:00:00:05"),
+    ("--ip-address", "192.0.2.6/30"),
+    ("--ip-gateway", "192.0.2.5"),
     ("--ethernet-trace", ""),
 ];
 
@@ -914,7 +917,7 @@ fn refused(out: &std::process::Output, saying: &str) {
     assert!(t.contains(saying), "{saying:?}:\n{t}");
 }
 
-/// **The CADR and revisions below 16 refuse the three flags, by name**
+/// **The CADR and revisions below 16 refuse the five flags, by name**
 /// (§3, "Flags"): `cadr` says they are quux's, and revisions 13, 14 and 15
 /// that they are revision 16's, before anything is connected. **Fails** a
 /// flag taken, or ignored, where there is no device.
@@ -962,7 +965,7 @@ fn the_flags_values_are_checked_before_the_run() {
     let out = run(&[]);
     assert!(out.status.success(), "{}", text(&out));
     assert!(
-        text(&out).contains("ethernet: MAC address 02:00:00:00:00:01; no socket: transmitted Ethernet frames are dropped and none arrive"),
+        text(&out).contains("ethernet: MAC address 02:00:00:00:00:01, IPv4 address 169.254.100.2/30, gateway 169.254.100.1; no socket: transmitted Ethernet frames are dropped and none arrive"),
         "{}",
         text(&out)
     );
@@ -1197,7 +1200,8 @@ fn a_clocked_run_held_at_c_and_continued_sends_the_same_bytes() {
 
 /// A revision-16 `micro` checkpoint whose device is enabled, with a buffer
 /// of 1,536 bytes given and an ARP Ethernet frame and one of type 86DD
-/// posted, made from a short run of the looping PROM.
+/// posted, made from a short run of the looping PROM with `--ethernet-mac
+/// 02:00:00:00:00:07`.
 fn enabled_checkpoint(dir: &std::path::Path, prom: &std::path::Path) -> std::path::PathBuf {
     use muir::engine::Engine;
     let base = dir.join("base.chk");
@@ -1205,6 +1209,7 @@ fn enabled_checkpoint(dir: &std::path::Path, prom: &std::path::Path) -> std::pat
         .env("MUIR_QUUX_REVISION", "16")
         .args(["--micro", "--main-memory-size", "2MW", "--stop-after", "10", "--prom"])
         .arg(prom)
+        .args(["--ethernet-mac", "02:00:00:00:00:07"])
         .arg("--checkpoint")
         .arg(&base)
         .run();
@@ -1234,7 +1239,8 @@ fn enabled_checkpoint(dir: &std::path::Path, prom: &std::path::Path) -> std::pat
 /// reaches the peer, the 86DD one is refused; of two the peer sends, the
 /// one to `--ethernet-mac`'s address is taken into the buffer, and the one
 /// to the default address is dropped and counted nowhere. The checkpoint
-/// at the end holds the frame taken. **Fails** a MAC address that does not
+/// resumed was made under the same `--ethernet-mac`, as a resume must be,
+/// and the one at the end holds the frame taken. **Fails** a MAC address that does not
 /// reach the device, or a resume that loses the socket.
 #[test]
 fn a_resumed_device_sends_and_receives_through_the_socket_by_its_mac_address() {
@@ -1287,7 +1293,7 @@ fn a_resumed_device_sends_and_receives_through_the_socket_by_its_mac_address() {
         let t = text(&out);
         assert!(out.status.success(), "clocked {clocked}:\n{t}");
         for what in [
-            "ethernet: MAC address 02:00:00:00:00:07; socket ",
+            "ethernet: MAC address 02:00:00:00:00:07, IPv4 address 169.254.100.2/30, gateway 169.254.100.1; socket ",
             "sent 60 bytes, 02:00:00:00:00:02 from 02:00:00:00:00:02, type 0806",
             "transmit entry 1 refused: type not IPv4 or ARP",
             "received 60 bytes, 02:00:00:00:00:01 from 02:00:00:00:00:02, type 0806, dropped: not this device's MAC address",
@@ -1309,5 +1315,260 @@ fn a_resumed_device_sends_and_receives_through_the_socket_by_its_mac_address() {
         assert_eq!(status >> 16 & 0xff, 0, "clocked {clocked}: no receive drop");
         assert_eq!(get(m, eth::STATUS) >> 24, 1, "clocked {clocked}: one refused");
         assert_eq!(received(m, 0, 0), to_me, "clocked {clocked}");
+    }
+}
+
+// --- the addresses and the guard ------------------------------------------
+
+/// A revision-16 checkpoint's words 253-257, as a resume reads them: the
+/// machine's part of the body, which either engine's starts with.
+fn host_words(chk: &std::path::Path) -> [u32; 5] {
+    let c = muir::checkpoint::read(chk).unwrap();
+    let g = Machine::checkpointed_geometry_at(&c.body, c.word_bits).unwrap();
+    let mut m = Machine::with_geometry(g, c.memory_boards);
+    m.block_disk = Some(muir::block_disk::BlockDisk::new(muir::block_disk::BLOCK_NS));
+    m.load(&mut c.reader()).unwrap();
+    [eth::MAC_HIGH, eth::MAC_LOW, eth::IP_ADDRESS, eth::NETMASK, eth::GATEWAY]
+        .map(|w| get(&mut m, w))
+}
+
+/// A short revision-16 run on `engine` with `args`: of the looping PROM
+/// at `prom`, or with none for a resume, which takes the checkpoint's.
+fn run_16(engine: &str, prom: Option<&std::path::Path>, args: &[&str]) -> std::process::Output {
+    let mut c = quux();
+    c.env("MUIR_QUUX_REVISION", "16").args([
+        engine,
+        "--main-memory-size",
+        "2MW",
+        "--stop-after",
+        "10",
+    ]);
+    if let Some(p) = prom {
+        c.arg("--prom").arg(p);
+    }
+    c.args(args).run()
+}
+
+/// **`--ip-address` and `--ip-gateway` are words 255-257, and the defaults
+/// are QUUX's side of `quux0`** (§2.2; §3, "Flags"): with no flag 255-257
+/// hold 169.254.100.2, the /30's netmask and 169.254.100.1, and the start
+/// says so; with the flags, on both engines, the checkpoint's words are
+/// theirs, the MAC address's beside them. **Fails** a default that is not
+/// quux0's, or a flag that does not reach the words.
+#[test]
+fn the_address_flags_are_words_255_to_257_and_default_to_quux0_s() {
+    let dir = scratch("ethernet-addresses");
+    let prom = prom_16(&dir);
+    let chk = dir.join("a.chk");
+    let c = chk.to_str().unwrap();
+    let out = run_16("--micro", Some(&prom), &["--checkpoint", c]);
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(
+        t.contains("ethernet: MAC address 02:00:00:00:00:01, IPv4 address 169.254.100.2/30, gateway 169.254.100.1; "),
+        "{t}"
+    );
+    assert_eq!(host_words(&chk), [0x0200, 0x0000_0001, 0xa9fe_6402, 0xffff_fffc, 0xa9fe_6401]);
+    for engine in ["--micro", "--rtl"] {
+        let out = run_16(
+            engine,
+            Some(&prom),
+            &[
+                "--ethernet-mac",
+                "02:00:00:00:00:07",
+                "--ip-address",
+                "192.0.2.6/29",
+                "--ip-gateway",
+                "192.0.2.1",
+                "--checkpoint",
+                c,
+            ],
+        );
+        let t = text(&out);
+        assert!(out.status.success(), "{engine}: {t}");
+        assert!(
+            t.contains("ethernet: MAC address 02:00:00:00:00:07, IPv4 address 192.0.2.6/29, gateway 192.0.2.1; "),
+            "{engine}: {t}"
+        );
+        assert_eq!(
+            host_words(&chk),
+            [0x0200, 0x0000_0007, 0xc000_0206, 0xffff_fff8, 0xc000_0201],
+            "{engine}"
+        );
+    }
+}
+
+/// **The address flags' values are checked before the run** (§3,
+/// "Flags"). `--ip-address` wants a host's dotted address and a prefix
+/// length from 1 to 30: none, or 0, 31, 32 and up, are refused, as are the
+/// subnet's network and broadcast addresses, and addresses no host has
+/// (RFC 1122 §3.2.1.3: this network, loopback, multicast and reserved).
+/// There is always a gateway: `--ip-gateway` is refused when it is
+/// 0.0.0.0, QUUX's own address, off `--ip-address`'s subnet (RFC 1122
+/// §3.3.1), or the subnet's network or broadcast address, and the default
+/// gateway is held to the same rule when `--ip-address` moves. **Fails** a
+/// gateway check that takes an off-subnet gateway, or a bad address taken.
+#[test]
+fn the_address_flags_values_are_checked_before_the_run() {
+    let dir = scratch("ethernet-address-values");
+    let prom = prom_16(&dir);
+    let run = |args: &[&str]| run_16("--micro", Some(&prom), args);
+    let wants_address = "--ip-address wants A.B.C.D/N";
+    for bad in [
+        "192.0.2.6",
+        "192.0.2.6/",
+        "192.0.2.6/x",
+        "192.0.2/30",
+        "192.0.2.256/30",
+        "192.0.02.6/30",
+        "192.0.2.6/30/30",
+        " 192.0.2.6/30",
+    ] {
+        refused(&run(&["--ip-address", bad]), wants_address);
+    }
+    refused(&run(&["--ip-address"]), wants_address);
+    for n in ["0", "31", "32", "33"] {
+        refused(
+            &run(&["--ip-address", &format!("192.0.2.6/{n}")]),
+            &format!("--ip-address 192.0.2.6/{n}: a prefix length of {n}; "),
+        );
+    }
+    refused(&run(&["--ip-address", "192.0.2.4/30"]), "the subnet's network address");
+    refused(&run(&["--ip-address", "192.0.2.7/30"]), "the subnet's broadcast address");
+    for (bad, what) in [
+        ("0.0.2.6/30", "this network"),
+        ("127.0.2.6/30", "loopback"),
+        ("224.0.2.6/30", "multicast"),
+        ("240.0.2.6/30", "reserved"),
+    ] {
+        refused(&run(&["--ip-address", bad, "--ip-gateway", "192.0.2.5"]), what);
+    }
+    let wants_gateway = "--ip-gateway wants A.B.C.D";
+    for bad in ["192.0.2.5/30", "192.0.2", "192.0.2.5.1", "x"] {
+        refused(&run(&["--ip-gateway", bad]), wants_gateway);
+    }
+    refused(&run(&["--ip-gateway"]), wants_gateway);
+    refused(&run(&["--ip-gateway", "0.0.0.0"]), "--ip-gateway 0.0.0.0: there is always a gateway");
+    refused(
+        &run(&["--ip-gateway", "169.254.100.2"]),
+        "--ip-gateway 169.254.100.2 is QUUX's own address",
+    );
+    refused(
+        &run(&["--ip-gateway", "192.0.2.5"]),
+        "--ip-gateway 192.0.2.5 is off --ip-address 169.254.100.2/30's subnet",
+    );
+    refused(
+        &run(&["--ip-address", "192.0.2.6/30", "--ip-gateway", "192.0.2.9"]),
+        "--ip-gateway 192.0.2.9 is off --ip-address 192.0.2.6/30's subnet",
+    );
+    refused(
+        &run(&["--ip-address", "192.0.2.6/30"]),
+        "--ip-gateway 169.254.100.1, its default, is off --ip-address 192.0.2.6/30's subnet",
+    );
+    refused(
+        &run(&["--ip-address", "192.0.2.6/29", "--ip-gateway", "192.0.2.0"]),
+        "--ip-gateway 192.0.2.0 is the subnet's network address",
+    );
+    refused(
+        &run(&["--ip-address", "192.0.2.6/29", "--ip-gateway", "192.0.2.7"]),
+        "--ip-gateway 192.0.2.7 is the subnet's broadcast address",
+    );
+    for good in [
+        &["--ip-address", "192.0.2.6/30", "--ip-gateway", "192.0.2.5"][..],
+        &["--ip-address", "192.0.2.5/30", "--ip-gateway", "192.0.2.6"],
+        &["--ip-address", "192.0.2.200/24", "--ip-gateway", "192.0.2.1"],
+        &["--ip-gateway", "169.254.100.1", "--ip-address", "169.254.100.2/30"],
+        &["--ip-address", "169.254.101.2/30", "--ip-gateway", "169.254.101.1"],
+    ] {
+        let out = run(good);
+        assert!(out.status.success(), "{good:?}: {}", text(&out));
+    }
+}
+
+/// Flags and their values, as arguments.
+fn given<'a>(f: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    f.iter().flat_map(|&(k, v)| [k, v]).collect()
+}
+
+/// **A resume keeps the checkpoint's addresses and refuses others by the
+/// flag's name** (§2.9; §3, "The two guards"), as `--rtc`'s: a revision-16
+/// checkpoint resumed under its own `--ethernet-mac`, `--ip-address` and
+/// `--ip-gateway` runs on and writes them again; under another value of
+/// any one, given or by default, it is refused naming that flag and only
+/// that flag. **Fails** a resume check that misses one flag, or that
+/// takes the run's flags over the checkpoint's.
+#[test]
+fn a_resume_under_other_addresses_is_refused_by_the_flag_s_name() {
+    let dir = scratch("ethernet-resume-guard");
+    let prom = prom_16(&dir);
+    let flags = [
+        ("--ethernet-mac", "02:00:00:00:00:07"),
+        ("--ip-address", "192.0.2.6/29"),
+        ("--ip-gateway", "192.0.2.1"),
+    ];
+    let chk = dir.join("own.chk");
+    let (c, again) = (chk.to_str().unwrap(), dir.join("again.chk"));
+    let mut args = given(&flags);
+    args.extend(["--checkpoint", c]);
+    let out = run_16("--micro", Some(&prom), &args);
+    assert!(out.status.success(), "{}", text(&out));
+    let words = host_words(&chk);
+    assert_eq!(words, [0x0200, 0x0000_0007, 0xc000_0206, 0xffff_fff8, 0xc000_0201]);
+    for engine in ["--micro", "--rtl"] {
+        let mut args = given(&flags);
+        let own = dir.join(format!("own{engine}.chk"));
+        let o = own.to_str().unwrap();
+        let out = run_16(engine, Some(&prom), &[&args[..], &["--checkpoint", o]].concat());
+        assert!(out.status.success(), "{engine}: {}", text(&out));
+        args.extend(["--resume", o, "--checkpoint", again.to_str().unwrap()]);
+        let out = run_16(engine, None, &args);
+        assert!(out.status.success(), "{engine}: its own resumes: {}", text(&out));
+        assert_eq!(host_words(&again), words, "{engine}: kept through the resume");
+    }
+    // Each flag in turn another, given or by default, the others the
+    // checkpoint's.
+    let others: [(usize, &str, &str); 6] = [
+        (0, "02:00:00:00:00:08", "02:00:00:00:00:07, and here 02:00:00:00:00:08"),
+        (0, "", "02:00:00:00:00:07, and here 02:00:00:00:00:01"),
+        (1, "192.0.2.6/28", "192.0.2.6/29, and here 192.0.2.6/28"),
+        (1, "192.0.2.5/29", "192.0.2.6/29, and here 192.0.2.5/29"),
+        (2, "192.0.2.2", "192.0.2.1, and here 192.0.2.2"),
+        (2, "192.0.2.3", "192.0.2.1, and here 192.0.2.3"),
+    ];
+    for (k, value, says) in others {
+        let mut f = flags.to_vec();
+        if value.is_empty() {
+            f.remove(k);
+        } else {
+            f[k].1 = value;
+        }
+        let mut args = given(&f);
+        args.extend(["--resume", c]);
+        let out = run_16("--micro", None, &args);
+        let t = text(&out);
+        let flag = flags[k].0;
+        refused(&out, &format!("--resume {c}: the checkpoint's {flag} is {says}"));
+        for (j, (other, _)) in flags.iter().enumerate() {
+            if j != k {
+                assert!(!t.contains(&format!("the checkpoint's {other}")), "{flag}: {other}:\n{t}");
+            }
+        }
+    }
+    // The defaults' checkpoint under every flag moved, and each named.
+    let base = dir.join("defaults.chk");
+    let b = base.to_str().unwrap();
+    let out = run_16("--micro", Some(&prom), &["--checkpoint", b]);
+    assert!(out.status.success(), "{}", text(&out));
+    let mut args = given(&flags);
+    args.extend(["--resume", b]);
+    let out = run_16("--micro", None, &args);
+    let t = text(&out);
+    for says in [
+        "the checkpoint's --ethernet-mac is 02:00:00:00:00:01, and here 02:00:00:00:00:07",
+        "the checkpoint's --ip-address is 169.254.100.2/30, and here 192.0.2.6/29",
+        "the checkpoint's --ip-gateway is 169.254.100.1, and here 192.0.2.1",
+    ] {
+        refused(&out, says);
+        assert!(t.contains(says), "{t}");
     }
 }

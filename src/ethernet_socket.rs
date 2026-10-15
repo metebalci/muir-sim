@@ -150,6 +150,105 @@ pub fn mac_text(mac: [u8; 6]) -> String {
     mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
 }
 
+/// An IPv4 address as the flags write it, a.b.c.d.
+pub fn ipv4_text(a: u32) -> String {
+    std::net::Ipv4Addr::from(a).to_string()
+}
+
+/// A dotted IPv4 address, a.b.c.d, each part decimal 0 to 255 with no
+/// leading zero, as `a<<24 | b<<16 | c<<8 | d` (QUUX's Ethernet contract,
+/// §2.2).
+fn parse_ipv4(text: &str) -> Option<u32> {
+    text.parse::<std::net::Ipv4Addr>().ok().map(u32::from)
+}
+
+/// The widest prefix `--ip-address` takes: a /30 leaves two host addresses
+/// besides the subnet's network and broadcast addresses, QUUX's own and the
+/// gateway's, and there is always a gateway (QUUX's Ethernet contract, §3,
+/// "Flags").
+pub const MAX_PREFIX: u32 = 30;
+
+/// `--ip-address`'s word, A.B.C.D/N: QUUX's IPv4 address and its netmask,
+/// N one bits from the top. N is 1 to [`MAX_PREFIX`]. The address is a
+/// host's on its subnet: not the subnet's network or broadcast address
+/// (RFC 1122 §3.2.1.3 (c), (d)), and not in 0.x.x.x (this network), in
+/// 127.x.x.x (loopback), or from 224.0.0.0 up (multicast and reserved),
+/// which no host takes as its own (RFC 1122 §3.2.1.3 (a), (g); §3.2.1.1).
+pub fn parse_ip_address(arg: &str) -> Result<(u32, u32), String> {
+    let wants = || {
+        format!("--ip-address wants A.B.C.D/N, QUUX's IPv4 address and its prefix length: {arg:?}")
+    };
+    let (address, prefix) = arg.split_once('/').ok_or_else(wants)?;
+    let address = parse_ipv4(address).ok_or_else(wants)?;
+    if prefix.is_empty() || prefix.len() > 2 || !prefix.bytes().all(|c| c.is_ascii_digit()) {
+        return Err(wants());
+    }
+    let n: u32 = prefix.parse().map_err(|_| wants())?;
+    if !(1..=MAX_PREFIX).contains(&n) {
+        return Err(format!(
+            "--ip-address {arg}: a prefix length of {n}; it is 1 to {MAX_PREFIX}, so that the subnet holds QUUX's address and its gateway besides its network and broadcast addresses"
+        ));
+    }
+    let netmask = u32::MAX << (32 - n);
+    let not_a_host = match address >> 24 {
+        0 => Some("in 0.x.x.x, this network"),
+        127 => Some("in 127.x.x.x, loopback"),
+        224..=239 => Some("from 224.0.0.0 to 239.255.255.255, multicast"),
+        240.. => Some("from 240.0.0.0 up, reserved"),
+        _ if address & !netmask == 0 => Some("the subnet's network address"),
+        _ if address & !netmask == !netmask => Some("the subnet's broadcast address"),
+        _ => None,
+    };
+    match not_a_host {
+        Some(why) => Err(format!("--ip-address {arg}: not a host's address: {why}")),
+        None => Ok((address, netmask)),
+    }
+}
+
+/// `--ip-gateway`'s word, A.B.C.D.
+pub fn parse_ip_gateway(arg: &str) -> Result<u32, String> {
+    parse_ipv4(arg)
+        .ok_or_else(|| format!("--ip-gateway wants A.B.C.D, the gateway's IPv4 address: {arg:?}"))
+}
+
+/// The prefix length of a netmask of leading ones.
+pub fn prefix_length(netmask: u32) -> u32 {
+    netmask.leading_ones()
+}
+
+/// **There is always a gateway** (QUUX's Ethernet contract, §3, "Flags"):
+/// `gateway` is refused when it is 0.0.0.0, QUUX's own `address`, off
+/// `address`'s subnet, since a gateway is on a connected network (RFC 1122
+/// §3.3.1), or the subnet's network or broadcast address, which no host
+/// has. `default` says the gateway is `--ip-gateway`'s default, not given.
+pub fn check_gateway(
+    address: u32,
+    netmask: u32,
+    gateway: u32,
+    default: bool,
+) -> Result<(), String> {
+    let g = format!(
+        "--ip-gateway {}{}",
+        ipv4_text(gateway),
+        if default { ", its default," } else { "" }
+    );
+    let a = format!("--ip-address {}/{}", ipv4_text(address), prefix_length(netmask));
+    let why = if gateway == 0 {
+        return Err(format!("{g}: there is always a gateway, by default the link's other end"));
+    } else if gateway == address {
+        format!("is QUUX's own address, {a}'s")
+    } else if gateway & netmask != address & netmask {
+        format!("is off {a}'s subnet: a gateway is on a connected network (RFC 1122 §3.3.1)")
+    } else if gateway & !netmask == 0 {
+        "is the subnet's network address".into()
+    } else if gateway & !netmask == !netmask {
+        "is the subnet's broadcast address".into()
+    } else {
+        return Ok(());
+    };
+    Err(format!("{g} {why}{}", if default { "; give --ip-gateway" } else { "" }))
+}
+
 /// The peer at `path`, connected, in `mode`. `per_ns` is the machine's
 /// units a nanosecond; `say` takes the socket's notices.
 pub fn connect(path: &Path, mode: Mode, per_ns: u64, say: Say) -> std::io::Result<Box<dyn Peer>> {

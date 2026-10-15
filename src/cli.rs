@@ -1073,6 +1073,8 @@ const OWN_FLAGS: &[(&str, Whose)] = &[
     ("--ethernet-socket", Whose::Quux),
     ("--ethernet-trace", Whose::Quux),
     ("--file-root", Whose::Quux),
+    ("--ip-address", Whose::Quux),
+    ("--ip-gateway", Whose::Quux),
     ("--main-memory-size", Whose::Quux),
     ("--memory-timing", Whose::Quux),
     ("--microcycle-ns", Whose::Quux),
@@ -1120,7 +1122,8 @@ const USAGE_QUUX: &str = "usage: quux [--micro|--rtl] [--cache <words>] [--chaos
             [--ethernet-mac XX:XX:XX:XX:XX:XX]
             [--ethernet-socket <path>[,clocked]] [--ethernet-trace]
             [--file-root [<name>=]<folder>[,ro]]
-            [--glass-tty [<endpoint>][,ro]] [--keyboard-boot <keys>]
+            [--glass-tty [<endpoint>][,ro]] [--ip-address A.B.C.D/N]
+            [--ip-gateway A.B.C.D] [--keyboard-boot <keys>]
             [--keyboard-mapping <file>] [--keyboard-mapping-dump]
             [--keyboard-mapping-trace] [--main-memory-size <n>MW]
             [--memory-timing <r>,<w>[,<o>]] [--microcycle-ns <ns>]
@@ -1527,6 +1530,27 @@ const HELP: &[(Whose, &str)] = &[
                                --- telnet's own port is 23 and a server on
                                it needs privilege this has no business
                                asking for]",
+    ),
+    (
+        Whose::Quux,
+        "  --ip-address A.B.C.D/N       QUUX revision 16: the machine's IPv4 address
+                               and its prefix length, register-page words 255
+                               and 256. N is 1 to 30, and the address a
+                               host's: not the subnet's network or broadcast
+                               address. Behind the tap quuxN it is
+                               169.254.1NN.2/30, NN the index in two digits;
+                               the Ethernet frame mover prints it. A resume
+                               keeps the checkpoint's. [default:
+                               169.254.100.2/30, QUUX's side of quux0]",
+    ),
+    (
+        Whose::Quux,
+        "  --ip-gateway A.B.C.D         QUUX revision 16: the gateway's IPv4 address,
+                               register-page word 257. There is always one:
+                               on --ip-address's subnet, and not 0.0.0.0 or
+                               QUUX's own address. A resume keeps the
+                               checkpoint's. [default: 169.254.100.1, the
+                               link's other end, quux0's host side]",
     ),
     (Whose::Cadr, "  --io-board netlist|model     chip: the I/O board. [default: netlist]"),
     (
@@ -2694,20 +2718,20 @@ fn machine(
 
 /// Revision 16's Ethernet device as the run's flags make it (QUUX's
 /// Ethernet contract, §3): `--ethernet-mac`'s address in 253-254 and its
-/// filter, `--ethernet-trace`, and the socket's peer behind it. The run's
-/// say, not a checkpoint's: a resume keeps them. Nothing on another
-/// machine, which refuses the flags.
+/// filter, `--ip-address` and `--ip-gateway`'s in 255-257,
+/// `--ethernet-trace`, and the socket's peer behind it. A resume loads
+/// 253-257 from the checkpoint and refuses it if they are not these
+/// ([`refuse_ethernet_host`]). Nothing on another machine, which refuses
+/// the flags.
 fn fit_ethernet(
     m: &mut Machine,
-    (mac, trace): ([u8; 6], bool),
+    (host, trace): (crate::ethernet_device::Host, bool),
     peer: Option<Box<dyn crate::ethernet_device::Peer>>,
 ) {
     if !m.geometry.ethernet() {
         return;
     }
-    m.ethernet.host.mac = mac;
-    // 255-257 keep `Host`'s defaults until `--ip-address` and
-    // `--ip-gateway` give them.
+    m.ethernet.host = host;
     if trace {
         m.ethernet.trace = Some(crate::ethernet_device::stderr());
     }
@@ -4388,6 +4412,44 @@ fn refuse_rtc(path: &Path, had: crate::machine::Rtc, asked: crate::machine::Rtc)
     }
 }
 
+/// **A checkpoint of other 253-257 than the run's is refused by the flags'
+/// names** (QUUX's Ethernet contract, §2.9; §3, "The two guards"), as
+/// [`refuse_rtc`]'s: `--ethernet-mac`, `--ip-address` and `--ip-gateway`,
+/// given or by default, are the checkpoint's or the resume is refused,
+/// each flag that differs named. A band's addresses are its tap's, and a
+/// checkpoint resumed on another tap would answer for the wrong one.
+fn refuse_ethernet_host(
+    path: &Path,
+    had: crate::ethernet_device::Host,
+    asked: crate::ethernet_device::Host,
+) {
+    use crate::ethernet_socket::{ipv4_text, mac_text, prefix_length};
+    let address = |h: crate::ethernet_device::Host| {
+        format!("{}/{}", ipv4_text(h.address), prefix_length(h.netmask))
+    };
+    let mut differ = Vec::new();
+    if had.mac != asked.mac {
+        differ.push(("--ethernet-mac", mac_text(had.mac), mac_text(asked.mac)));
+    }
+    if (had.address, had.netmask) != (asked.address, asked.netmask) {
+        differ.push(("--ip-address", address(had), address(asked)));
+    }
+    if had.gateway != asked.gateway {
+        differ.push(("--ip-gateway", ipv4_text(had.gateway), ipv4_text(asked.gateway)));
+    }
+    if !differ.is_empty() {
+        let said: Vec<String> = differ
+            .iter()
+            .map(|(flag, had, asked)| format!("the checkpoint's {flag} is {had}, and here {asked}"))
+            .collect();
+        usage(&format!(
+            "--resume {}: {}; a resume keeps the checkpoint's addresses",
+            path.display(),
+            said.join("; ")
+        ));
+    }
+}
+
 /// **A resume onto a machine `--color-tv` disagrees with is refused by the
 /// flag's name**, as `--tv-board` is: the second display board is the
 /// backplane's, and a checkpoint of a machine with one is not a
@@ -4615,6 +4677,9 @@ fn resume_engine<E: Engine>(
         ));
     }
     let mut r = c.reader();
+    // 253-257 as the run's flags gave them ([`fit_ethernet`]), before the
+    // load puts the checkpoint's in their place.
+    let asked = e.machine().ethernet.host;
     // The machine first: a board refused on another machine's checkpoint
     // is only the machine's default board, and a disk the same (QUUX's is
     // block-disk). The geometry is read before either, so a load that
@@ -4641,6 +4706,9 @@ fn resume_engine<E: Engine>(
     }
     refuse_color_tv(path, e.machine().color_tv.is_some(), color_tv.fitted());
     refuse_rtc(path, e.machine().rtc, rtc);
+    if geometry.ethernet() {
+        refuse_ethernet_host(path, e.machine().ethernet.host, asked);
+    }
     let m = e.machine();
     let memory = if m.geometry.revision().is_some() {
         format!("{} of main memory", megawords(m.main.len()))
@@ -5589,6 +5657,11 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     // socket is connected after the flags are read.
     let mut ethernet_socket: Option<crate::ethernet_socket::Socket> = None;
     let mut ethernet_mac = crate::ethernet_device::Host::default().mac;
+    // `--ip-address`'s address and netmask and `--ip-gateway`'s address,
+    // words 255-257, when given; the gateway is checked against the
+    // address once both are known.
+    let mut ip_address: Option<(u32, u32)> = None;
+    let mut ip_gateway: Option<u32> = None;
     let mut ethernet_trace = false;
     // The color TV, the second display board: off unless `--color-tv`
     // fits it, because a CADR has one screen unless somebody plugged a
@@ -5895,9 +5968,11 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             }
             // The Ethernet device's flags, revision 16's alone: the CADR
             // refuses them as quux's, above.
-            (None, flag @ ("--ethernet-socket" | "--ethernet-mac" | "--ethernet-trace"))
-                if !geometry.ethernet() =>
-            {
+            (
+                None,
+                flag @ ("--ethernet-socket" | "--ethernet-mac" | "--ethernet-trace"
+                | "--ip-address" | "--ip-gateway"),
+            ) if !geometry.ethernet() => {
                 usage(&format!("{flag} is QUUX revision 16's: MUIR_QUUX_REVISION=16"))
             }
             (None, "--ethernet-socket") => {
@@ -5913,9 +5988,20 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 }
             }
             (None, "--ethernet-trace") => ethernet_trace = true,
-            // `--ip-address` and `--ip-gateway` (QUUX's Ethernet contract,
-            // §3) go here when they come: words 255-257, the host's as
-            // `--ethernet-mac`'s are 253-254 (`ethernet_device::Host`).
+            // Words 255-257, the host's as `--ethernet-mac`'s are 253-254
+            // (`ethernet_device::Host`).
+            (None, "--ip-address") => {
+                match crate::ethernet_socket::parse_ip_address(&args.next().unwrap_or_default()) {
+                    Ok(a) => ip_address = Some(a),
+                    Err(e) => usage(&e),
+                }
+            }
+            (None, "--ip-gateway") => {
+                match crate::ethernet_socket::parse_ip_gateway(&args.next().unwrap_or_default()) {
+                    Ok(g) => ip_gateway = Some(g),
+                    Err(e) => usage(&e),
+                }
+            }
             (None, "--microcycle-ns") => {
                 if !geometry.extended() {
                     usage("--microcycle-ns is QUUX revision 15's: MUIR_QUUX_REVISION=15");
@@ -6168,6 +6254,19 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         }
     }
 
+    // Revision 16's 253-257 (QUUX's Ethernet contract, §3, "Flags"): the
+    // flags', or their defaults, with the gateway, given or not, held to
+    // the address's subnet.
+    let ethernet_host = {
+        let d = crate::ethernet_device::Host::default();
+        let (address, netmask) = ip_address.unwrap_or((d.address, d.netmask));
+        let gateway = ip_gateway.unwrap_or(d.gateway);
+        if geometry.ethernet() {
+            crate::ethernet_socket::check_gateway(address, netmask, gateway, ip_gateway.is_none())
+                .unwrap_or_else(|e| usage(&e));
+        }
+        crate::ethernet_device::Host { mac: ethernet_mac, address, netmask, gateway }
+    };
     let which = which.unwrap_or(Which::Rtl);
     // A stop where the PC can never be is refused rather than run out.
     // The CADR's PROM lies over control store 0-777 until `PROMDISABLE`
@@ -6873,8 +6972,11 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             };
             writeln!(
                 s,
-                "ethernet: MAC address {}; {behind}{}",
-                crate::ethernet_socket::mac_text(ethernet_mac),
+                "ethernet: MAC address {}, IPv4 address {}/{}, gateway {}; {behind}{}",
+                crate::ethernet_socket::mac_text(ethernet_host.mac),
+                crate::ethernet_socket::ipv4_text(ethernet_host.address),
+                crate::ethernet_socket::prefix_length(ethernet_host.netmask),
+                crate::ethernet_socket::ipv4_text(ethernet_host.gateway),
                 if ethernet_trace { "; traced" } else { "" }
             )
             .unwrap();
@@ -7211,7 +7313,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             if let Some(n) = tlb {
                 m.set_tlb_entries(n);
             }
-            fit_ethernet(&mut m, (ethernet_mac, ethernet_trace), ethernet_peer.take());
+            fit_ethernet(&mut m, (ethernet_host, ethernet_trace), ethernet_peer.take());
             m.chaos = chaos.clone();
             m.plug_chaos(0);
             let mut e = Micro::new(m);
@@ -7282,7 +7384,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             if let Some(n) = tlb {
                 m.set_tlb_entries(n);
             }
-            fit_ethernet(&mut m, (ethernet_mac, ethernet_trace), ethernet_peer.take());
+            fit_ethernet(&mut m, (ethernet_host, ethernet_trace), ethernet_peer.take());
             m.chaos = chaos.clone();
             m.plug_chaos(0);
             let mut e = crate::pipeline::Pipeline::new(m);
