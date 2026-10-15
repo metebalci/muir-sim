@@ -367,7 +367,8 @@ fn a_plain_run_ends_writing_what_it_holds_within_a_second() {
                 std::thread::sleep(Duration::from_millis(100));
                 let mut j = vec![0u8; junk];
                 theirs.read_exact(&mut j).unwrap();
-                (0..8).map(|_| read_plain(&mut theirs)).collect::<Vec<_>>()
+                let frames = (0..8).map(|_| read_plain(&mut theirs)).collect::<Vec<_>>();
+                (frames, theirs)
             }))
         } else {
             None
@@ -377,7 +378,9 @@ fn a_plain_run_ends_writing_what_it_holds_within_a_second() {
         let took = t.elapsed();
         let s = said(&kept);
         if let Some(reader) = reader {
-            let frames = reader.join().unwrap();
+            // The peer's end comes back and is held past the checks, so
+            // that its close never races the run's end.
+            let (frames, _theirs) = reader.join().unwrap();
             assert_eq!(frames, (0..8).map(numbered).collect::<Vec<_>>(), "the eight, in order");
             assert!(s.is_empty(), "nothing said: {s:?}");
         } else {
