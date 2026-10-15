@@ -1144,7 +1144,9 @@ fn ml_same(m: Machine) -> Pipeline {
         );
     }
     assert_eq!(ut.len(), et.len(), "microcycles to the stop");
-    for _ in 0..16 {
+    // Drained past the last write's response: the Kria's 215 ns is 26
+    // clocks at 8.5 ns, and 19 microcycles are the fewest that land it.
+    for _ in 0..32 {
         e.step().unwrap();
         u.step().unwrap();
     }
@@ -1416,8 +1418,8 @@ fn grant_to_md(ev: &[(u64, muir::pipeline::Event)]) -> Vec<u64> {
 
 /// **A hit lands two clocks after its grant, and a miss its line's fill
 /// later** (A15b.5, A15b.6; MP2b rulings Q6, Q7): at 8.5 ns the Kria's
-/// 247 ns fill is 30 clocks, after the clock the tags are compared in; the
-/// DE25's 600 ns at 11 ns is 55. **Fails** a fill with the beats term (33
+/// 344 ns fill is 41 clocks, after the clock the tags are compared in; the
+/// DE25's 600 ns at 11 ns is 55. **Fails** a fill with the beats term (44
 /// at 8.5 ns), and a hit that is not Dmd 3's.
 #[test]
 fn a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_later() {
@@ -1425,7 +1427,7 @@ fn a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_later() {
     let mut p = Prog::default();
     p.read(PHYS | 0o100, 0o20).read(PHYS | 0o101, 0o21).stop();
     let (_, ev) = events(&p, 17, PortTiming::KRIA);
-    assert_eq!(grant_to_md(&ev), [1 + 30, 2], "kria at 8.5 ns: a miss, then a hit");
+    assert_eq!(grant_to_md(&ev), [1 + 41, 2], "kria at 8.5 ns: a miss, then a hit");
     let (_, ev) = events(&p, 22, PortTiming::DE25);
     assert_eq!(grant_to_md(&ev), [1 + 55, 2], "de25 at 11 ns");
 }
@@ -1443,6 +1445,21 @@ fn the_de25_preset_is_the_de25_nano_s_measured_port() {
     assert_eq!(PortTiming::parse("de25"), Some(de25));
     let c = de25.clocks(TimeBase::half_ns(45));
     assert_eq!((c.read, c.write, c.occupancy), (27, 22, 2), "at 22.5 ns");
+}
+
+/// **The `kria` preset is the Kria KR260's measured port** (MP2b ruling
+/// Q5): a fill 344 ns, a write 215, the occupancy 10; at the board's
+/// 19 ns, 19, 12 and 1 clocks. **Fails** the idle 100 MHz figures carried
+/// before the board was measured on revision 15, 247 and 130.
+#[test]
+fn the_kria_preset_is_the_kria_kr260_s_measured_port() {
+    use muir::clock::TimeBase;
+    use muir::pipeline::PortTiming;
+    let kria = PortTiming { read_ns: 344, write_ns: 215, occupancy_ns: 10 };
+    assert_eq!(PortTiming::KRIA, kria);
+    assert_eq!(PortTiming::parse("kria"), Some(kria));
+    let c = kria.clocks(TimeBase::half_ns(38));
+    assert_eq!((c.read, c.write, c.occupancy), (19, 12, 1), "at 19 ns");
 }
 
 /// **A register takes a clock more than nothing** (A15b.3; MP2b ruling
@@ -3217,7 +3234,7 @@ fn a_checkpoint_refuses_another_period_timing_or_cache() {
     let why = load(&|f| f.configure(18, kria, 65_536)).unwrap_err();
     assert!(why.contains("--microcycle-ns 8.5"), "{why}");
     let why = load(&|f| f.configure(17, muir::pipeline::PortTiming::ARTY, 65_536)).unwrap_err();
-    assert!(why.contains("--memory-timing 247,130,10"), "{why}");
+    assert!(why.contains("--memory-timing 344,215,10"), "{why}");
     let why = load(&|f| f.configure(17, kria, 16_384)).unwrap_err();
     assert!(why.contains("--cache 65536"), "{why}");
 }

@@ -89,10 +89,17 @@ pub struct PortTiming {
 }
 
 impl PortTiming {
-    /// The Kria KR260's, `kria` (MP2b ruling Q6): M8c-board's idle 64-byte
-    /// random line fill, 247 ns; AW to B, 130; the idle sequential single
-    /// write's interval, 10, which the probe bounds.
-    pub const KRIA: PortTiming = PortTiming { read_ns: 247, write_ns: 130, occupancy_ns: 10 };
+    /// The Kria KR260's on revision 15, `kria` (MP2b rulings Q5, Q6): the
+    /// latency probe on revision 15 at 19 ns, from the port taking the
+    /// address to its last data or response, reads 324 ns mean (17.07
+    /// clocks) and writes 214.5 (11.29); plus a fill's landing clock (1, so
+    /// about 18.07 clocks, 343 ns, rounded up to 344). A write's accept
+    /// comes at least a clock after its address is taken, so the write is
+    /// at most the probe's, 215 ns. Left out: the wait for the port to take
+    /// a read's address, which the probe does not see. **Unverified**: the
+    /// occupancy, M8c-board's idle sequential single write's interval,
+    /// 10 ns.
+    pub const KRIA: PortTiming = PortTiming { read_ns: 344, write_ns: 215, occupancy_ns: 10 };
 
     /// The Arty Z7-20's on revision 15, `arty`: M8c-board's idle figures
     /// in the same columns, 290, 120 and 16.

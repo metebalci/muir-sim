@@ -1841,7 +1841,7 @@ const HELP: &[(Whose, &str)] = &[
                                revision 15 the occupancy between two
                                writes too, <r>,<w>,<o>, or kria, arty or
                                de25. [default: 380,290; revision 15: kria,
-                               247,130,10]",
+                               344,215,10]",
     ),
     (
         Whose::Quux,
