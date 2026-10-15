@@ -1141,9 +1141,16 @@ pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
 /// its path.
 pub struct Scratch(PathBuf);
 
-/// `muir-<name>-<pid>` under the system's temporary directory, made here.
+/// `muir-<name>-<pid>-<n>` under the system's temporary directory, made
+/// here, `n` counting the calls in this process.  The tests of one binary
+/// run as threads of one process, so the pid alone is shared by all of
+/// them: two tests asking for the same name would get one directory, each
+/// writing the other's files and the first to finish removing it under
+/// the other.  The count gives every call a directory of its own.
 pub fn scratch(name: &str) -> Scratch {
-    Scratch::at(std::env::temp_dir().join(format!("muir-{name}-{}", std::process::id())))
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Scratch::at(std::env::temp_dir().join(format!("muir-{name}-{}-{n}", std::process::id())))
 }
 
 impl Scratch {
