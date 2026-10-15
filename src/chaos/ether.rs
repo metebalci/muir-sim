@@ -605,6 +605,13 @@ impl Ether {
         Some(self.decoder.stored().to_vec())
     }
 
+    /// Whether the behavioral board's receiver has refused the run now on
+    /// the cable: at its `START^` `RACT` stayed down, the buffer being
+    /// full, or `RRESET` has taken it down since.
+    pub fn board_refused(&self) -> bool {
+        self.board.as_ref().is_some_and(|b| b.started && (b.not_taken || b.dropped))
+    }
+
     /// A frame the behavioral board counted in Lost Count, oldest first:
     /// when, whose it was, and whether the board aborted the sender ---
     /// AIM-628 §7's packets "which would have been received if the

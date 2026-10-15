@@ -76,6 +76,13 @@ fn wire_words(r: &Received) -> Vec<u16> {
     words.split_off(words.len().saturating_sub(r.bits.div_ceil(16)))
 }
 
+/// The check register, [`check_on`], carried over one bit.
+fn check_bit(check: u16, bit: bool) -> u16 {
+    let fb = bit ^ (check >> 15 != 0);
+    let next = check << 1;
+    if fb { next ^ (1 | 1 << 2 | 1 << 15) } else { next }
+}
+
 /// From a frame's turn to Transmit Done when the transmit count is 0 and
 /// there is nothing to send --- 254 words written, the source and check
 /// words taking the count round to 0: `TSTART` at the count, `TBUSY` 93 ns
@@ -384,10 +391,25 @@ pub struct Interface {
     trace: bool,
     /// The last frame a clear dropped, [`Interface::dropped`].
     dropped: Option<Dropped>,
-    /// Until when CRC Error does not read the cable busy: a dropped
-    /// frame's `-CBLBSY` lifting.  `RRESET` clears the check register,
-    /// the 9401 at LMRBUF 0C07, and with `RACT` down no bit reaches it.
-    quiet_until: Option<u64>,
+    /// Whether the receiver has refused the run now on the cable, `RACT`
+    /// down from its `START^` or since a clear, as the ether keeps it
+    /// ([`Ether::board_refused`]), brought here at each of the cable's
+    /// instants so that a copy without a cable still knows it. CRC Error
+    /// does not read the cable busy then: the check register, the 9401 at
+    /// LMRBUF 0C07, is clocked by `RICLK^`, which is `RACT` with the cell
+    /// clock, and cleared by `RRESET`.
+    cable_refused: bool,
+    /// A frame looped back whose `START^` is to come: when, and when it
+    /// lands if it is taken ([`Interface::looped_start`]).
+    looped_start: Option<(u64, u64)>,
+    /// The read register, the two 74164s at LMRBUF 0A07 and 0B07: the
+    /// last word read, which a read with Receive Done down shifts on
+    /// ([`Interface::read_down`]).
+    rd: u16,
+    /// A read with Receive Done down inside a frame the receiver is not
+    /// taking, `RRESET` not held: the frame's first edge, `RBCT` as the
+    /// reads have counted it down from 0, and the check of what they read.
+    down: Option<(u64, u16, u16)>,
     /// A frame looped back that a clear took the receiver off before its
     /// destination word: when the word goes by, and the word, for the
     /// busy receiver's gates (`Interface::busy_looped`).
@@ -429,7 +451,10 @@ impl Clone for Interface {
             trace: self.trace,
             time: self.time,
             dropped: self.dropped,
-            quiet_until: self.quiet_until,
+            cable_refused: self.cable_refused,
+            looped_start: self.looped_start,
+            rd: self.rd,
+            down: self.down,
             looped_busy: self.looped_busy,
         }
     }
@@ -474,7 +499,10 @@ impl Interface {
             trace,
             time: TimeBase::NS,
             dropped: None,
-            quiet_until: None,
+            cable_refused: false,
+            looped_start: None,
+            rd: 0,
+            down: None,
             looped_busy: None,
         }
     }
@@ -541,8 +569,8 @@ impl Interface {
             | if self.transmit_done { csr::TRANSMIT_DONE } else { 0 }
             | ((self.lost as u16) << 9) & csr::LOST_COUNT
             | if self.crc_error
-                || self.turn.busy_at(self.now, self.time)
-                    && !self.quiet_until.is_some_and(|u| self.now < u)
+                || self.taking()
+                || self.down_here().is_some_and(|(_, _, check)| check != 0)
             {
                 csr::CRC_ERROR
             } else {
@@ -564,9 +592,20 @@ impl Interface {
     /// bits (`tests/chaos_rtl.rs`) --- and each read after takes sixteen,
     /// past `7777` and round, never stopping
     /// (`reading_on_goes_round_the_buffer_on_both_alike`).
+    ///
+    /// **With Receive Done down** it is `RBCT` as it stands, which the
+    /// 74LS244s at LMDATP 0C17 put on the bus: the bits stored so far of a
+    /// frame the receiver is taking, [`Interface::stored_now`]; inside a
+    /// frame it is not taking, what reads have counted it down to; and 0
+    /// otherwise, `RRESET` holding it
+    /// (`a_read_with_receive_done_down_is_the_read_paths_on_both_alike`,
+    /// `the_bit_count_while_a_frame_comes_in_on_both_alike`).
     pub fn bit_count(&self) -> u16 {
         if !self.receive_done {
-            return 0;
+            if self.taking() {
+                return (self.stored_now() % BUFFER_BITS) as u16;
+            }
+            return self.down_here().map_or(0, |(_, hw, _)| hw);
         }
         let rbct = match self.rcv_at {
             0 => self.rcv_bits % BUFFER_BITS,
@@ -647,7 +686,10 @@ impl Interface {
             let tc = self.turn.next_tc(time);
             let cable = self.ether.as_ref().and_then(|e| e.next_due());
             let landing = self.incoming.front().map(|&(t, _)| t);
-            let looped = self.looped_busy.map(|(t, _)| t);
+            let looped = [self.looped_busy.map(|(t, _)| t), self.looped_start.map(|(t, _)| t)]
+                .into_iter()
+                .flatten()
+                .min();
             let due = [Some(tc), cable, landing, self.tdone_at, looped]
                 .into_iter()
                 .flatten()
@@ -676,7 +718,11 @@ impl Interface {
                 let (_, r) = self.incoming.pop_front().unwrap();
                 self.arrive(t, &r);
             }
-            if looped == Some(t) {
+            if self.looped_start.is_some_and(|(at, _)| at == t) {
+                let (_, land) = self.looped_start.take().unwrap();
+                self.looped_start(t, land);
+            }
+            if self.looped_busy.is_some_and(|(at, _)| at == t) {
                 let (_, dest) = self.looped_busy.take().unwrap();
                 self.busy_looped(t, dest);
             }
@@ -702,7 +748,10 @@ impl Interface {
         // interface with a cable is never left with nothing due.
         let cable = self.ether.as_ref().and_then(|e| e.next_due());
         let poll = self.ether.as_ref().map(|_| self.polled + time.ns(POLL_NS));
-        let looped = self.looped_busy.map(|(t, _)| t);
+        let looped = [self.looped_busy.map(|(t, _)| t), self.looped_start.map(|(t, _)| t)]
+            .into_iter()
+            .flatten()
+            .min();
         self.next_event = [Some(self.turn.next_tc(time)), cable, poll, self.tdone_at, looped]
             .into_iter()
             .flatten()
@@ -740,6 +789,7 @@ impl Interface {
     fn take_from_cable(&mut self) {
         let time = self.time;
         let Some(e) = self.ether.as_mut() else { return };
+        self.cable_refused = e.board_refused();
         let loop_back = self.csr & csr::LOOP_BACK != 0;
         while let Some((start, source, end)) = e.board_cable_frame() {
             if source == self.address {
@@ -860,8 +910,10 @@ impl Interface {
             self.tdone_at = Some(time.after(start, length - time.ns(TDONE_BEFORE_END_NS)));
             if self.csr & csr::LOOP_BACK != 0 {
                 let r = unframe_any(&cells);
-                self.incoming.push_back((time.after(start, length + time.ns(CBLBSY_OFF_NS)), r));
+                let land = time.after(start, length + time.ns(CBLBSY_OFF_NS));
+                self.incoming.push_back((land, r));
                 self.incoming.make_contiguous().sort_by_key(|&(t, _)| t);
+                self.looped_start = Some((time.after(start, time.ns(RACT_NS)), land));
             }
         } else if let Some(e) = self.ether.as_mut() {
             e.board_send(line, start);
@@ -897,13 +949,21 @@ impl Interface {
     /// not land, and of 64, 258 written, does
     /// (`a_frame_written_past_the_buffer_wraps_on_both_alike` in
     /// `tests/chaos_rtl.rs`).
+    ///
+    /// **A frame taken that does not land leaves its bits in the buffer**:
+    /// the receiver stored them as they came, from `RBCT` 0, and the
+    /// destination word decided only whether it lands
+    /// (`a_frame_taken_and_not_landed_leaves_its_bits_on_both_alike`).
     fn arrive(&mut self, now: u64, r: &Received) {
-        let Some(&dest) = r.framed.buffer.last() else { return };
-        if r.bits <= 48 {
-            return;
-        }
-        let mine = dest == self.address || dest == 0 || self.csr & csr::SPY != 0;
-        if !mine {
+        let lands = r.bits > 48
+            && r.framed
+                .buffer
+                .last()
+                .is_some_and(|&dest| dest == self.address || dest == 0 || self.csr & csr::SPY != 0);
+        if !lands {
+            if !self.receive_done {
+                self.land(&wire_words(r), r.bits);
+            }
             return;
         }
         let (f, bits) = (&r.framed, r.bits);
@@ -938,6 +998,9 @@ impl Interface {
         self.land(&words, bits);
         self.crc_error = !f.check_ok;
         self.receive_done = true;
+        // `RO.FIRST^`, the 26S02 at LMRCTL 0A04 on Receive Done, clears the
+        // read register.
+        self.rd = 0;
         self.tell_the_cable();
     }
 
@@ -970,9 +1033,10 @@ impl Interface {
                 self.rcv_at += 1;
                 self.rcv_check = check_on(self.rcv_check, &[w]);
                 self.crc_error = self.rcv_check != 0;
+                self.rd = w;
                 w
             }
-            interface::READ_BUFFER => 0,
+            interface::READ_BUFFER => self.read_down(),
             interface::BIT_COUNT => self.bit_count(),
             interface::START => {
                 self.start(now);
@@ -991,8 +1055,7 @@ impl Interface {
                 let looped = self.csr & csr::LOOP_BACK != 0;
                 self.csr = v & WRITABLE;
                 if v & csr::RESET != 0 {
-                    self.rreset(looped);
-                    self.reset();
+                    self.reset_from(looped);
                 }
                 if v & csr::CLEAR_RECEIVER != 0 {
                     self.rreset(looped);
@@ -1056,22 +1119,36 @@ impl Interface {
     /// 74S08 at LMUCON 0B10, which is the other input of `-CLR RCV BUSY`.
     /// The interface acts at the instant it was last advanced to.
     ///
-    /// **Lost Count is zeroed here, and on the board it is not**: its
-    /// 74LS161 at LMMYNM 0F04 clears on `-11.SAYS.GO` alone, Clear
-    /// Receiver, and `-INIT` reaches only `-CLR RCV BUSY`
-    /// (`a_reset_leaves_lost_count_on_the_board` in `tests/chaos_rtl.rs`
-    /// measures it).
+    /// **Lost Count stays as it is**: its 74LS161 at LMMYNM 0F04 clears on
+    /// `-11.SAYS.GO` alone, Clear Receiver, and `-INIT` reaches only
+    /// `-CLR RCV BUSY` and Transmit Done
+    /// (`a_reset_leaves_lost_count_where_it_was_on_both_alike` in
+    /// `tests/chaos_rtl.rs`).
     pub fn reset(&mut self) {
+        self.reset_from(self.csr & csr::LOOP_BACK != 0);
+    }
+
+    /// [`Interface::reset`] from a CSR that had Loop Back as `looped`.
+    fn reset_from(&mut self, looped: bool) {
         self.invalidate();
-        let looped = self.csr & csr::LOOP_BACK != 0;
         self.rreset(looped);
         self.looped_busy = None;
+        self.looped_start = None;
+        // Loop Back goes off with the CSR: the receiver no longer hears the
+        // transmitter, and the frame looped back is over for it at once.
+        if looped {
+            let (now, off, me) = (self.now, self.time.ns(CBLBSY_OFF_NS), self.address);
+            for f in
+                self.turn.frames.iter_mut().filter(|f| f.1 == me && f.0 <= now && now < f.2 + off)
+            {
+                f.2 = now.saturating_sub(off).max(f.0);
+            }
+        }
         self.csr = 0;
         self.transmit_done = true;
         self.transmit_abort = false;
         self.receive_done = false;
         self.crc_error = false;
-        self.lost = 0;
         self.xmit.clear();
         self.xmit_n = 0;
         self.xmit_check = 0;
@@ -1081,6 +1158,121 @@ impl Interface {
         self.incoming.clear();
         self.turn.ready = None;
         self.tell_the_cable();
+    }
+
+    /// Whether the receiver is taking the frame on the line now: there is
+    /// one, and it has not refused it --- off the cable as the ether has
+    /// it, looped back the frame still waiting to land. Before `START^`
+    /// the frame counts as taken, as CRC Error has always read it.
+    fn taking(&self) -> bool {
+        self.frame_now().is_some()
+            && if self.csr & csr::LOOP_BACK != 0 {
+                !self.incoming.is_empty()
+            } else {
+                !self.cable_refused
+            }
+    }
+
+    /// The frame on the line now, from the interface's turn timer: its
+    /// first edge and nominal end.
+    fn frame_now(&self) -> Option<(u64, u64)> {
+        let off = self.time.ns(CBLBSY_OFF_NS);
+        self.turn
+            .frames
+            .iter()
+            .rev()
+            .find(|&&(s, _, e)| s <= self.now && self.now < e + off)
+            .map(|&(s, _, e)| (s, e))
+    }
+
+    /// `RBCT` while the receiver takes the frame on the line: a step on
+    /// each `RICLK^`, which is the cell clock with `RACT` and comes
+    /// [`RACT_NS`] after each cell's opening edge as `START^` does --- one
+    /// for every cell after the first, the trailing zero's last. Measured
+    /// on the netlist board, `RBCT0` stepping 310, 560, 810 ns after the
+    /// frame's first edge, and held by
+    /// `the_bit_count_while_a_frame_comes_in_on_both_alike`.
+    fn stored_now(&self) -> usize {
+        let (cell, late) = (self.time.ns(wire::CELL_NS), self.time.ns(RACT_NS));
+        self.frame_now().map_or(0, |(s, e)| {
+            let k = if self.now >= s + late { (self.now - s - late) / cell } else { 0 };
+            (k as usize).min(((e - s) / cell) as usize - 1)
+        })
+    }
+
+    /// The reads' count-down inside the frame on the line, if that is
+    /// where the last of them was: `RRESET` is held whenever the receiver
+    /// is neither taking a frame nor inside one.
+    fn down_here(&self) -> Option<(u64, u16, u16)> {
+        let (s, _) = self.frame_now()?;
+        self.down.filter(|&(at, _, _)| at == s && !self.receive_done)
+    }
+
+    /// A read of the buffer with Receive Done down: the read register
+    /// shifted on `ROCLK^`, the 2147's bit at `RBCT` coming in at the
+    /// bottom and `RBCT` counting down on each shift (the 25LS193s at
+    /// LMRBUF 0D04-0D06), until the count's low four bits borrow and
+    /// `-ROWEND` ends the read (the 74279 at LMRCTL 0D09). The check
+    /// register runs on each bit, the reads being made with `RACT` down.
+    ///
+    /// With the line idle `RRESET` holds `RBCT` at 0 and the check register
+    /// clear, so a read shifts once: the last word read moved up a bit,
+    /// with the buffer's first bit below it. Inside a frame the receiver is
+    /// not taking --- cleared off it --- `RRESET` is not held, and the
+    /// reads count `RBCT` down from 0 as a frame is read out: the first one
+    /// bit, the rest sixteen. Measured by
+    /// `a_read_with_receive_done_down_is_the_read_paths_on_both_alike`.
+    ///
+    /// **A read while the receiver is taking a frame is not modelled**: on
+    /// the netlist board its cycle is not answered until the frame has
+    /// ended, `ROCLK^` and `RICLK^` counting `RBCT` against each other, and
+    /// what lands is spoiled. That reads as 0 here.
+    fn read_down(&mut self) -> u16 {
+        if self.taking() {
+            return 0;
+        }
+        let Some((s, _)) = self.frame_now() else {
+            self.down = None;
+            self.rd = self.rd << 1 | self.ram_bit(0) as u16;
+            return self.rd;
+        };
+        let (_, mut hw, mut check) = self.down_here().unwrap_or((s, 0, 0));
+        loop {
+            let bit = self.ram_bit(hw as usize);
+            self.rd = self.rd << 1 | bit as u16;
+            check = check_bit(check, bit);
+            hw = (hw + BUFFER_BITS as u16 - 1) % BUFFER_BITS as u16;
+            if hw % 16 == 15 {
+                break;
+            }
+        }
+        self.down = Some((s, hw, check));
+        self.rd
+    }
+
+    /// The incoming buffer's bit at `RBCT` value `at`, as the read path
+    /// gives it: the bits of the last frame stored are from `RBCT` 0 up.
+    fn ram_bit(&self, at: usize) -> bool {
+        let word = self.rcv[(top_word(self.rcv_bits) + BUFFER_WORDS - at / 16) % BUFFER_WORDS];
+        word >> (at % 16) & 1 != 0
+    }
+
+    /// `START^` of a frame looped back, landing at `land` if taken:
+    /// `RACT` takes `-RDONE`. With the buffer full the receiver stays off
+    /// for the frame --- nothing stored, CRC Error not clocked --- and its
+    /// destination word goes to the busy receiver's gates, as off the
+    /// cable (`a_frame_at_a_full_buffer_is_not_taken_looped_back_on_both_alike`).
+    fn looped_start(&mut self, t: u64, land: u64) {
+        if !self.receive_done {
+            return;
+        }
+        let Some(k) = self.incoming.iter().position(|&(l, _)| l == land) else { return };
+        let (_, r) = self.incoming.remove(k).unwrap();
+        let start = t - self.time.ns(RACT_NS);
+        if r.bits >= 48 {
+            let dest_at = self.time.after(start, self.time.ns(BUSY_ABORT_NS));
+            self.looped_busy = r.framed.buffer.last().map(|&dest| (dest_at, dest));
+        }
     }
 
     /// The last frame a Clear Receiver, a Reset or `-UB INIT` dropped
@@ -1123,6 +1315,8 @@ impl Interface {
         // Under Loop Back the cable is not the receiver's, and its frames
         // are left as they were.
         let stored = self.ether.as_mut().filter(|_| !looped).and_then(|e| e.board_rreset());
+        self.cable_refused = self.ether.as_ref().is_some_and(|e| e.board_refused());
+        self.down = None;
         if let Some(bits) = stored {
             let frame = self
                 .turn
@@ -1186,7 +1380,6 @@ impl Interface {
             );
         }
         self.store(bits);
-        self.quiet_until = land;
         self.dropped = Some(Dropped { at: now, source, would_land: land, bits: bits.len() });
     }
 
@@ -1329,7 +1522,10 @@ impl Interface {
             trace: _,
             time: _,
             dropped: _,
-            quiet_until: _,
+            cable_refused: _,
+            looped_start: _,
+            rd: _,
+            down: _,
             looped_busy: _,
         } = self;
         w.u16(*address);
@@ -1446,8 +1642,14 @@ impl Interface {
         self.polled = r.u64()?;
         self.next_event = None;
         self.dropped = None;
-        self.quiet_until = None;
+        self.cable_refused = false;
+        self.looped_start = None;
+        self.down = None;
         self.looped_busy = None;
+        // The read register is the last word read, if a packet is being
+        // read; otherwise nothing kept says what it held.
+        self.rd =
+            if self.receive_done && self.rcv_at > 0 { self.rcv_word(self.rcv_at - 1) } else { 0 };
         self.tell_the_cable();
         Ok(())
     }

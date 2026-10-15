@@ -893,6 +893,15 @@ impl Inside {
 /// two are held to one instant so that what a clear leaves inside a frame
 /// can be compared bit for bit.
 fn write_at_strobe(b: &mut UnibusMaster, m: &mut Model, v: u16) {
+    exact(b, m, chaos::CSR, Some(v));
+}
+
+/// A cycle on both as [`write_at_strobe`] makes a write: the board's cycle
+/// with its lines driven here, and the model's at the instant the board
+/// acts --- a write at `WCSR`'s rise, a read at `-SSYN*`'s fall, where the
+/// master takes the word.  Returns the board's word and the model's, for a
+/// read.
+fn exact(b: &mut UnibusMaster, m: &mut Model, uaddr: u32, write: Option<u16>) -> (u16, u16) {
     use muir::busint::{UNIBUS_ADDRESS_NS, UNIBUS_STROBE_NS};
     let lines = |b: &UnibusMaster, prefix: &str, bits: std::ops::Range<u32>| {
         bits.map(|k| b.net(&format!("-{prefix}{k}*"))).collect::<Vec<_>>()
@@ -908,9 +917,17 @@ fn write_at_strobe(b: &mut UnibusMaster, m: &mut Model, v: u16) {
     };
     let (addr, data) = (lines(b, "A", 1..18), lines(b, "D", 0..16));
     let (c1, msyn, ssyn) = (b.net("-C1*"), b.net("-MSYN*"), b.net("-SSYN*"));
-    put(b, &addr, chaos::CSR >> 1);
-    b.chip.drive(c1, Level::Low);
-    put(b, &data, v as u32);
+    put(b, &addr, uaddr >> 1);
+    match write {
+        Some(v) => {
+            b.chip.drive(c1, Level::Low);
+            put(b, &data, v as u32);
+        }
+        None => {
+            b.chip.pull_up(c1);
+            put(b, &data, 0);
+        }
+    }
     b.chip.transition(b.now);
     b.run(b.now + UNIBUS_ADDRESS_NS);
     b.chip.drive(msyn, Level::Low);
@@ -922,12 +939,17 @@ fn write_at_strobe(b: &mut UnibusMaster, m: &mut Model, v: u16) {
     };
     while b.chip.net(ssyn) != Level::Low {
         step(b);
-        if strobe.is_none() && b.level("WCSR") == Level::High {
+        if strobe.is_none() && write.is_some() && b.level("WCSR") == Level::High {
             strobe = Some(b.now);
         }
     }
-    let strobe = strobe.expect("WCSR rose before -SSYN*");
-    m.cycle(chaos::CSR, Some(v), strobe);
+    let (wb, wm) = match write {
+        Some(v) => {
+            m.cycle(uaddr, Some(v), strobe.expect("WCSR rose before -SSYN*"));
+            (0, 0)
+        }
+        None => (b.word(), m.cycle(uaddr, None, b.now)),
+    };
     b.run(b.now + UNIBUS_STROBE_NS);
     b.chip.pull_up(msyn);
     b.chip.transition(b.now);
@@ -940,6 +962,7 @@ fn write_at_strobe(b: &mut UnibusMaster, m: &mut Model, v: u16) {
     b.chip.transition(b.now);
     b.run(b.now + 200);
     m.run(b.now);
+    (wb, wm)
 }
 
 /// The clear on both: the board's write, or its `-INIT*` held down a
@@ -1275,16 +1298,16 @@ fn the_bits_stored_before_a_clear_stay_in_the_buffer_on_both_alike() {
     );
 }
 
-/// **A Reset leaves Lost Count where it was, on the board.** Lost Count is
-/// the 74LS161 at LMMYNM 0F04, whose clear, pin 1, is `-11.SAYS.GO`: a
-/// CSR write with Clear Receiver, and nothing else. Reset's `-11.ZOT` and
-/// `-UB INIT` make `-INIT`, the 74S08 at LMUCON 0B10, which goes to
-/// `-CLR RCV BUSY` and Transmit Done and not to the count. Measured here:
-/// a frame lost to a full buffer, then a Reset, then `-UB INIT`; Lost
-/// Count reads 1 on the board after each, and Clear Receiver alone takes
-/// it to 0. The model zeroes it on both and is reported, not held.
+/// **A Reset leaves Lost Count where it was, on both alike.** Lost Count
+/// is the 74LS161 at LMMYNM 0F04, whose clear, pin 1, is `-11.SAYS.GO`: a
+/// CSR write with Clear Receiver, and nothing else (`mit/cadrio/iob.wlr`,
+/// `-11.SAYS.GO` to `F04-01`). Reset's `-11.ZOT` and `-UB INIT` make
+/// `-INIT`, the 74S08 at LMUCON 0B10, which goes to `-CLR RCV BUSY` and
+/// Transmit Done and not to the count. Measured here: a frame lost to a
+/// full buffer, then a Reset, then `-UB INIT`; Lost Count reads 1 after
+/// each, and Clear Receiver alone takes it to 0.
 #[test]
-fn a_reset_leaves_lost_count_on_the_board() {
+fn a_reset_leaves_lost_count_where_it_was_on_both_alike() {
     let n = cadrio();
     let mut b = board(&n);
     let mut m = Model::new(None);
@@ -1294,7 +1317,7 @@ fn a_reset_leaves_lost_count_on_the_board() {
     let lost = |c: u16| (c & csr::LOST_COUNT) >> 9;
     let c = both(&mut b, &mut m, chaos::CSR, None, "the CSR with one lost");
     assert_eq!(lost(c), 1, "a frame counted lost: {c:#08o}");
-    let mut seen = Vec::new();
+    let (mut board, mut model) = (Vec::new(), Vec::new());
     for clear in [Clear::Reset, Clear::Init, Clear::Receiver] {
         clear_both(&mut b, &mut m, clear, 0);
         b.run(b.now + 2_000);
@@ -1305,9 +1328,282 @@ fn a_reset_leaves_lost_count_on_the_board() {
             lost(cb),
             lost(cm)
         );
-        seen.push(lost(cb));
+        board.push(lost(cb));
+        model.push(lost(cm));
     }
-    assert_eq!(seen, [1, 1, 0], "the board's Lost Count after Reset, -UB INIT, Clear Receiver");
+    assert_eq!(board, [1, 1, 0], "the board's Lost Count after Reset, -UB INIT, Clear Receiver");
+    assert_eq!(model, board, "the model's");
+}
+
+/// **A frame the receiver takes and does not land leaves its bits in the
+/// buffer, on both alike.** `RACT` comes up at every frame's `START^` with
+/// the buffer free, whatever the frame turns out to be for, and the
+/// receiver writes every bit into the 2147 at LMRBUF 0C04 as it comes; the
+/// destination word decides only whether `RCV BUSY` is set and the frame
+/// lands. One that does not land is let go at its end --- `RRESET` comes
+/// with `-CBLBSY` lifting and `RCV BUSY` down, and clears `RBCT` --- and
+/// its bits stay below where the next frame goes. Measured with a frame of
+/// 44 words for another station; then a frame of 14 words lands over it
+/// and is read 262 times round the buffer. Every count, word and CSR on
+/// the model the board's. A run of 48 bits or fewer, which does not land
+/// either, lies wholly below the shortest frame that does, and is held by
+/// the read of the buffer's first bit in
+/// `a_read_with_receive_done_down_is_the_read_paths_on_both_alike`.
+#[test]
+fn a_frame_taken_and_not_landed_leaves_its_bits_on_both_alike() {
+    let mut wrong = Vec::new();
+    let marked = |n: usize, dest: u16| {
+        let mut v: Vec<u16> = (0..n - 1).map(|k| 0o040000 | (k as u16) << 4).collect();
+        v.push(dest);
+        v
+    };
+    let cases = [("44 words for another station", marked(42, 0o3070))];
+    for (what, first) in &cases {
+        let n = cadrio();
+        let (mut b, mut m) = on_a_cable(&n);
+        let t0 = b.now + 20_000;
+        b.run(t0);
+        m.run(t0);
+        b.chaos.as_mut().unwrap().ether.send_now(t0, SERVER, first.clone());
+        m.io.chaos.as_mut().unwrap().ether_mut().unwrap().send_now(t0, SERVER, first.clone());
+        b.run(t0 + 250_000);
+        m.run(b.now);
+        let (cb, cm) = pair(&mut b, &mut m, chaos::CSR);
+        assert_eq!(cb & csr::RECEIVE_DONE, 0, "{what}: nothing landed on the board");
+        let t1 = b.now;
+        let second = numbered(12, MY_ADDRESS);
+        b.chaos.as_mut().unwrap().ether.send_now(t1, SERVER, second.clone());
+        m.io.chaos.as_mut().unwrap().ether_mut().unwrap().send_now(t1, SERVER, second);
+        let (board, model) = read_out(&mut b, &mut m, 262);
+        let octal = |v: &[u16]| v.iter().map(|w| format!("{w:o}")).collect::<Vec<_>>().join(" ");
+        eprintln!(
+            "{what}: board CSR {cb:06o}, model {cm:06o}; board words {}",
+            octal(&board.words)
+        );
+        assert!(
+            board.words[14..256].iter().any(|&w| w != 0o177777),
+            "{what}: its bits on the board"
+        );
+        if cm != cb {
+            wrong.push(format!("{what}: the CSR after it, board {cb:06o}, model {cm:06o}"));
+        }
+        if let Some(how) = model.unlike(&board) {
+            wrong.push(format!("{what}: the model {how}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} unlike the board:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// Reads with Receive Done down, `n` of them, on both: each the word, the
+/// bit count and the CSR after it.
+fn reads_down(b: &mut UnibusMaster, m: &mut Model, n: usize, what: &str, wrong: &mut Vec<String>) {
+    for k in 0..n {
+        let word = exact(b, m, chaos::READ_BUFFER, None);
+        let count = exact(b, m, chaos::BIT_COUNT, None);
+        let c = exact(b, m, chaos::CSR, None);
+        eprintln!(
+            "{what}, read {k}: board {:06o} count {:o} CSR {:06o}; model {:06o} {:o} {:06o}",
+            word.0, count.0, c.0, word.1, count.1, c.1
+        );
+        assert_eq!(c.0 & csr::RECEIVE_DONE, 0, "{what}: Receive Done down on the board");
+        if (word.1, count.1, c.1) != (word.0, count.0, c.0) {
+            wrong.push(format!(
+                "{what}, read {k}: board {:06o} {:o} {:06o}, model {:06o} {:o} {:06o}",
+                word.0, count.0, c.0, word.1, count.1, c.1
+            ));
+        }
+    }
+}
+
+/// From the frame's first edge, sent on both cables from [`SERVER`].
+fn send_both(b: &mut UnibusMaster, m: &mut Model, words: &[u16]) -> u64 {
+    let t0 = b.now + 5_000;
+    b.run(t0);
+    m.run(t0);
+    b.chaos.as_mut().unwrap().ether.send_now(t0, SERVER, words.to_vec());
+    m.io.chaos.as_mut().unwrap().ether_mut().unwrap().send_now(t0, SERVER, words.to_vec());
+    t0
+}
+
+/// **A read of the buffer with Receive Done down is the read path's, on
+/// both alike.** The read register is the two 74164s at LMRBUF 0A07 and
+/// 0B07, shifted on `ROCLK^` with the 2147's bit at `RBCT` coming in at the
+/// bottom, `RBCT` counting down on each shift (the 25LS193s at 0D04-0D06),
+/// until the count's low four bits borrow, `-ROWEND` on the 74279 at
+/// LMRCTL 0D09 ending the read; Bit Count is `RBCT` itself, through the
+/// 74LS244s at LMDATP 0C17. With the cable idle and no frame landed,
+/// `RRESET` holds `RBCT` at 0, so each read shifts once: the word is the
+/// last one read moved up a bit with the buffer's bit 0 below it, Bit Count
+/// 0, and the check register held clear. Inside a frame the receiver has
+/// been cleared off, `RRESET` is not held: `RBCT` counts down from 0 as it
+/// does reading a frame out, the first read one bit and the rest sixteen,
+/// and the check register runs on what is read. Measured: on a board that
+/// has received nothing, after a frame read out and cleared, after one
+/// cleared unread, inside and after a dropped frame, after a frame for
+/// another station, and after runs of 48 bits to this address and to zero,
+/// which do not land. Every word, count and CSR on the model the board's,
+/// the model's cycle at the instant the board answers.
+#[test]
+fn a_read_with_receive_done_down_is_the_read_paths_on_both_alike() {
+    let n = cadrio();
+    let mut wrong = Vec::new();
+    let (mut b, mut m) = on_a_cable(&n);
+    reads_down(&mut b, &mut m, 4, "nothing received", &mut wrong);
+
+    let (mut b, mut m) = on_a_cable(&n);
+    send_both(&mut b, &mut m, &numbered(12, MY_ADDRESS));
+    wait_for(&mut b, &mut m, csr::RECEIVE_DONE, 3_000_000);
+    for k in 0..15 {
+        both(&mut b, &mut m, chaos::READ_BUFFER, None, &format!("word {k}"));
+    }
+    write_at_strobe(&mut b, &mut m, csr::CLEAR_RECEIVER);
+    reads_down(&mut b, &mut m, 5, "read out and cleared", &mut wrong);
+
+    let (mut b, mut m) = on_a_cable(&n);
+    let mut f: Vec<u16> = (0..20).map(|k| 0o125252 ^ k).collect();
+    f.push(MY_ADDRESS);
+    send_both(&mut b, &mut m, &f);
+    wait_for(&mut b, &mut m, csr::RECEIVE_DONE, 3_000_000);
+    write_at_strobe(&mut b, &mut m, csr::CLEAR_RECEIVER);
+    reads_down(&mut b, &mut m, 5, "cleared unread", &mut wrong);
+
+    let (mut b, mut m) = on_a_cable(&n);
+    let t0 = send_both(&mut b, &mut m, &numbered(42, MY_ADDRESS));
+    b.run(t0 + 30_000);
+    m.run(b.now);
+    write_at_strobe(&mut b, &mut m, csr::CLEAR_RECEIVER);
+    reads_down(&mut b, &mut m, 4, "inside a dropped frame", &mut wrong);
+    b.run(t0 + 200_000);
+    m.run(b.now);
+    reads_down(&mut b, &mut m, 4, "after it", &mut wrong);
+
+    let (mut b, mut m) = on_a_cable(&n);
+    f[20] = 0o3070;
+    send_both(&mut b, &mut m, &f);
+    b.run(b.now + 200_000);
+    m.run(b.now);
+    reads_down(&mut b, &mut m, 4, "after a frame for another station", &mut wrong);
+
+    for dest in [MY_ADDRESS, 0] {
+        let (mut b, mut m) = on_a_cable(&n);
+        send_both(&mut b, &mut m, &[dest]);
+        b.run(b.now + 50_000);
+        m.run(b.now);
+        reads_down(&mut b, &mut m, 3, &format!("after 48 bits to {dest:o}"), &mut wrong);
+    }
+    assert!(wrong.is_empty(), "{} reads unlike the board:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// **Bit Count while a frame comes in, on both alike**: `RBCT` counting
+/// up the bits stored, a step on each `RICLK^`, 60 ns after a cell's
+/// opening edge. Polled every 5 µs through a frame of 44 words, the
+/// model's read at the instant the board answers; the CSR too, CRC Error
+/// aside.
+#[test]
+fn the_bit_count_while_a_frame_comes_in_on_both_alike() {
+    let n = cadrio();
+    let (mut b, mut m) = on_a_cable(&n);
+    let t0 = send_both(&mut b, &mut m, &numbered(42, MY_ADDRESS));
+    let mut wrong = Vec::new();
+    while b.now < t0 + 200_000 {
+        b.run(b.now + 5_000);
+        m.run(b.now);
+        let (nb, nm) = exact(&mut b, &mut m, chaos::BIT_COUNT, None);
+        // CRC Error aside: the board's is the check register as it runs,
+        // which a good frame brings to 0 with its last bit.
+        let (cb, cm) = exact(&mut b, &mut m, chaos::CSR, None);
+        let (cb, cm) = (cb & !csr::CRC_ERROR, cm & !csr::CRC_ERROR);
+        if (nb, cb) != (nm, cm) {
+            wrong.push(format!("+{}: board {nb:o} {cb:06o}, model {nm:o} {cm:06o}", b.now - t0));
+        }
+    }
+    assert!(wrong.is_empty(), "{} polls unlike the board:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// **A frame that finds the buffer full at `START^` is not taken, on the
+/// cable and looped back alike, on both.** `RACT` takes `-RDONE` at
+/// `START^`: with a packet in the buffer it stays down for the frame, the
+/// check register is not clocked, and CRC Error reads the packet's, not
+/// the cable's business. Looped back the frame reaches the same gates: at
+/// its destination word Lost Count steps for `DEST MATCH`, and a frame to
+/// the board's own address presets its own transmitter's `ABORT` through
+/// `-LOST.ONE`, so it reads Transmit Abort with Transmit Done early.
+/// Polled every 5 µs from START for 600 µs: every CSR on the model the
+/// board's, then the bit count of the packet still in the buffer; and the
+/// next frame after the abort lands at the board's poll.
+#[test]
+fn a_frame_at_a_full_buffer_is_not_taken_looped_back_on_both_alike() {
+    let n = cadrio();
+    let mut wrong = Vec::new();
+    for (dest, spy) in [(MY_ADDRESS, false), (0, false), (0o3070, true), (0o3070, false)] {
+        let what = format!("to {dest:o}{}", if spy { ", spy" } else { "" });
+        let (mut b, mut m) = on_a_cable(&n);
+        let keep = csr::LOOP_BACK | if spy { csr::SPY } else { 0 };
+        both(&mut b, &mut m, chaos::CSR, Some(csr::CLEAR_RECEIVER | keep), "loop back");
+        for &w in &numbered(12, MY_ADDRESS) {
+            both(&mut b, &mut m, chaos::WRITE_BUFFER, Some(w), "a word in");
+        }
+        both(&mut b, &mut m, chaos::START, None, "START");
+        wait_for(&mut b, &mut m, csr::RECEIVE_DONE, 3_000_000);
+        for &w in &numbered(42, dest) {
+            both(&mut b, &mut m, chaos::WRITE_BUFFER, Some(w), "a word in");
+        }
+        both(&mut b, &mut m, chaos::START, None, "START");
+        let t = b.now;
+        let mut seen = Vec::new();
+        while b.now < t + 600_000 {
+            b.run(b.now + 5_000);
+            m.run(b.now);
+            let (cb, cm) = pair(&mut b, &mut m, chaos::CSR);
+            if seen.last().is_none_or(|&(_, x, y)| (x, y) != (cb, cm)) {
+                seen.push((b.now - t, cb, cm));
+            }
+            if cb != cm {
+                wrong.push(format!("{what}: +{}: board {cb:06o}, model {cm:06o}", b.now - t));
+            }
+        }
+        let seen: Vec<String> =
+            seen.iter().map(|(t, cb, cm)| format!("+{t} {cb:06o}/{cm:06o}")).collect();
+        eprintln!("{what}: board/model {}", seen.join(", "));
+        let (last, _) = pair(&mut b, &mut m, chaos::CSR);
+        assert_eq!(
+            ((last & csr::LOST_COUNT) >> 9, last & csr::TRANSMIT_ABORT != 0),
+            ((dest == MY_ADDRESS || dest == 0 || spy) as u16, dest == MY_ADDRESS),
+            "{what}: the board's Lost Count and Transmit Abort"
+        );
+        let (nb, nm) = pair(&mut b, &mut m, chaos::BIT_COUNT);
+        assert_eq!(nb, 14 * 16 - 1, "{what}: the first packet still in the board's buffer");
+        if nb != nm {
+            wrong.push(format!("{what}: bit count board {nb:o}, model {nm:o}"));
+        }
+        if dest == MY_ADDRESS {
+            write_at_strobe(&mut b, &mut m, csr::CLEAR_RECEIVER | keep);
+            for &w in &numbered(12, MY_ADDRESS) {
+                both(&mut b, &mut m, chaos::WRITE_BUFFER, Some(w), "a word in");
+            }
+            both(&mut b, &mut m, chaos::START, None, "START");
+            let ((tb, cb), (tm, cm)) = wait_for(&mut b, &mut m, csr::RECEIVE_DONE, 3_000_000);
+            if (tb, cb) != (tm, cm) {
+                wrong.push(format!(
+                    "{what}: the next frame, board {tb} {cb:06o}, model {tm} {cm:06o}"
+                ));
+            }
+        }
+    }
+    // And on the cable: a frame for another station at a full buffer.
+    let mut b = board(&n);
+    let mut m = Model::new(None);
+    buffer_full(&mut b, &mut m, false, &[rfc_time(SERVER, MY_ADDRESS), numbered(42, 0o3070)]);
+    let t = b.now;
+    while b.now < t + 400_000 {
+        b.run(b.now + 5_000);
+        m.run(b.now);
+        let (cb, cm) = pair(&mut b, &mut m, chaos::CSR);
+        if cb != cm {
+            wrong.push(format!("on the cable: +{}: board {cb:06o}, model {cm:06o}", b.now - t));
+        }
+    }
+    assert!(wrong.is_empty(), "{} unlike the board:\n{}", wrong.len(), wrong.join("\n"));
 }
 
 /// **Under Loop Back a Clear Receiver inside the board's own frame drops

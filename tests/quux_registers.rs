@@ -251,7 +251,12 @@ fn table() -> [(Class, u32); 256] {
     // buffer, the bit count, START.
     t[0o140] = (ReadWrite, POWER_ON_CSR);
     t[0o141] = (ReadWrite, POWER_ON_MY_ADDRESS);
-    t[0o142] = (ReadOnly, 0);
+    // The read buffer with nothing received reads as the CADR's board's
+    // does (contract Q4): its read register, clear at power-on, shifted
+    // once with the buffer's first cell, which reads as a one
+    // (`a_read_with_receive_done_down_is_the_read_paths_on_both_alike` in
+    // `tests/chaos_rtl.rs`).
+    t[0o142] = (ReadOnly, 1);
     t[0o143] = (ReadOnly, POWER_ON_BIT_COUNT);
     // START reads the address, as the CADR's board does at `764152`.
     t[0o145] = (ReadOnly, POWER_ON_MY_ADDRESS);

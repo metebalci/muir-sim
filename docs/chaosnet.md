@@ -664,22 +664,87 @@ is written at the instant the board's `WCSR` rises inside its cycle, so that
 the two clear at the same instant. A dropped frame raises nothing a caller
 could see, so `chaos::board::Interface::dropped` says when the last one was
 cleared, whose it was, when it would have landed, and how many of its bits
-stayed. What the board's read buffer gives with Receive Done down is not
-held: the model reads 0 there, and after a dropped frame the board read 0,
-or 1 under Spy, in these runs; it is **unverified** what it reads in
-general, and the netlist board's read path with `RDONE` down would settle it.
+stayed.
 
-**Reset does not clear Lost Count on the board; muir's model does.** The
-74LS161 at LMMYNM `0F04` has `-11.SAYS.GO` alone on its clear, pin 1, and
-MIT's wire list has the same, `mit/cadrio/iob.wlr` lines 1681-1689:
-`-11.SAYS.GO` reaches `E10-12`, `E04-11` and `F04-01`, and `-11.ZOT` only
-`B10-12`. Clear Receiver clears the count and nothing else does. `-INIT` goes to
-`-CLR RCV BUSY` and to Transmit Done and not to the count, AIM-628's "just
-as at power up and Unibus Initialize" notwithstanding.
-`tests/chaos_rtl.rs::a_reset_leaves_lost_count_on_the_board` measures a
-count of 1 kept over a Reset and over `-UB INIT` and cleared by Clear
-Receiver; `chaos::board::Interface::reset` zeroes it, a difference from the
-board that muir has not taken up.
+**A frame the receiver takes and does not land leaves its bits in the
+buffer.** `RACT` comes up at every frame's `START^` with the buffer free,
+whatever the frame turns out to be for, and the receiver writes every bit
+into the 2147 as it comes; the destination word decides only whether
+`RCV BUSY` is set and the frame lands. A frame for another station, or a run
+of 48 bits or fewer, is let go at its end --- `RRESET` comes with `-CBLBSY`
+lifting and `RCV BUSY` down, and clears `RBCT` --- and its bits stay below
+where the next frame goes.
+`tests/chaos_rtl.rs::a_frame_taken_and_not_landed_leaves_its_bits_on_both_alike`
+lands a frame over one for another station and reads it round the buffer.
+While a frame comes in, Bit Count is `RBCT` counting it: a step on each
+`RICLK^`, the cell clock with `RACT`, 60 ns after each cell's opening edge
+(`tests/chaos_rtl.rs::the_bit_count_while_a_frame_comes_in_on_both_alike`).
+
+**A read of the buffer with Receive Done down is the read path's.** The read
+register is the two 74164s at LMRBUF `0A07` and `0B07`, shifted on `ROCLK^`
+with the 2147's bit at `RBCT` coming in at the bottom; `RBCT` counts down on
+each shift, until its low four bits borrow and `-ROWEND`, on the 74279 at
+LMRCTL `0D09`, ends the read; Bit Count is `RBCT` itself, through the
+74LS244s at LMDATP `0C17`. A landed frame's count reads its bits less one,
+where while it came in it read the bits stored: `RO.FIRST^`, the 26S02 at
+LMRCTL `0A04` on Receive Done, clears the register and, through the 74S08 at
+LMRBUF `0C02` on the down clock, takes one off `RBCT` --- read off the
+netlist, and not measured apart from the counts. With the cable idle and no
+frame landed, `RRESET` holds `RBCT` at 0, so each read shifts once: the word
+is the last one read moved up a bit with the buffer's bit 0 below it --- 1,
+3, 7, 17 on a board that has received nothing, whose cells read as ones ---
+Bit Count is 0 and the check register is held clear. Inside a frame the
+receiver has been cleared off, `RRESET` is not held: the reads count `RBCT`
+down from 0 as a frame is read out, the first one bit and the rest sixteen,
+Bit Count following and CRC Error the check of what they read.
+`tests/chaos_rtl.rs::a_read_with_receive_done_down_is_the_read_paths_on_both_alike`
+measures it after nothing, after a frame read out and cleared, after one
+cleared unread, inside and after a dropped frame, after a frame for another
+station and after runs of 48 bits, the model's cycle at the instant the
+board answers. The register and the cells start as the netlist's parts do; a
+real 74164 and 2147 hold nothing defined at power-up, so what a CADR reads
+there before its first frame is **unverified**. The read register is not in a
+checkpoint: a resume takes it to be the last word read of a packet being
+read, and 0 otherwise.
+
+**A read of the buffer while the receiver takes a frame is not modelled.** On
+the netlist board such a cycle is not answered until the frame is over ---
+`ROCLK^` and `RICLK^` count `RBCT` against each other, and `-ROWEND` does
+not come --- about a microsecond after the frame's end, and what then lands
+is spoiled: its bit count is wrong and CRC Error is up. A CADR's Unibus
+gives up on the cycle long before that. muir's model answers such a read at
+once with 0 and lands the frame whole; the I/O board's answer to a cycle is
+decided by its address alone, and a cycle a register does not answer would
+have to be brought through the Unibus to model it.
+
+**A frame that finds the buffer full at `START^` is not taken, on the cable
+and looped back alike.** `RACT` stays down for it, so the check register is
+not clocked and CRC Error reads the packet in the buffer, not the cable busy;
+the model's CRC Error reads the cable busy except once the receiver has
+refused a frame or been cleared off it.
+Looped back the frame reaches the busy receiver's gates as off the cable: at
+its destination word Lost Count steps for `DEST MATCH`, and one to the
+board's own address presets its own transmitter's `ABORT` through
+`-LOST.ONE`, so it reads Transmit Abort with Transmit Done early.
+`tests/chaos_rtl.rs::a_frame_at_a_full_buffer_is_not_taken_looped_back_on_both_alike`
+polls the CSR every 5 µs on both, for frames to the board's own address, to
+zero, to another station under Spy and without, and for a frame for another
+station at a full buffer on the cable, and lands the next frame after the
+abort at the board's poll. While a frame is taken, the model's CRC Error
+reads 1 throughout; the board's is the check register as it runs, 0 over the
+first few bits and again once the last bit of a good frame is in. That
+difference is not taken up.
+
+**Reset does not clear Lost Count.** The 74LS161 at LMMYNM `0F04` has
+`-11.SAYS.GO` alone on its clear, pin 1, and MIT's wire list has the same,
+`mit/cadrio/iob.wlr` lines 1681-1689: `-11.SAYS.GO` reaches `E10-12`,
+`E04-11` and `F04-01`, and `-11.ZOT` only `B10-12`. Clear Receiver clears the
+count and nothing else does. `-INIT` goes to `-CLR RCV BUSY` and to Transmit
+Done and not to the count, AIM-628's "just as at power up and Unibus
+Initialize" notwithstanding.
+`tests/chaos_rtl.rs::a_reset_leaves_lost_count_where_it_was_on_both_alike`
+measures a count of 1 kept over a Reset and over `-UB INIT` and cleared by
+Clear Receiver, on the board and on the model.
 
 ## The measured constants
 
