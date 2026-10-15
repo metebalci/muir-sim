@@ -9,10 +9,16 @@
 //!
 //! - the unit, line for line;
 //! - the taps, `quux0` to `quux<N-1>` and no more, each owned by the user
-//!   named, with the same address, MAC address and MTU;
-//! - IPv6 off on every tap before that tap comes up, and `rp_filter` 2;
-//! - the defaults: two taps, 169.254.0.1/30;
-//! - the refusals: without root, and for arguments it cannot use.
+//!   named, each with its own address, and all with the same MAC address
+//!   and MTU;
+//! - the addresses: the host side of `quuxN` is 169.254.(100+N).1/30, held
+//!   as literals for quux0, quux1 and quux63, and for every other tap by
+//!   [`host`], a second copy of the rule;
+//! - IPv6 off, `arp_ignore` 2 and `rp_filter` 1 on every tap before that
+//!   tap comes up;
+//! - the defaults: two taps;
+//! - the refusals: without root, and for arguments it cannot use,
+//!   `--address` among them.
 //!
 //! The commands are run by `sh`, which every Unix CI runner has, and read
 //! `id`; nothing else is wanted.
@@ -71,8 +77,15 @@ fn dry_run(args: &[&str]) -> DryRun {
     d
 }
 
-/// The unit, as it must read for `count` taps at `address` for `user`.
-fn unit(count: usize, address: &str, user: &str) -> Vec<String> {
+/// The host side of `quuxN`, address and prefix: 169.254.(100+N).1/30.
+/// The script's rule, written again here so that the two are checked
+/// against each other; `the_rule_by_its_literals` holds this copy.
+fn host(n: usize) -> String {
+    format!("169.254.{}.1/30", 100 + n)
+}
+
+/// The unit, as it must read for `count` taps for `user`.
+fn unit(count: usize, user: &str) -> Vec<String> {
     let taps = if count == 1 { "quux0".to_string() } else { format!("quux0 to quux{}", count - 1) };
     vec![
         "# Written by quux-taps; `quux-taps --uninstall` removes it.".to_string(),
@@ -82,7 +95,7 @@ fn unit(count: usize, address: &str, user: &str) -> Vec<String> {
         "[Service]".to_string(),
         "Type=oneshot".to_string(),
         "RemainAfterExit=yes".to_string(),
-        format!("ExecStart={SBIN} --up --count {count} --address {address} --user {user}"),
+        format!("ExecStart={SBIN} --up --count {count} --user {user}"),
         format!("ExecStop={SBIN} --down"),
         String::new(),
         "[Install]".to_string(),
@@ -90,17 +103,18 @@ fn unit(count: usize, address: &str, user: &str) -> Vec<String> {
     ]
 }
 
-/// What starting the unit runs, for `count` taps at `address` for `user`:
-/// every tap made, udev settled, then each tap set up and brought up.
-fn up(count: usize, address: &str, user: &str) -> Vec<String> {
+/// What starting the unit runs, for `count` taps for `user`: every tap
+/// made, udev settled, then each tap set up and brought up.
+fn up(count: usize, user: &str) -> Vec<String> {
     let mut v: Vec<String> =
         (0..count).map(|k| format!("ip tuntap add dev quux{k} mode tap user {user}")).collect();
     v.push("udevadm settle".to_string());
     for k in 0..count {
         v.push(format!("sysctl -q -w net.ipv6.conf.quux{k}.disable_ipv6=1"));
-        v.push(format!("sysctl -q -w net.ipv4.conf.quux{k}.rp_filter=2"));
+        v.push(format!("sysctl -q -w net.ipv4.conf.quux{k}.arp_ignore=2"));
+        v.push(format!("sysctl -q -w net.ipv4.conf.quux{k}.rp_filter=1"));
         v.push(format!("ip link set dev quux{k} address 02:00:00:00:00:02 mtu 1500"));
-        v.push(format!("ip address add {address} dev quux{k}"));
+        v.push(format!("ip address add {} dev quux{k}", host(k)));
         v.push(format!("ip link set dev quux{k} up"));
     }
     v
@@ -124,8 +138,8 @@ fn check_now(d: &DryRun) {
     assert!(stop < copy && copy < write && write < reload && reload < enable, "{:#?}", d.now);
 }
 
-/// Every tap's IPv6 is turned off, and its `rp_filter` set, before that
-/// tap comes up: Linux starts IPv6 on a link when it comes up, so the
+/// Every tap's IPv6 is turned off, and its `arp_ignore` and `rp_filter`
+/// set, before that tap comes up: Linux starts IPv6 on a link when it comes up, so the
 /// order is the point. Held for any count, apart from the exact lists.
 fn check_order(up: &[String], count: usize) {
     for k in 0..count {
@@ -133,10 +147,14 @@ fn check_order(up: &[String], count: usize) {
             up.iter().position(|l| *l == what).unwrap_or_else(|| panic!("no `{what}`"))
         };
         let ipv6 = at(format!("sysctl -q -w net.ipv6.conf.quux{k}.disable_ipv6=1"));
-        let rp = at(format!("sysctl -q -w net.ipv4.conf.quux{k}.rp_filter=2"));
+        let arp = at(format!("sysctl -q -w net.ipv4.conf.quux{k}.arp_ignore=2"));
+        let rp = at(format!("sysctl -q -w net.ipv4.conf.quux{k}.rp_filter=1"));
         let made = at(format!("ip tuntap add dev quux{k} mode tap user {}", me()));
         let comes_up = at(format!("ip link set dev quux{k} up"));
-        assert!(made < ipv6 && ipv6 < comes_up && rp < comes_up, "quux{k}: {up:#?}");
+        assert!(
+            made < ipv6 && ipv6 < comes_up && arp < comes_up && rp < comes_up,
+            "quux{k}: {up:#?}"
+        );
     }
     let made = up.iter().filter(|l| l.starts_with("ip tuntap add ")).count();
     assert_eq!(made, count, "taps made");
@@ -145,34 +163,76 @@ fn check_order(up: &[String], count: usize) {
         "a tap past quux{}",
         count - 1
     );
+    // Each tap its own address: no two taps share one.
+    let mut addresses: Vec<&str> = up
+        .iter()
+        .filter_map(|l| l.strip_prefix("ip address add "))
+        .map(|l| l.split(' ').next().unwrap_or(""))
+        .collect();
+    assert_eq!(addresses.len(), count, "addresses given: {up:#?}");
+    addresses.sort_unstable();
+    addresses.dedup();
+    assert_eq!(addresses.len(), count, "taps sharing an address: {up:#?}");
+}
+
+/// The line that gives `quuxN` its address, as the dry run prints it.
+fn address_line(up: &[String], n: usize) -> &str {
+    up.iter()
+        .find(|l| l.starts_with("ip address add ") && l.ends_with(&format!(" dev quux{n}")))
+        .unwrap_or_else(|| panic!("no address for quux{n}: {up:#?}"))
+}
+
+/// The helper's copy of the rule, held to the addresses written out.
+#[test]
+fn the_rule_by_its_literals() {
+    assert_eq!(host(0), "169.254.100.1/30");
+    assert_eq!(host(1), "169.254.101.1/30");
+    assert_eq!(host(63), "169.254.163.1/30");
 }
 
 #[test]
 fn a_pool_of_one() {
     let me = me();
     let d = dry_run(&["--count", "1"]);
-    assert_eq!(d.unit, unit(1, "169.254.0.1/30", &me));
-    assert_eq!(d.up, up(1, "169.254.0.1/30", &me));
+    assert_eq!(d.unit, unit(1, &me));
+    assert_eq!(d.up, up(1, &me));
+    assert_eq!(address_line(&d.up, 0), "ip address add 169.254.100.1/30 dev quux0");
     check_order(&d.up, 1);
     check_now(&d);
 }
 
 #[test]
-fn a_pool_of_thirty_two_on_the_build_hosts_address() {
+fn a_pool_of_thirty_two_as_the_build_host_has() {
     let me = me();
-    let d = dry_run(&["--count", "32", "--address", "169.254.1.1/30", "--user", &me]);
-    assert_eq!(d.unit, unit(32, "169.254.1.1/30", &me));
-    assert_eq!(d.up, up(32, "169.254.1.1/30", &me));
+    let d = dry_run(&["--count", "32", "--user", &me]);
+    assert_eq!(d.unit, unit(32, &me));
+    assert_eq!(d.up, up(32, &me));
     check_order(&d.up, 32);
     check_now(&d);
 }
 
 #[test]
-fn the_defaults_are_two_taps_at_169_254_0_1() {
+fn a_pool_of_sixty_four_the_most() {
+    let me = me();
+    let d = dry_run(&["--count", "64", "--user", &me]);
+    assert_eq!(d.unit, unit(64, &me));
+    assert_eq!(d.up, up(64, &me));
+    check_order(&d.up, 64);
+    check_now(&d);
+    assert_eq!(address_line(&d.up, 0), "ip address add 169.254.100.1/30 dev quux0");
+    assert_eq!(address_line(&d.up, 1), "ip address add 169.254.101.1/30 dev quux1");
+    assert_eq!(address_line(&d.up, 63), "ip address add 169.254.163.1/30 dev quux63");
+}
+
+#[test]
+fn the_defaults_are_two_taps() {
     let me = me();
     let d = dry_run(&[]);
-    assert_eq!(d.unit, unit(2, "169.254.0.1/30", &me));
-    assert_eq!(d.up, up(2, "169.254.0.1/30", &me));
+    assert_eq!(d.unit, unit(2, &me));
+    assert_eq!(d.up, up(2, &me));
+    check_order(&d.up, 2);
+    assert_eq!(address_line(&d.up, 0), "ip address add 169.254.100.1/30 dev quux0");
+    assert_eq!(address_line(&d.up, 1), "ip address add 169.254.101.1/30 dev quux1");
 }
 
 #[test]
@@ -201,7 +261,7 @@ fn refuses_without_root() {
     let me = me();
     for args in [
         vec![],
-        vec!["--count", "32", "--address", "169.254.1.1/30", "--user", &me],
+        vec!["--count", "32", "--user", &me],
         vec!["--uninstall"],
         vec!["--up", "--count", "1", "--user", &me],
         vec!["--down"],
@@ -220,13 +280,9 @@ fn refuses_without_root() {
 fn refuses_arguments_it_cannot_use() {
     for args in [
         ["--count", "0"],
-        ["--count", "257"],
+        ["--count", "65"],
         ["--count", "08"],
         ["--count", "two"],
-        ["--address", "169.254.0.1"],
-        ["--address", "169.254.0/30"],
-        ["--address", "169.254.0.256/30"],
-        ["--address", "169.254.0.1/31"],
         ["--user", "no-such-user-for-quux-taps"],
         ["--bogus", "x"],
     ] {
@@ -239,5 +295,23 @@ fn refuses_arguments_it_cannot_use() {
             assert_eq!(o.status.code(), Some(2), "{a:?}: {}", String::from_utf8_lossy(&o.stderr));
             assert!(o.stdout.is_empty(), "{a:?}");
         }
+    }
+}
+
+/// `--address` is gone: given, with a value or without, it is refused with
+/// status 2, nothing done, and a message that states the rule.
+#[test]
+fn refuses_address() {
+    for args in [
+        vec!["--address", "169.254.100.1/30"],
+        vec!["--address"],
+        vec!["--count", "1", "--address", "169.254.100.1/30", "--dry-run"],
+        vec!["--up", "--address", "169.254.100.1/30"],
+    ] {
+        let o = quux_taps(&args);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {err}");
+        assert!(o.stdout.is_empty(), "{args:?}");
+        assert!(err.contains("169.254.1NN.1/30") && err.contains("two digits"), "{args:?}: {err}");
     }
 }

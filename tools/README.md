@@ -45,19 +45,27 @@ is free again when its holder exits.
     sudo tools/quux-taps --uninstall    # remove all of it
 
 One tap is enough for one machine, and two to four leave room for a check
-running beside it. `--user U` names another owner; `--address A.B.C.D/P`
-another host-side address. The default, `169.254.0.1/30`, is link-local and
-belongs to no network: the host is `169.254.0.1` and the machine
-`169.254.0.2`. Without root it refuses to run, except with `--dry-run`,
-and it refuses an argument it cannot use before it does anything.
+running beside it; `--count` takes 1 to 64. `--user U` names another
+owner. Without root it refuses to run, except with `--dry-run`, and it
+refuses an argument it cannot use before it does anything.
 
-**Every tap is the same:** the host side has the same address, the MAC
-address `02:00:00:00:00:02` and an MTU of 1,500 on each, so a machine finds
-the same link behind whichever tap it is given. On each tap, before it
-comes up, IPv6 is turned off (`net.ipv6.conf.quuxN.disable_ipv6=1`), so
-Linux sends no IPv6 on the link at all, and `rp_filter` is set to 2, loose:
-every tap carries the same prefix, and strict checking would drop what
-arrives on all but one of them.
+Each tap has its own address. The host side of `quuxN` is
+169.254.1NN.1 and the machine behind it is 169.254.1NN.2, with NN the
+tap's index N in two digits: quux1's are 169.254.101.1 and .2. quux0's
+are muir's defaults, so one machine needs no address flags. For a
+second machine, the Ethernet frame mover prints the two flags to give
+`quux` for the tap it took. Before installing, check that `ip route`
+shows nothing else in 169.254.100 to 169.254.163.
+
+Every tap's host side has the MAC address `02:00:00:00:00:02` and an MTU
+of 1,500. On each tap, before it comes up, IPv6 is turned off
+(`net.ipv6.conf.quuxN.disable_ipv6=1`), so Linux sends no IPv6 on the link
+at all. `arp_ignore` is set to 2: Linux answers an ARP request only when
+its target is this tap's own address and its sender is on this tap's /30.
+`rp_filter` is set to 1, strict: each tap carries a prefix of its own, so
+the route back to a packet's sender names the tap it arrived on. For both,
+Linux uses the larger of `conf.all` and the tap's own value, so a host
+whose `conf.all.rp_filter` is 2 still checks loosely.
 
 **What it changes on the system:**
 
@@ -78,7 +86,7 @@ rest of the network, NetworkManager or networkd, and does the same thing
 at boot as by hand. It needs systemd and the `ip` command of iproute2.
 
 `tests/quux_taps.rs` holds the dry run's commands and the unit, line for
-line, for one tap, two and 32, and the refusals.
+line, for one tap, two, 32 and 64, and the refusals.
 
 ## `soap4/`
 

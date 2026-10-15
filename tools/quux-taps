@@ -10,22 +10,28 @@
 # already held refuses a second open with EBUSY, so the next one is tried,
 # and the kernel frees a tap when its holder dies.
 #
-# **Every tap is the same**: the same host-side address, the same MAC
-# address, the same MTU. A checkpoint holds the band's address and its ARP
-# entry for the host side, so a checkpoint resumed behind any tap of the
-# pool finds the link it was saved on.
+# **Each tap has its own address**, a /30 of its own: the host side of
+# quuxN is 169.254.1NN.1/30 and the machine behind it 169.254.1NN.2, with
+# NN the index N in two digits, so quux0's are 169.254.100.1 and .2 and
+# quux1's 169.254.101.1 and .2. At most 64 taps, so the pool ends with
+# quux63's 169.254.163.1. This script is the one place the rule lives: the
+# programs that use a tap read its address and prefix from the kernel.
+# Every tap has the same MAC address and MTU.
 #
 # On each tap, before it comes up:
 #   - IPv6 is off (net.ipv6.conf.quuxN.disable_ipv6=1), so Linux sends
 #     nothing of IPv6 on the link: no router solicitation, no MLD report,
 #     no address probe. QUUX's Ethernet device takes IPv4 and ARP only.
-#   - rp_filter is 2, loose. Every tap carries the same prefix, so the
-#     kernel's route back to the guest's address names one tap only, and
-#     strict checking (1) would drop what arrives on every other. Linux
+#   - arp_ignore is 2: Linux answers an ARP request only when its target is
+#     this tap's own address and its sender is on this tap's /30. Linux
 #     uses the larger of conf.all and the device's own value, so 2 holds
-#     whatever conf.all is.
-#   - the host side is the address given, the MAC address 02:00:00:00:00:02
-#     and the MTU 1500.
+#     where conf.all is 0, its default.
+#   - rp_filter is 1, strict: every tap carries a prefix of its own, so the
+#     route back to a packet's sender names the tap it arrived on. Linux
+#     uses the larger of conf.all and the device's own value, so a host
+#     whose conf.all is 2 still checks loosely.
+#   - the host side is the tap's own address, the MAC address
+#     02:00:00:00:00:02 and the MTU 1500.
 #
 # **Why a systemd oneshot unit.** A tap made by `ip tuntap` is gone at the
 # next boot. A systemd-networkd .netdev would make it again, but only where
@@ -44,13 +50,13 @@
 # taps, and removes both files.
 #
 # usage:
-#   quux-taps [--count N] [--address A.B.C.D/P] [--user U] [--dry-run]
+#   quux-taps [--count N] [--user U] [--dry-run]
 #   quux-taps --uninstall [--dry-run]
 #   quux-taps --help
 #
-#   --count N    taps quux0 to quux<N-1>, 1 to 256; default 2
-#   --address A  the host side's address and prefix, the same on every
-#                tap; default 169.254.0.1/30, so the guest is 169.254.0.2
+#   --count N    taps quux0 to quux<N-1>, 1 to 64; default 2. The host
+#                side of quuxN is 169.254.1NN.1/30, NN the index in two
+#                digits; there is no flag for another address
 #   --user U     the taps' owner; default the user who ran sudo, or the
 #                user running this with --dry-run
 #   --dry-run    print every command and the file it would write, and
@@ -76,13 +82,12 @@ die() {
 
 mode=install
 count=2
-address=169.254.0.1/30
 user=
 dry=0
 while [ $# -gt 0 ]; do
     case $1 in
     --count) [ $# -ge 2 ] || die "--count needs a number"; count=$2; shift 2 ;;
-    --address) [ $# -ge 2 ] || die "--address needs A.B.C.D/P"; address=$2; shift 2 ;;
+    --address) die "--address is gone: each tap has its own address, the host side of quuxN at 169.254.1NN.1/30 and the machine at 169.254.1NN.2, with NN the index N in two digits (quux0: 169.254.100.1, quux1: 169.254.101.1)" ;;
     --user) [ $# -ge 2 ] || die "--user needs a user"; user=$2; shift 2 ;;
     --dry-run) dry=1; shift ;;
     --uninstall) mode=uninstall; shift ;;
@@ -96,35 +101,12 @@ done
 # --- the arguments ---------------------------------------------------------
 
 case $count in
-'' | *[!0-9]*) die "--count wants a number from 1 to 256, not '$count'" ;;
+'' | *[!0-9]*) die "--count wants a number from 1 to 64, not '$count'" ;;
 esac
 # A leading zero would read as octal in the shell's arithmetic.
-case $count in 0?*) die "--count wants a number from 1 to 256, not '$count'" ;; esac
-[ "$count" -ge 1 ] && [ "$count" -le 256 ] ||
-    die "--count wants a number from 1 to 256, not '$count'"
-
-octet() {
-    case $1 in '' | *[!0-9]* | 0?*) return 1 ;; esac
-    [ "$1" -le 255 ]
-}
-check_address() {
-    a=$1
-    case $a in */*) ;; *) return 1 ;; esac
-    p=${a#*/}
-    ip4=${a%/*}
-    case $p in '' | *[!0-9]* | 0?*) return 1 ;; esac
-    [ "$p" -ge 1 ] && [ "$p" -le 30 ] || return 1
-    old_ifs=$IFS
-    IFS=.
-    # shellcheck disable=SC2086
-    set -- $ip4
-    IFS=$old_ifs
-    [ $# -eq 4 ] || return 1
-    case $ip4 in *..* | .* | *.) return 1 ;; esac
-    for o in "$@"; do octet "$o" || return 1; done
-}
-check_address "$address" ||
-    die "--address wants A.B.C.D/P with P from 1 to 30, not '$address'"
+case $count in 0?*) die "--count wants a number from 1 to 64, not '$count'" ;; esac
+[ "$count" -ge 1 ] && [ "$count" -le 64 ] ||
+    die "--count wants a number from 1 to 64, not '$count'"
 
 root=0
 [ "$(id -u)" -eq 0 ] && root=1
@@ -195,9 +177,11 @@ make_pool() {
         if [ "$dry" -eq 1 ] || [ -d "/proc/sys/net/ipv6/conf/$n" ]; then
             run sysctl -q -w "net.ipv6.conf.$n.disable_ipv6=1"
         fi
-        run sysctl -q -w "net.ipv4.conf.$n.rp_filter=2"
+        run sysctl -q -w "net.ipv4.conf.$n.arp_ignore=2"
+        run sysctl -q -w "net.ipv4.conf.$n.rp_filter=1"
         run ip link set dev "$n" address "$mac" mtu "$mtu"
-        run ip address add "$address" dev "$n"
+        # quuxN's host side: 169.254.1NN.1/30, NN being N in two digits.
+        run ip address add "169.254.$((100 + k)).1/30" dev "$n"
         run ip link set dev "$n" up
         k=$((k + 1))
     done
@@ -214,7 +198,7 @@ Description=QUUX tap pool: $taps, owned by $user
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=$sbin --up --count $count --address $address --user $user
+ExecStart=$sbin --up --count $count --user $user
 ExecStop=$sbin --down
 
 [Install]
@@ -245,7 +229,7 @@ install_pool() {
     fi
     run systemctl daemon-reload
     run systemctl enable --now quux-taps.service
-    echo "# starting the unit runs $sbin --up --count $count --address $address --user $user:"
+    echo "# starting the unit runs $sbin --up --count $count --user $user:"
     # Say what the unit will do; it does it itself. The stop above took any
     # earlier pool down, so there is nothing for its first step to delete.
     real_dry=$dry
