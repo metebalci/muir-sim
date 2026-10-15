@@ -21,9 +21,9 @@
 //! starting on the rising edge of its bit 7 --- `Turn`, with every
 //! interval measured on the netlist board.
 
-use super::ether::{Ether, turn_byte};
+use super::ether::{BUSY_ABORT_NS, Ether, RACT_NS, turn_byte};
 use super::interface::{self, csr};
-use super::packet::{Framed, Received, check_on, check_word, unframe_any};
+use super::packet::{Framed, Received, check_on, check_word, line, unframe_any};
 use super::wire;
 use crate::clock::TimeBase;
 use std::collections::VecDeque;
@@ -63,6 +63,17 @@ const NEVER_WRITTEN: u16 = 0o177777;
 /// first read.
 fn top_word(bits: usize) -> usize {
     (bits + BUFFER_BITS - 1) % BUFFER_BITS / 16
+}
+
+/// The words of a frame as its transmit buffer would hold them, for
+/// [`super::packet::line`]: what the software reads back of `r` --- its
+/// words, the source and the check word --- in the order written, the
+/// last of them partial for a run that is not whole words.
+fn wire_words(r: &Received) -> Vec<u16> {
+    let mut words = r.framed.buffer.clone();
+    words.push(r.framed.source);
+    words.push(r.framed.check);
+    words.split_off(words.len().saturating_sub(r.bits.div_ceil(16)))
 }
 
 /// From a frame's turn to Transmit Done when the transmit count is 0 and
@@ -292,6 +303,31 @@ impl Turn {
     }
 }
 
+/// A frame the receiver had taken and a clear dropped before it landed:
+/// a Clear Receiver, a Reset or `-UB INIT` written after the frame's
+/// `START^` and before Receive Done would have risen
+/// ([`Interface::dropped`]). The receiver takes every frame from its
+/// `START^` with the buffer free and judges its destination word as it goes
+/// by, so a frame for another interface cleared inside is one of these
+/// too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dropped {
+    /// The clear's instant.
+    pub at: u64,
+    /// The frame's source word as sent, as the turn timer saw the frame
+    /// start; `None` for a frame the interface's turn timer did not see
+    /// start, the netlist board's on the same cable.
+    pub source: Option<u16>,
+    /// When the frame would have landed --- Receive Done rising with
+    /// `-CBLBSY` lifting, [`CBLBSY_OFF_NS`] after its nominal end --- had
+    /// it not been cleared and had it been for this interface; `None` as
+    /// for `source`.
+    pub would_land: Option<u64>,
+    /// How many of its bits the receiver had stored, which stay in the
+    /// buffer.
+    pub bits: usize,
+}
+
 pub struct Interface {
     /// The switches: [`interface::MY_ADDRESS`].
     address: u16,
@@ -346,6 +382,16 @@ pub struct Interface {
     /// `--chaos-trace`: say what the receiver takes and drops, and when
     /// the transmitter's turn comes.
     trace: bool,
+    /// The last frame a clear dropped, [`Interface::dropped`].
+    dropped: Option<Dropped>,
+    /// Until when CRC Error does not read the cable busy: a dropped
+    /// frame's `-CBLBSY` lifting.  `RRESET` clears the check register,
+    /// the 9401 at LMRBUF 0C07, and with `RACT` down no bit reaches it.
+    quiet_until: Option<u64>,
+    /// A frame looped back that a clear took the receiver off before its
+    /// destination word: when the word goes by, and the word, for the
+    /// busy receiver's gates (`Interface::busy_looped`).
+    looped_busy: Option<(u64, u16)>,
     /// The machine's unit of time and its clock's grid, which every
     /// instant here is counted in: nanoseconds with no grid, and on
     /// revision 15 units of 0.5 ns on its period (MP2b ruling Q19).
@@ -382,6 +428,9 @@ impl Clone for Interface {
             ether: None,
             trace: self.trace,
             time: self.time,
+            dropped: self.dropped,
+            quiet_until: self.quiet_until,
+            looped_busy: self.looped_busy,
         }
     }
 }
@@ -424,6 +473,9 @@ impl Interface {
             ether,
             trace,
             time: TimeBase::NS,
+            dropped: None,
+            quiet_until: None,
+            looped_busy: None,
         }
     }
 
@@ -488,7 +540,10 @@ impl Interface {
             | if self.transmit_abort { csr::TRANSMIT_ABORT } else { 0 }
             | if self.transmit_done { csr::TRANSMIT_DONE } else { 0 }
             | ((self.lost as u16) << 9) & csr::LOST_COUNT
-            | if self.crc_error || self.turn.busy_at(self.now, self.time) {
+            | if self.crc_error
+                || self.turn.busy_at(self.now, self.time)
+                    && !self.quiet_until.is_some_and(|u| self.now < u)
+            {
                 csr::CRC_ERROR
             } else {
                 0
@@ -592,7 +647,8 @@ impl Interface {
             let tc = self.turn.next_tc(time);
             let cable = self.ether.as_ref().and_then(|e| e.next_due());
             let landing = self.incoming.front().map(|&(t, _)| t);
-            let due = [Some(tc), cable, landing, self.tdone_at]
+            let looped = self.looped_busy.map(|(t, _)| t);
+            let due = [Some(tc), cable, landing, self.tdone_at, looped]
                 .into_iter()
                 .flatten()
                 .filter(|&t| t <= now)
@@ -604,7 +660,7 @@ impl Interface {
             // leaves nothing to batch --- the run would have to end at
             // `t - 1`, before the count --- so `idle_run` refuses and the
             // arms below take the instant as they always did.
-            let others = [cable, landing, self.tdone_at].into_iter().flatten().min();
+            let others = [cable, landing, self.tdone_at, looped].into_iter().flatten().min();
             if tc == t
                 && self.turn.idle_run(others.map_or(now, |u| u.saturating_sub(1).min(now)), time)
             {
@@ -619,6 +675,10 @@ impl Interface {
             if landing == Some(t) {
                 let (_, r) = self.incoming.pop_front().unwrap();
                 self.arrive(t, &r);
+            }
+            if looped == Some(t) {
+                let (_, dest) = self.looped_busy.take().unwrap();
+                self.busy_looped(t, dest);
             }
             if self.tdone_at == Some(t) {
                 self.tdone_at = None;
@@ -642,7 +702,8 @@ impl Interface {
         // interface with a cable is never left with nothing due.
         let cable = self.ether.as_ref().and_then(|e| e.next_due());
         let poll = self.ether.as_ref().map(|_| self.polled + time.ns(POLL_NS));
-        self.next_event = [Some(self.turn.next_tc(time)), cable, poll, self.tdone_at]
+        let looped = self.looped_busy.map(|(t, _)| t);
+        self.next_event = [Some(self.turn.next_tc(time)), cable, poll, self.tdone_at, looped]
             .into_iter()
             .flatten()
             .chain(self.incoming.front().map(|&(t, _)| t))
@@ -927,11 +988,14 @@ impl Interface {
         self.invalidate();
         match uaddr {
             interface::CSR => {
+                let looped = self.csr & csr::LOOP_BACK != 0;
                 self.csr = v & WRITABLE;
                 if v & csr::RESET != 0 {
+                    self.rreset(looped);
                     self.reset();
                 }
                 if v & csr::CLEAR_RECEIVER != 0 {
+                    self.rreset(looped);
                     if self.trace {
                         eprintln!(
                             "chaos {now:>6}: interface {:o} cleared its receiver, {} of {} words read{}",
@@ -986,8 +1050,22 @@ impl Interface {
     /// Reset (write only): "completely resets the interface, just as at
     /// power up and Unibus Initialize."  The turn timer is not in it: the
     /// counter's clear is grounded and the divider runs free.
+    ///
+    /// **A frame the receiver is taking is dropped**, as by Clear Receiver
+    /// ([`Interface::rreset`]): Reset and `-UB INIT` make `-INIT`, the
+    /// 74S08 at LMUCON 0B10, which is the other input of `-CLR RCV BUSY`.
+    /// The interface acts at the instant it was last advanced to.
+    ///
+    /// **Lost Count is zeroed here, and on the board it is not**: its
+    /// 74LS161 at LMMYNM 0F04 clears on `-11.SAYS.GO` alone, Clear
+    /// Receiver, and `-INIT` reaches only `-CLR RCV BUSY`
+    /// (`a_reset_leaves_lost_count_on_the_board` in `tests/chaos_rtl.rs`
+    /// measures it).
     pub fn reset(&mut self) {
         self.invalidate();
+        let looped = self.csr & csr::LOOP_BACK != 0;
+        self.rreset(looped);
+        self.looped_busy = None;
         self.csr = 0;
         self.transmit_done = true;
         self.transmit_abort = false;
@@ -1003,6 +1081,166 @@ impl Interface {
         self.incoming.clear();
         self.turn.ready = None;
         self.tell_the_cable();
+    }
+
+    /// The last frame a Clear Receiver, a Reset or `-UB INIT` dropped
+    /// before it landed, if any has been: when, whose, when it would have
+    /// landed and how many of its bits stayed in the buffer. A frame
+    /// dropped never raises Receive Done, so this is how a caller knows of
+    /// it. Kept in a clone; not in a checkpoint.
+    pub fn dropped(&self) -> Option<Dropped> {
+        self.dropped
+    }
+
+    /// `RRESET` at the instant last advanced to, for a clear written with
+    /// Loop Back as `looped`: the receiver stops taking whatever frame it
+    /// is taking.
+    ///
+    /// On the netlist board `RRESET`, the 74S00 at LMRCTL 0E03, comes on
+    /// `-CLR RCV BUSY`, the 74S08 at 0E10 on Clear Receiver's
+    /// `-11.SAYS.GO` and on `-INIT`; it takes `RACT` down through the
+    /// 74S02 at LMRCLK 0B08,
+    /// clears `RBCT` and resets `RCV BUSY`, the 74279 at LMRCTL 0D09;
+    /// Receive Done is `RCV BUSY` and not `RACT`, and only `START^` sets
+    /// `RACT`, so a frame taken from its `START^` to its landing is taken
+    /// no further and never raises Receive Done. Before its destination
+    /// word the busy receiver's gates find `-RACT` up: Lost Count steps
+    /// for `DEST MATCH` --- this address, zero, or Spy --- and a frame to
+    /// this address by name is aborted, `MATCH SO FAR` on `-LOST.ONE` at
+    /// LMMYNM 0D02. After it, nothing more. The bits stored before the
+    /// clear stay in the buffer. Measured on the netlist board by
+    /// `a_clear_receiver_inside_a_frame_taken_drops_it_on_both_alike` and
+    /// the tests after it in `tests/chaos_rtl.rs`.
+    ///
+    /// Off the cable the ether keeps the receive control's state for the
+    /// frame, [`Ether::board_rreset`], and decides at its destination word;
+    /// looped back the frame is in the interface's own queue of frames to
+    /// land, and the interface decides, `Interface::busy_looped`.
+    fn rreset(&mut self, looped: bool) {
+        let (now, time) = (self.now, self.time);
+        let full = self.receive_done;
+        let off = time.ns(CBLBSY_OFF_NS);
+        // Under Loop Back the cable is not the receiver's, and its frames
+        // are left as they were.
+        let stored = self.ether.as_mut().filter(|_| !looped).and_then(|e| e.board_rreset());
+        if let Some(bits) = stored {
+            let frame = self
+                .turn
+                .frames
+                .iter()
+                .rev()
+                .find(|&&(s, _, e)| s <= now && now < e + off)
+                .copied();
+            let land = frame.map(|(_, _, e)| e + off);
+            if land.is_none_or(|l| now < l) {
+                self.drop_frame(now, frame.map(|f| f.1), land, &bits);
+            } else {
+                // Landed already, its run not yet delivered: a clear of
+                // a frame in the buffer, which holds its bits.
+                self.store(&bits);
+            }
+        }
+        if !looped {
+            return;
+        }
+        let me = self.address;
+        let mut keep = VecDeque::new();
+        for (land, r) in std::mem::take(&mut self.incoming) {
+            let start = self
+                .turn
+                .frames
+                .iter()
+                .find(|&&(s, source, e)| source == me && time.after(s, e - s + off) == land)
+                .map(|&(s, _, _)| s);
+            let Some(start) = start.filter(|&s| now >= time.after(s, time.ns(RACT_NS))) else {
+                // `START^` still to come: `RACT` takes `-RDONE` then.
+                keep.push_back((land, r));
+                continue;
+            };
+            // What the receiver stored, if `RACT` came up at `START^` ---
+            // it did with the buffer free then, and nothing could fill it
+            // since: every cell before the one now open, as off the cable
+            // ([`wire::Decoder::stored`]), the trailing zero never.
+            let cells = line(&wire_words(&r));
+            let opened = ((now - start) / time.ns(wire::CELL_NS)) as usize;
+            let bits = if full { &[][..] } else { &cells[..opened.min(r.bits)] };
+            self.drop_frame(now, Some(me), Some(land), bits);
+            let dest_at = time.after(start, time.ns(BUSY_ABORT_NS));
+            if now < dest_at && r.bits >= 48 {
+                self.looped_busy = r.framed.buffer.last().map(|&dest| (dest_at, dest));
+            }
+        }
+        self.incoming = keep;
+    }
+
+    /// A frame the receiver was taking, dropped at `now`: `bits` of it
+    /// stored, and `land` when it would have landed.
+    fn drop_frame(&mut self, now: u64, source: Option<u16>, land: Option<u64>, bits: &[bool]) {
+        if self.trace {
+            eprintln!(
+                "chaos {now:>6}: interface {:o} cleared its receiver inside a frame{}, {} bits in, \
+                 and drops it",
+                self.address,
+                source.map_or(String::new(), |s| format!(" from {s:o}")),
+                bits.len()
+            );
+        }
+        self.store(bits);
+        self.quiet_until = land;
+        self.dropped = Some(Dropped { at: now, source, would_land: land, bits: bits.len() });
+    }
+
+    /// The bits `wire` --- a frame's first bits in the order they came
+    /// --- into the incoming buffer from its first cell, as the receiver
+    /// stores them, without Receive Done: the buffer's words as
+    /// [`Interface::land`] takes them.
+    fn store(&mut self, wire: &[bool]) {
+        let n = wire.len().div_ceil(16);
+        let mut words = vec![0u16; n];
+        for (i, &b) in wire.iter().enumerate() {
+            words[n - 1 - i / 16] |= (b as u16) << (i % 16);
+        }
+        self.land(&words, wire.len());
+    }
+
+    /// The destination word of a frame looped back goes by at `t` with
+    /// the receiver off, a clear having taken it off after `START^`: what
+    /// the busy receiver's gates make of it, as the ether's
+    /// `busy_receiver` does for a frame off the cable. Lost Count steps for `DEST MATCH`;
+    /// for this address by name `-LOST.ONE` presets the `ABORT`
+    /// flip-flop at LMMODU 0A09, which is this transmitter's own, so the
+    /// frame reads back as Transmit Abort and Transmit Done comes
+    /// [`TDONE_AFTER_ABORT_NS`] on, the frame held for the abort signal
+    /// as an aborted frame on the cable is ([`super::ether::ABORT_HOLD_NS`]).
+    /// When the turn timer sees the line idle after such an abort is
+    /// **unverified** under Loop Back; the next frame's turn after one,
+    /// measured on the netlist board, would settle it.
+    fn busy_looped(&mut self, t: u64, dest: u16) {
+        let me = self.address;
+        if dest != me && dest != 0 && self.csr & csr::SPY == 0 {
+            return;
+        }
+        self.lost = (self.lost + 1) & 0o17;
+        if dest == me {
+            let time = self.time;
+            self.transmit_abort = true;
+            self.tdone_at = Some(time.after(t, time.ns(TDONE_AFTER_ABORT_NS)));
+            let hold = t + time.ns(super::ether::ABORT_HOLD_NS);
+            if let Some(f) =
+                self.turn.frames.iter_mut().rev().find(|f| f.1 == me && f.0 <= t && f.2 > hold)
+            {
+                f.2 = hold;
+            }
+        }
+        if self.trace {
+            eprintln!(
+                "chaos {t:>6}: interface {:o} {} its own frame looped back, its receiver cleared \
+                 ({} lost)",
+                me,
+                if dest == me { "aborted" } else { "lost" },
+                self.lost
+            );
+        }
     }
 
     /// A read of [`interface::START`] answered at `now`: the buffer, with
@@ -1090,6 +1328,9 @@ impl Interface {
             ether: _,
             trace: _,
             time: _,
+            dropped: _,
+            quiet_until: _,
+            looped_busy: _,
         } = self;
         w.u16(*address);
         w.u16(*csr);
@@ -1204,6 +1445,9 @@ impl Interface {
         self.turn.load(r, self.address)?;
         self.polled = r.u64()?;
         self.next_event = None;
+        self.dropped = None;
+        self.quiet_until = None;
+        self.looped_busy = None;
         self.tell_the_cable();
         Ok(())
     }

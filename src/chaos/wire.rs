@@ -169,6 +169,23 @@ impl Decoder {
         &self.bits
     }
 
+    /// The bits a receiver on the line has stored of the run now on it:
+    /// every cell sampled but the one now open.  The board writes a bit
+    /// into its buffer on the next cell's opening edge, not at its sample,
+    /// so a clear inside a frame leaves the bits up to the cell before the
+    /// open one, and a frame's trailing zero, which no cell follows, is
+    /// never stored.  Measured on the netlist board by
+    /// `the_bits_stored_before_a_clear_stay_in_the_buffer_on_both_alike`
+    /// in `tests/chaos_rtl.rs`, clears swept across a cell.
+    pub fn stored(&self) -> &[bool] {
+        let n = self.bits.len();
+        if self.cell.is_some() && self.sample.is_none() {
+            &self.bits[..n.saturating_sub(1)]
+        } else {
+            &self.bits
+        }
+    }
+
     /// When the decoder next needs to be told the time: the sample due,
     /// or the moment the line will have been idle long enough. A line
     /// held high --- an abort signal --- is not idle and has no such

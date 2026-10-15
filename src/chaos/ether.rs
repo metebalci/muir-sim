@@ -267,6 +267,14 @@ struct Board {
     /// frame that finds the buffer full, cleared when the run is
     /// delivered.
     not_taken: bool,
+    /// Whether the run now on the cable has had its `START^`, and whether
+    /// `RRESET` took `RACT` down inside it after that: a Clear Receiver,
+    /// a Reset or `-UB INIT` while the receiver was taking the frame
+    /// ([`Ether::board_rreset`]).  `RACT` is set only by `START^`, so the
+    /// receiver stays off to the run's end.  Both cleared when the run is
+    /// delivered.
+    started: bool,
+    dropped: bool,
     /// What the board heard, as a receiver takes it, and whether its
     /// receiver was active for it.
     heard: VecDeque<(u64, Received, bool)>,
@@ -472,6 +480,8 @@ impl Ether {
             abort_until: None,
             lost: VecDeque::new(),
             not_taken: false,
+            started: false,
+            dropped: false,
             heard: VecDeque::new(),
             frames: VecDeque::new(),
             collisions: VecDeque::new(),
@@ -545,7 +555,9 @@ impl Ether {
     /// whether the receiver was active for it: false, and the board's
     /// buffer was full when the frame's destination word went by, so
     /// `RACT` never came up, nothing of the frame reached the buffer, and
-    /// what there was to count is in [`Ether::board_lost`] already.
+    /// what there was to count is in [`Ether::board_lost`] already --- or
+    /// `RRESET` took `RACT` down inside the frame, [`Ether::board_rreset`],
+    /// and the frame does not land.
     pub fn board_heard(&mut self) -> Option<(u64, Received, bool)> {
         self.board.as_mut().and_then(|b| b.heard.pop_front())
     }
@@ -560,6 +572,37 @@ impl Ether {
             b.receive_done = receive_done;
             b.spy = spy;
         }
+    }
+
+    /// `RRESET` on the behavioral board: a Clear Receiver, a Reset or
+    /// `-UB INIT`, at the instant the cable was last brought to.  On the
+    /// netlist board `RRESET`, the 74S00 at LMRCTL 0E03 on `-CLR RCV BUSY`,
+    /// clears `RACT` through the 74S02 at LMRCLK 0B08, and only `START^`
+    /// sets it again, so a frame the receiver was taking is taken no
+    /// further: nothing more of it is stored, and it does not land.  If its
+    /// destination word has not gone by, `-RACT` is up where the busy
+    /// receiver's gates look, and the frame is counted, and aborted if
+    /// addressed to the board by name, as one that found the buffer full
+    /// (`Ether::busy_receiver`).  After the destination word nothing more
+    /// happens.
+    ///
+    /// Returns the bits the receiver had stored of the run, if it was
+    /// taking one, which stay in the buffer: [`Decoder::stored`].  `None` with no run, a run whose `START^` is still to come
+    /// --- `RACT` will take `-RDONE` then --- or one the receiver was not
+    /// taking.
+    pub fn board_rreset(&mut self) -> Option<Vec<bool>> {
+        let b = self.board.as_mut()?;
+        for s in self.sending.iter_mut().filter(|s| s.ract_at.is_none()) {
+            s.ract_off = true;
+        }
+        if let Some(f) = self.from_cable.as_mut().filter(|f| f.ract_at.is_none()) {
+            f.ract_off = true;
+        }
+        if !b.started || b.not_taken || b.dropped {
+            return None;
+        }
+        b.dropped = true;
+        Some(self.decoder.stored().to_vec())
     }
 
     /// A frame the behavioral board counted in Lost Count, oldest first:
@@ -812,27 +855,26 @@ impl Ether {
             // The board's own frame is no exception: its receiver hears it
             // as it hears any, so with the buffer full it is counted, and
             // to its own address its own busy receiver aborts it.
-            let full = self.board.as_ref().is_some_and(|b| b.receive_done);
-            let mut inactive = false;
+            // A run `RRESET` took the receiver off inside stays off.
+            let full = self.board.as_ref().is_some_and(|b| b.receive_done || b.dropped);
+            let (mut inactive, mut started) = (false, false);
             for s in self.sending.iter_mut().filter(|s| s.ract_at == Some(t)) {
                 s.ract_at = None;
                 s.ract_off = full;
                 inactive |= s.ract_off;
-            }
-            if inactive && let Some(b) = self.board.as_mut() {
-                b.not_taken = true;
+                started = true;
             }
             // And `START^` for a frame the netlist board is putting on the
             // cable, timed from its first edge.
-            if self.from_cable.as_ref().is_some_and(|f| f.ract_at == Some(t)) {
-                let full = self.board.as_ref().is_some_and(|b| b.receive_done);
-                if let Some(f) = self.from_cable.as_mut() {
-                    f.ract_at = None;
-                    f.ract_off = full;
-                }
-                if full && let Some(b) = self.board.as_mut() {
-                    b.not_taken = true;
-                }
+            if let Some(f) = self.from_cable.as_mut().filter(|f| f.ract_at == Some(t)) {
+                f.ract_at = None;
+                f.ract_off = full;
+                inactive |= full;
+                started = true;
+            }
+            if let Some(b) = self.board.as_mut() {
+                b.started |= started;
+                b.not_taken |= inactive;
             }
             let arrived: Vec<(u16, u16, bool)> = self
                 .sending
@@ -961,8 +1003,10 @@ impl Ether {
                 }
             }
             if let Some(b) = self.board.as_mut() {
-                // Whether its receiver was active for this run of bits.
-                let taken = !std::mem::take(&mut b.not_taken);
+                // Whether its receiver was active for this run of bits, to
+                // its end.
+                let taken = !std::mem::take(&mut b.not_taken) & !std::mem::take(&mut b.dropped);
+                b.started = false;
                 b.heard.push_back((now, r.clone(), taken));
             }
             self.record(Event::Heard(now, r.framed));
