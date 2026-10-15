@@ -1,0 +1,22 @@
+# Code alignment for every build on x86-64: each function starts on a 64-byte
+# boundary (2^6) and each block not entered by fallthrough on a 32-byte one
+# (2^5).
+#
+# The engines' speed depends on where their hot loops fall against the
+# front end's fetch and micro-op cache lines, and without these a change
+# elsewhere in the binary moves them: `<Micro as Engine>::step`, its code
+# unchanged, has measured some 3% slower on revision 15's `micro` at another
+# address. With both flags that no longer happens, and the release `quux`
+# grows by about 14%.
+#
+# Here, because stable Cargo has no rustflags in `[profile.release]`: these
+# apply to every profile built in this tree, the test and dev builds too,
+# which only changes their layout. Cargo reads this file from the directory
+# it is run in, so a build started elsewhere with `--manifest-path`, or one
+# with `RUSTFLAGS` set, which replaces these, does not get them. Measured on
+# x86-64 only, so scoped to it.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = [
+    "-C", "llvm-args=-align-all-functions=6",
+    "-C", "llvm-args=-align-all-nofallthru-blocks=5",
+]

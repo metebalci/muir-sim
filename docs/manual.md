@@ -24,7 +24,11 @@ This file is the program itself. Beside it:
 muir needs a Rust toolchain and nothing else: the version is pinned in
 `rust-toolchain.toml`, there are no crate dependencies, and everything the
 build and the tests read is committed, so `cargo test` passes on a fresh
-clone with nothing fetched.
+clone with nothing fetched. On x86-64, `.cargo/config.toml` has every
+build start each function on a 64-byte boundary and each block not entered
+by fallthrough on a 32-byte one, so that the engines' speed does not move by
+a few percent with where their hot loops happen to fall in the binary; it
+applies to a `cargo` run inside the tree only.
 
 ```text
 git clone https://github.com/metebalci/muir-sim
