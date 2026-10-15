@@ -1417,7 +1417,7 @@ fn grant_to_md(ev: &[(u64, muir::pipeline::Event)]) -> Vec<u64> {
 /// **A hit lands two clocks after its grant, and a miss its line's fill
 /// later** (A15b.5, A15b.6; MP2b rulings Q6, Q7): at 8.5 ns the Kria's
 /// 247 ns fill is 30 clocks, after the clock the tags are compared in; the
-/// DE25's 410 ns at 11 ns is 38. **Fails** a fill with the beats term (33
+/// DE25's 600 ns at 11 ns is 55. **Fails** a fill with the beats term (33
 /// at 8.5 ns), and a hit that is not Dmd 3's.
 #[test]
 fn a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_later() {
@@ -1427,7 +1427,22 @@ fn a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_later() {
     let (_, ev) = events(&p, 17, PortTiming::KRIA);
     assert_eq!(grant_to_md(&ev), [1 + 30, 2], "kria at 8.5 ns: a miss, then a hit");
     let (_, ev) = events(&p, 22, PortTiming::DE25);
-    assert_eq!(grant_to_md(&ev), [1 + 38, 2], "de25 at 11 ns");
+    assert_eq!(grant_to_md(&ev), [1 + 55, 2], "de25 at 11 ns");
+}
+
+/// **The `de25` preset is the DE25-Nano's measured port** (MP2b ruling
+/// Q5): a fill 600 ns, a write 485, the occupancy 40; at the board's
+/// 22.5 ns, 27, 22 and 2 clocks. **Fails** the model's figures carried
+/// before the board was measured, 410 and 290.
+#[test]
+fn the_de25_preset_is_the_de25_nano_s_measured_port() {
+    use muir::clock::TimeBase;
+    use muir::pipeline::PortTiming;
+    let de25 = PortTiming { read_ns: 600, write_ns: 485, occupancy_ns: 40 };
+    assert_eq!(PortTiming::DE25, de25);
+    assert_eq!(PortTiming::parse("de25"), Some(de25));
+    let c = de25.clocks(TimeBase::half_ns(45));
+    assert_eq!((c.read, c.write, c.occupancy), (27, 22, 2), "at 22.5 ns");
 }
 
 /// **A register takes a clock more than nothing** (A15b.3; MP2b ruling

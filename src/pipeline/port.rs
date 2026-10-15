@@ -98,11 +98,14 @@ impl PortTiming {
     /// in the same columns, 290, 120 and 16.
     pub const ARTY: PortTiming = PortTiming { read_ns: 290, write_ns: 120, occupancy_ns: 16 };
 
-    /// The DE25-Nano's on revision 15, `de25`: today's model's whole line,
-    /// 380 ns and three beats of 10; its write, 290; and the model's 40 ns
-    /// occupancy. **Unverified**: the board is not measured (M8c's DE25
-    /// half).
-    pub const DE25: PortTiming = PortTiming { read_ns: 410, write_ns: 290, occupancy_ns: 40 };
+    /// The DE25-Nano's on revision 15, `de25` (MP2b ruling Q5): the
+    /// latency probe on revision 15 at 22.5 ns, from the bridge taking the
+    /// address to its last data or response, reads 553 ns mean (24.6
+    /// clocks) and writes 460 (20.5); plus the fabric clocks it leaves
+    /// out, the share's grant register and a fill's landing clock (2, so
+    /// about 26.6 clocks, 600 ns) and a write's landing clock (1, about
+    /// 21.5, 485 ns). **Unverified**: the occupancy, the model's 40 ns.
+    pub const DE25: PortTiming = PortTiming { read_ns: 600, write_ns: 485, occupancy_ns: 40 };
 
     /// The preset `--memory-timing` names on revision 15.
     pub fn preset(name: &str) -> Option<PortTiming> {
