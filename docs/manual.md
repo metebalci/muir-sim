@@ -1109,13 +1109,18 @@ Default: `cadr`.
 **rtl, QUUX:** the size of QUUX's memory cache, `<words>`, a power of two:
 [QUUX's cache](quux.md), always fitted, unified and write-through, by
 physical address, main memory and the frame buffer and no device
-register, in lines of 8 words, 2-way, a hit in
-20 ns, with a one-word write buffer; at least 16 words, a set of two
-lines. It changes when the machine's reads and writes are answered and
-never what they read. The start says it and a checkpoint carries it.
-Refused on `micro`.
+register, in lines of 8 words, 2-way; at least 16 words, a set of two
+lines. On revisions 13 and 14 a hit takes 20 ns, and a one-word write buffer
+holds the write while main memory runs it. On revisions 15 and 16 a hit
+lands two clocks after the grant, at every size; a write is posted in a
+queue of 8 and is issued to the port in order, its word reaching main
+memory at the port's response, a write hit updating the line and a write
+miss allocating nothing; a read of a line with a write queued or in flight
+waits for the writes' responses. It changes when the machine's reads and
+writes are answered and never what they read. The start says it and a
+checkpoint carries it. Refused on `micro`.
 
-Default: 4096.
+Default: 4096 on revisions 13 and 14; 65,536 on revisions 15 and 16.
 
 ### `--tlb <entries>`
 
@@ -1128,16 +1133,33 @@ an entry. The start says it. Refused below revision 14.
 
 Default: 4096.
 
-### `--memory-timing <read>,<write>`
+### `--memory-timing <read>,<write>[,<occupancy>]`
 
 `quux` only.
 
 **rtl, QUUX:** main memory's timing on [QUUX's memory port](quux.md): a line
 fill and a write, in ns, or `arty` or `de25` for the two boards' own
-figures. The start says it and a checkpoint carries it. Refused on
-`micro`.
+figures. On revisions 15 and 16 the interval between two accepted writes
+follows, `<read>,<write>,<occupancy>`, or a name, `kria`, `arty` or `de25`;
+the two-number form is refused there, and the three-number form and `kria`
+are refused below revision 15. The start says it and a checkpoint carries
+it. Refused on `micro`.
 
-Default: 380,290, the slower board's.
+Default: 380,290, the slower board's, on revisions 13 and 14; `kria`,
+344,215,10, on revisions 15 and 16.
+
+### `--microcycle-ns <ns>`
+
+`quux` only, revisions 15 and 16.
+
+**micro, rtl, QUUX revisions 15 and 16:** the clock's period, the
+microcycle, `<ns>`, 5 to 63.5 in steps of 0.5 (a whole number, or one with
+`.5` or `.0`). Durations are turned to clocks of it, and feature word 25
+reads it in units of 0.5 ns ([revision 15](quux.md)). The start says it and
+a checkpoint carries it. Refused below revision 15, where the microcycle is
+`--sync-cycle-ticks`'s, and `--sync-cycle-ticks` is refused on 15 and 16.
+
+Default: 8.5.
 
 ### `--sync-cycle-ticks <k>`
 

@@ -2055,7 +2055,7 @@ end as on `micro` microcycle for microcycle
 
 **Time** is in units of 0.5 ns on revision 15, `Machine::ns` counting them.
 The period is `--microcycle-ns`, 5 to 63.5 ns in steps of 0.5, 8.5 by
-default, the Kria KR260's; `--sync-cycle-ticks` is refused. A device's
+default; the Kria KR260's revision 15 fit closes at 19 ns; `--sync-cycle-ticks` is refused. A device's
 duration is turned to clocks once, rounded up, and a timer keeps true time
 over a second at every period
 (`a_command_s_time_is_rounded_to_clocks_once`,

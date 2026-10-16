@@ -173,7 +173,7 @@ pub struct Micro {
     pub sync_cycle_ns: u64,
     /// **Revision 15's clock period**, in its units of 0.5 ns
     /// ([`crate::clock::TimeBase`]): the microcycle, and feature word 25.
-    /// [`Micro::new`] gives the Kria KR260's 8.5 ns, and `muir` sets
+    /// [`Micro::new`] gives the default 8.5 ns, and `muir` sets
     /// `--microcycle-ns`' (contract G3 revision 15, §12.1; MP2b rulings Q1,
     /// Q14, Q15). 0 on every other machine.
     pub period: u64,

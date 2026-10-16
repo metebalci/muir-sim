@@ -1845,9 +1845,9 @@ const HELP: &[(Whose, &str)] = &[
     ),
     (
         Whose::Quux,
-        "  --microcycle-ns <ns>         QUUX revision 15: the clock's period, the
-                               microcycle, 5 to 63.5 in steps of 0.5, on both
-                               engines. [default: 8.5, the Kria KR260's]",
+        "  --microcycle-ns <ns>         QUUX revisions 15 and 16: the clock's period,
+                               the microcycle, 5 to 63.5 in steps of 0.5, on
+                               both engines. [default: 8.5]",
     ),
     (
         Whose::Quux,

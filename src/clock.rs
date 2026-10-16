@@ -243,9 +243,9 @@ impl TimeBase {
     }
 }
 
-/// **Revision 15's period when no flag says**, in units of 0.5 ns: 17, the
-/// Kria KR260's 8.5 ns, the period its stage fit closes at until its
-/// binding fit sets one (contract G3 revision 15, §12.1; MP2b ruling Q14).
+/// **Revision 15's and 16's period when no flag says**, in units of 0.5 ns:
+/// 17, 8.5 ns, muir's default (contract G3 revision 15, §12.1; MP2b
+/// ruling Q14).
 pub const PERIOD_15: u64 = 17;
 
 /// `--microcycle-ns`'s range in units of 0.5 ns: 5 to 63.5 ns (A15b.12),
