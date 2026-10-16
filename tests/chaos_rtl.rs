@@ -1494,6 +1494,234 @@ fn a_read_with_receive_done_down_is_the_read_paths_on_both_alike() {
     assert!(wrong.is_empty(), "{} reads unlike the board:\n{}", wrong.len(), wrong.join("\n"));
 }
 
+/// A frame of `n` words to `dest` whose last bit on the line, before the
+/// zero after it, is `last`: the line ends with the first word written's
+/// top bit (AIM-628 §2.5, the words played out backwards, low bit first).
+fn ending_in(n: usize, dest: u16, last: bool) -> Vec<u16> {
+    let mut v = numbered(n, dest);
+    v[0] = if last { 0o100000 } else { 0o000400 };
+    v
+}
+
+/// The board's own frame `words` sent on both, under Loop Back or on the
+/// cable: written, START read, and the frame's first edge found off the
+/// board's `START^`, [`RACT_NS`](muir::chaos::ether::RACT_NS) after it.
+fn own_frame_on_both(b: &mut UnibusMaster, m: &mut Model, words: &[u16]) -> u64 {
+    for &w in words {
+        both(b, m, chaos::WRITE_BUFFER, Some(w), "a word in");
+    }
+    both(b, m, chaos::START, None, "START");
+    let mut was = b.level("START^");
+    let until = b.now + 2_000_000;
+    loop {
+        let next = b.chip.next_tap().map_or(b.now + 25, |t| t.max(b.now + 1)).min(b.now + 25);
+        b.run(next);
+        m.run(b.now);
+        let level = b.level("START^");
+        if level == Level::High && was == Level::Low {
+            return b.now - muir::chaos::ether::RACT_NS;
+        }
+        was = level;
+        assert!(b.now < until, "the frame went out");
+    }
+}
+
+/// **The cable goes idle 500 ns after a frame's last edge, on both
+/// alike.** `-CBLBSY` is the busy one-shot, the 74LS161 at LMRCLK 0B05
+/// cleared by every edge of `-TTL.D.IN` and counting `FCLK^`, so it lifts
+/// four cells' worth of clock after the line's last change, and Receive
+/// Done rises with it. The last change is inside the trailing zero's cell:
+/// at its start, where the line falls, when the last data bit is a 1, and
+/// at its middle when it is a 0, the zero repeating it. So the frame lands
+/// 250 ns after its nominal end if it ends in a 1, and 375 if in a 0;
+/// Transmit Done is 500 ns before that end either way. Measured on the
+/// netlist board under Loop Back with four first words, `-CBLBSY` lifting
+/// at the nominal end plus 375, 250, 250 and 375 and `-TDONE` 500 before
+/// it. Another station's edges are not on the board's clock, and the
+/// one-shot counts it: its frame goes idle at the fourth rise of `FCLK^`
+/// after its last edge, measured at the nominal end plus 293 for one
+/// ending in 0 and 168 for one ending in 1, at one phase. Swept over frames
+/// of 14 and 44 words ending in 0 and in 1, from another station on the
+/// cable at three phases of the board's clock, the board's own on the cable
+/// and looped back: the CSR read back to back on both across the frame's end at three
+/// phases, the model's read at the instant the board answers, every CSR
+/// the board's; and after each of the board's own, a second frame ending
+/// the same way, whose turn the first one's end sets, read back to back to
+/// its landing.
+#[test]
+fn the_cable_goes_idle_500_ns_after_the_last_edge_on_both_alike() {
+    let n = cadrio();
+    let mut wrong = Vec::new();
+    let mut polls = 0;
+    for (place, own, loop_back) in [
+        ("from another station", false, false),
+        ("its own on the cable", true, false),
+        ("looped back", true, true),
+    ] {
+        for words in [12, 42] {
+            for last in [false, true] {
+                for lead in [0u64, 233, 466] {
+                    let what = format!(
+                        "{place}, {} words ending in {}, lead {lead}",
+                        words + 2,
+                        last as u8
+                    );
+                    let (mut b, mut m) = on_a_cable(&n);
+                    if loop_back {
+                        both(
+                            &mut b,
+                            &mut m,
+                            chaos::CSR,
+                            Some(csr::CLEAR_RECEIVER | csr::LOOP_BACK),
+                            "lb",
+                        );
+                    }
+                    let dest = MY_ADDRESS;
+                    let frame = ending_in(words, dest, last);
+                    let t0 = if own {
+                        own_frame_on_both(&mut b, &mut m, &frame)
+                    } else {
+                        // At three phases of the board's clock as well.
+                        let t0 = b.now + 20_000 + lead / 3;
+                        b.run(t0);
+                        m.run(t0);
+                        b.chaos.as_mut().unwrap().ether.send_now(t0, SERVER, frame.clone());
+                        m.io.chaos
+                            .as_mut()
+                            .unwrap()
+                            .ether_mut()
+                            .unwrap()
+                            .send_now(t0, SERVER, frame);
+                        t0
+                    };
+                    let end = t0 + ((words as u64 + 2) * 16 + 1) * wire::CELL_NS;
+                    b.run(end - 3_000 + lead);
+                    m.run(b.now);
+                    let mut read_on =
+                        |b: &mut UnibusMaster, m: &mut Model, until: u64, part: &str| {
+                            while b.now < until {
+                                let (cb, cm) = exact(b, m, chaos::CSR, None);
+                                polls += 1;
+                                if cb != cm {
+                                    wrong.push(format!(
+                                        "{what}, {part}: +{}: board {cb:06o}, model {cm:06o}",
+                                        b.now - t0
+                                    ));
+                                }
+                            }
+                        };
+                    read_on(&mut b, &mut m, end + 3_000, "the end");
+                    if own {
+                        let keep = if loop_back { csr::LOOP_BACK } else { 0 };
+                        write_at_strobe(&mut b, &mut m, csr::CLEAR_RECEIVER | keep);
+                        for &w in &ending_in(12, dest, last) {
+                            both(&mut b, &mut m, chaos::WRITE_BUFFER, Some(w), "a word in");
+                        }
+                        both(&mut b, &mut m, chaos::START, None, "START");
+                        let until = b.now + 600_000;
+                        while b.now < until {
+                            let (cb, cm) = exact(&mut b, &mut m, chaos::CSR, None);
+                            polls += 1;
+                            if cb != cm {
+                                wrong.push(format!(
+                                    "{what}, the next frame: +{}: board {cb:06o}, model {cm:06o}",
+                                    b.now - t0
+                                ));
+                            }
+                            if cb & csr::RECEIVE_DONE != 0 && cm & csr::RECEIVE_DONE != 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("{polls} polls, {} unlike", wrong.len());
+    for w in wrong.iter().take(40) {
+        eprintln!("UNLIKE {w}");
+    }
+    assert!(wrong.is_empty(), "{} of {polls} polls unlike the board", wrong.len());
+}
+
+/// **A frame lands at the instant the board's busy line lifts, on both
+/// alike**: the fourth rise of `FCLK^` after the line's last edge, read to
+/// the nanosecond. The board's `RDONE` watched at every one of its
+/// instants and the model's Receive Done at the same instants, for frames
+/// of 14 words ending in 0 and in 1: another station's at five phases of
+/// the board's clock, 25 ns apart, and the board's own on the cable and
+/// looped back. The instants are the same, and for another station's frame
+/// fall 376 to 500 ns after its last edge, by the phase.
+#[test]
+fn a_frame_lands_where_the_busy_line_lifts_on_both_alike() {
+    let n = cadrio();
+    let mut wrong = Vec::new();
+    let mut after_edge = Vec::new();
+    for last in [false, true] {
+        for (place, own, loop_back, phase) in [
+            ("from another station", false, false, 0u64),
+            ("from another station", false, false, 25),
+            ("from another station", false, false, 50),
+            ("from another station", false, false, 75),
+            ("from another station", false, false, 100),
+            ("its own on the cable", true, false, 0),
+            ("looped back", true, true, 0),
+        ] {
+            let what = format!("{place}, phase {phase}, ending in {}", last as u8);
+            let (mut b, mut m) = on_a_cable(&n);
+            if loop_back {
+                both(&mut b, &mut m, chaos::CSR, Some(csr::CLEAR_RECEIVER | csr::LOOP_BACK), "lb");
+            }
+            let frame = ending_in(12, MY_ADDRESS, last);
+            let t0 = if own {
+                own_frame_on_both(&mut b, &mut m, &frame)
+            } else {
+                let t0 = b.now + 20_000 + phase;
+                b.run(t0);
+                m.run(t0);
+                b.chaos.as_mut().unwrap().ether.send_now(t0, SERVER, frame.clone());
+                m.io.chaos.as_mut().unwrap().ether_mut().unwrap().send_now(
+                    t0,
+                    SERVER,
+                    frame.clone(),
+                );
+                t0
+            };
+            let end = t0 + 225 * wire::CELL_NS;
+            let line = muir::chaos::packet::frame(&frame, if own { MY_ADDRESS } else { SERVER });
+            let last_edge = t0 + muir::chaos::wire::encode(&line).last().unwrap().0;
+            let (mut rb, mut rm) = (None, None);
+            while b.now < end + 1_000 {
+                let next = b.chip.next_tap().map_or(b.now + 1, |t| t.max(b.now + 1)).min(b.now + 5);
+                b.run(next);
+                m.run(b.now);
+                if rb.is_none() && b.level("RDONE") == Level::High {
+                    rb = Some(b.now);
+                }
+                if rm.is_none() && m.io.chaos.as_ref().unwrap().csr() & csr::RECEIVE_DONE != 0 {
+                    rm = Some(b.now);
+                }
+            }
+            let rb = rb.unwrap_or_else(|| panic!("{what}: the frame landed on the board"));
+            after_edge.push((what.clone(), rb - last_edge, rb as i64 - end as i64));
+            if rm != Some(rb) {
+                wrong.push(format!(
+                    "{what}: board {} after the last edge, model {:?}",
+                    rb - last_edge,
+                    rm.map(|t| t as i64 - last_edge as i64)
+                ));
+            }
+        }
+    }
+    for (what, from_edge, from_end) in &after_edge {
+        eprintln!("{what}: Receive Done {from_edge} ns after the last edge, end{from_end:+}");
+    }
+    for (what, from_edge, _) in &after_edge {
+        assert!((376..=500).contains(from_edge), "{what}: the fourth FCLK^ after the last edge");
+    }
+    assert!(wrong.is_empty(), "{} unlike the board:\n{}", wrong.len(), wrong.join("\n"));
+}
+
 /// **CRC Error while a frame comes in is the check register as it runs, on
 /// both alike.** The receive generator, the 9401 at LMRBUF 0C07, is
 /// cleared by `RRESET` before the frame, clocked on `RICLK^` with each bit

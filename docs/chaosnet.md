@@ -384,6 +384,31 @@ slot is 1,000 ns and a whole round is 256 of them.** A frame ready goes
 468 ns after the count that carries the low byte from 0 to 255, the 74S74 at
 LMMODU `0B15` clocking `TSTART` from `TSREMPTY AND CW AND -CBLBSY`.
 
+**The cable goes idle at the fourth rise of `FCLK^` after the line's last
+edge.** `-CBLBSY` is the busy one-shot, the 74LS161 at LMRCLK `0B05`, held
+clear while the line is high and counting `FCLK^` while it is low; Receive
+Done rises with it. `FCLK^` rises 93 ns past each multiple of 125 ns from
+the board's power-on, and a frame's first edge, 468 ns after a count of the
+turn timer, is on it, so the board's own frame goes idle exactly 500 ns after
+its last edge; another station's, whose edges are not on the board's clock,
+376 to 500 ns after, by the phase. The last edge is inside the trailing
+zero's cell: at its start, where the line falls, when the last data bit is a
+1, and at its middle when it is a 0, the zero repeating it. So the board's
+own frame lands 250 ns after its nominal end if it ends in a 1 and 375 if in
+a 0, and Transmit Done is 500 ns before that end either way; the turn
+timer's counting from the idle cable follows. Measured on the netlist board
+with frames of four first words under Loop Back, and with another
+station's: idle at the nominal end plus 293 for one ending in 0 and 168 for
+one ending in 1, the fourth rise of `FCLK^` after the last edge each time.
+`tests/chaos_rtl.rs::the_cable_goes_idle_500_ns_after_the_last_edge_on_both_alike`
+sweeps frames of 14 and 44 words ending in 0 and in 1, another station's at
+three phases of the board's clock and the board's own on the cable and
+looped back, and the next frame each of the board's own sets the turn of,
+reading the CSR back to back on both. Revision 15's interface, QUUX's own,
+keeps no such clock and keeps MP2b ruling Q19's delay: the cable goes idle
+its frame's length and `CBLBSY_OFF_NS` after its first edge, whatever its
+last bit.
+
 **The transmitter's shift register paces the writes and readies the
 frame.** Every word the software writes, and at `START` the source and check
 words, reaches the buffer through the transmitter's shift register. The
@@ -703,9 +728,18 @@ cleared unread, inside and after a dropped frame, after a frame for another
 station and after runs of 48 bits, the model's cycle at the instant the
 board answers. The register and the cells start as the netlist's parts do; a
 real 74164 and 2147 hold nothing defined at power-up, so what a CADR reads
-there before its first frame is **unverified**. The read register is not in a
-checkpoint: a resume takes it to be the last word read of a packet being
-read, and 0 otherwise.
+there before its first frame is **unverified**.
+
+**A checkpoint keeps what is pending in the interface**: a frame looped back
+waiting for its `START^`, the busy receiver's decision at a destination word
+to come, the read register, the reads' count down inside a dropped frame,
+and the last frame dropped, after the rest of its state; the cable, and so
+what the receiver has of a frame on it, is plugged in afresh.
+`src/chaos/board.rs::a_checkpoint_anywhere_in_a_frame_resumes_as_the_run_without_it`
+cuts a frame looped back, one finding the buffer full, and one cleared
+before and after its destination word, at every 250 ns through it, on the
+CADR's time and revision 15's, and every resumed run ends as the straight
+one, its checkpoint byte for byte.
 
 **A read of the buffer while the receiver takes a frame is not modelled.** On
 the netlist board such a cycle is not answered until the frame is over ---
@@ -789,7 +823,9 @@ measured on the netlist board, and each says which.
 | `TURN_FIRST_TC_NS` | 4250 | power-on to the first terminal count | netlist board |
 | `TURN_LOAD_NS` | 8250 | frame's first edge to `-LOAD.MY.TURN` | netlist board: `SRC STB`, 33 bit cells in |
 | `TURN_START_NS` | 468 | the count that raises bit 7 to the frame's first edge | netlist board |
-| `CBLBSY_OFF_NS` | 375 | frame's nominal end --- its first edge plus a cell for each of its bits, the appended zero included --- to `-CBLBSY` lifting | netlist board; `RDONE` rises with it |
+| `CBLBSY_OFF_NS` | 375 | frame's nominal end --- its first edge plus a cell for each of its bits, the appended zero included --- to `-CBLBSY` lifting, for the board's own frame ending in a 0; 250 for one ending in a 1 | netlist board; `RDONE` rises with it |
+| `CBLBSY_HOLD_NS` | 500 | the board's own frame's last edge to `-CBLBSY` lifting: the busy one-shot's fourth `FCLK^` | netlist board |
+| `FCLK_RISE_NS` | 93 | where `FCLK^` rises in each 125 ns from the board's power-on | netlist board |
 | `TDONE_BEFORE_END_NS` | 500 | how far before that nominal end Transmit Done comes | netlist board |
 | `TSR_LOAD_NS` | 101 | a WRITE BUFFER's or `START`'s answer, `-SSYN`, to the earliest `FCLK^` edge the shift register loads at | netlist board, at every nanosecond of the clock's period |
 | `TSR_WORD_NS` | 2000 | one word shifted from the register into the buffer | netlist board: sixteen bits on `FCLK^` |

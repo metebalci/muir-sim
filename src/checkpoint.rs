@@ -33,10 +33,19 @@ const MAGIC: &[u8; 16] = b"muir checkpoint\n";
 
 /// Bumped whenever any type changes what it writes; a file from another
 /// version is refused rather than read wrong. A 32-bit machine's, the
-/// CADR's. QUUX revision 12, retired, wrote this version too; its
-/// checkpoint is refused by the machine its body records
+/// CADR's. QUUX revision 12, retired, wrote this version's predecessor 49;
+/// its checkpoint is refused by the machine its body records
 /// ([`crate::machine::Machine::load`]).
-pub const VERSION: u32 = 49;
+///
+/// **54, 55, 56 and 57 are 49, 50, 51 and 53 with the Chaosnet
+/// interface's pending state after it** --- a frame looped back waiting
+/// for its `START^`, the busy receiver's decision at a destination word to
+/// come, the read register, the reads' count down inside a dropped frame,
+/// the last frame dropped --- and its turn timer's frames ending where the
+/// busy line lifts after each, not at its nominal end
+/// ([`crate::chaos::board::Interface::save`]). Every machine has the
+/// interface, so every format moved; 49, 50, 51 and 53 are refused.
+pub const VERSION: u32 = 54;
 
 /// A 40-bit machine's, QUUX revision 13's (contract G2 appendix A1.13):
 /// every word 5 bytes, `<7:0>` first and the tag last, so that main memory
@@ -44,18 +53,18 @@ pub const VERSION: u32 = 49;
 /// map's 8,192 and 4,096, the overflow flag, and revision 13's location
 /// counter and devices. The version says the width: a resume reads the
 /// body at 40 bits.
-pub const VERSION_40: u32 = 50;
+pub const VERSION_40: u32 = 55;
 
 /// QUUX revision 15's: a 40-bit machine's, as [`VERSION_40`], whose
 /// pipeline's state has no pending OA flag, revision 14's two IMOD flags
 /// left out (A15b.13; MP4 ruling Q3). A revision-15 file of
 /// [`VERSION_40`], which has them, still loads.
-pub const VERSION_15: u32 = 51;
+pub const VERSION_15: u32 = 56;
 
 /// QUUX revision 16's: revision 15's, with the Ethernet device's state
 /// after it, 253-257 among it (QUUX's Ethernet contract, §2.9). Revision
 /// 15 keeps [`VERSION_15`]. 52 was revision 16's before 253-257 were in it.
-pub const VERSION_16: u32 = 53;
+pub const VERSION_16: u32 = 57;
 
 /// The version a checkpoint of a machine of `geometry` is written at.
 pub fn version_for(geometry: &crate::machine::Geometry) -> u32 {

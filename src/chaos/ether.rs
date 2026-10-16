@@ -281,7 +281,12 @@ struct Board {
     /// Every frame that started on the cable, the board's own included:
     /// its first edge, its source and its nominal end, for the board's
     /// turn timer, which watches the cable as the receiver does.
-    frames: VecDeque<(u64, u16, u64)>,
+    frames: VecDeque<(u64, u16, u64, u64)>,
+    /// Whether the run now on the cable has been handed to the board's
+    /// receiver already, at `-CBLBSY` lifting
+    /// ([`super::board::cable_idle_after`] its last edge), ahead of the
+    /// decoder's own end of it.
+    delivered: bool,
     /// Transmitters on the cable that aborted, oldest first: when, whose
     /// frame, and when its abort signal ends and the cable is let go.
     collisions: VecDeque<(u64, u16, u64)>,
@@ -401,6 +406,13 @@ pub struct Ether {
     /// 2 on revision 15, where the cable's times double into units of
     /// 0.5 ns, unchanged (MP2b ruling Q19). [`Ether::set_per_ns`].
     per_ns: u64,
+    /// When the behavioral board was powered, which its `FCLK^` counts
+    /// from ([`Ether::set_board_powered_at`]).
+    board_powered_at: u64,
+    /// Whether the behavioral board's busy line follows its `FCLK^`, as
+    /// the CADR's does; on revision 15 it is MP2b ruling Q19's delay
+    /// instead ([`Ether::set_board_on_its_clock`]).
+    board_on_its_clock: bool,
 }
 
 /// How many events [`Ether::log`] keeps; the oldest half goes when it is
@@ -440,6 +452,8 @@ impl Ether {
             logging: false,
             log: Vec::new(),
             per_ns: 1,
+            board_powered_at: 0,
+            board_on_its_clock: true,
         }
     }
 
@@ -482,10 +496,35 @@ impl Ether {
             not_taken: false,
             started: false,
             dropped: false,
+            delivered: false,
             heard: VecDeque::new(),
             frames: VecDeque::new(),
             collisions: VecDeque::new(),
         });
+    }
+
+    /// When the behavioral board was powered: its `FCLK^`, which times its
+    /// busy line's lifting, counts from there
+    /// ([`super::board::cable_idle_after`]).
+    pub fn set_board_powered_at(&mut self, powered_at: u64) {
+        self.board_powered_at = powered_at;
+    }
+
+    /// Whether the behavioral board's busy line lifts on its `FCLK^`, the
+    /// fourth rise after the line's last edge, and its receiver has a frame
+    /// then ([`super::board::cable_idle_after`]), as the CADR's board does;
+    /// or, `false`, on revision 15, whose interface is QUUX's own, at MP2b
+    /// ruling Q19's delay, a frame's nominal end and
+    /// [`super::board::CBLBSY_OFF_NS`], its receiver having it from the
+    /// cable's decoder.
+    pub fn set_board_on_its_clock(&mut self, on: bool) {
+        self.board_on_its_clock = on;
+    }
+
+    /// When the behavioral board's `-CBLBSY` lifts after the line's last
+    /// edge at `fall`.
+    fn board_idle_after(&self, fall: u64) -> u64 {
+        super::board::cable_idle_after(fall, self.board_powered_at, self.per_ns)
     }
 
     /// The behavioral board's frame to send, as its transmit buffer holds
@@ -523,8 +562,9 @@ impl Ether {
     }
 
     /// A frame that started on the cable, oldest first: its first edge, its
-    /// source and its nominal end.
-    pub fn board_cable_frame(&mut self) -> Option<(u64, u16, u64)> {
+    /// source, its nominal end, and when the board's busy line lifts after
+    /// it ([`super::board::cable_idle_after`] its last edge).
+    pub fn board_cable_frame(&mut self) -> Option<(u64, u16, u64, u64)> {
         self.board.as_mut().and_then(|b| b.frames.pop_front())
     }
 
@@ -761,8 +801,19 @@ impl Ether {
             .chain(starts)
             .chain(pending)
             .chain(abort)
+            .chain(self.board_idle_due())
             .chain(self.decoder.next_due())
             .min()
+    }
+
+    /// When the behavioral board's `-CBLBSY` lifts after the run now on the
+    /// cable, if it is still to hand over: the line low since its last
+    /// edge, [`super::board::cable_idle_after`] it.
+    fn board_idle_due(&self) -> Option<u64> {
+        let b = self.board.as_ref()?;
+        (self.board_on_its_clock && !b.delivered && self.decoder.busy() && !self.level)
+            .then(|| self.last_edge.map(|e| self.board_idle_after(e)))
+            .flatten()
     }
 
     /// A frame's destination word has gone by at `t`, [`BUSY_ABORT_NS`]
@@ -969,9 +1020,14 @@ impl Ether {
             .collect();
         // The last change brings the line low; then it is idle.
         let end = now + bits.len() as u64 * self.ns(wire::CELL_NS);
+        let idle = if self.board_on_its_clock {
+            self.board_idle_after(waveform.back().map_or(now, |&(t, _)| t))
+        } else {
+            end + self.ns(super::board::CBLBSY_OFF_NS)
+        };
         waveform.push_back((end, false));
         if let Some(b) = self.board.as_mut() {
-            b.frames.push_back((now, me, end));
+            b.frames.push_back((now, me, end, idle));
             if b.address == me {
                 b.sending_until = Some(end);
             }
@@ -1010,6 +1066,19 @@ impl Ether {
         // every receiver takes as it takes a packet and judges by its check
         // word and bit count. The turn timers load from the source word as
         // it came, whatever the check says, as the board's does.
+        // The board's receiver has the run at `-CBLBSY` lifting, its busy
+        // one-shot run out after the line's last edge: earlier than the
+        // cable's decoders end it.
+        if let Some(t) = self.board_idle_due()
+            && t <= now
+            && let Some(b) = self.board.as_mut()
+        {
+            let r = unframe_any(self.decoder.bits());
+            let taken = !std::mem::take(&mut b.not_taken) & !std::mem::take(&mut b.dropped);
+            b.started = false;
+            b.delivered = true;
+            b.heard.push_back((now, r, taken));
+        }
         if let Some(bits) = self.decoder.at(now) {
             let r = unframe_any(&bits);
             let from = r.framed.source;
@@ -1021,7 +1090,9 @@ impl Ether {
                     n.receive(now, &r.framed);
                 }
             }
-            if let Some(b) = self.board.as_mut() {
+            if let Some(b) = self.board.as_mut()
+                && !std::mem::take(&mut b.delivered)
+            {
                 // Whether its receiver was active for this run of bits, to
                 // its end.
                 let taken = !std::mem::take(&mut b.not_taken) & !std::mem::take(&mut b.dropped);

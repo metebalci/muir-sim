@@ -1541,24 +1541,26 @@ and the band reaches its listener on it with 2001 in `A-VERSION`
 
 ## The checkpoint
 
-**A checkpoint of QUUX is a 40-bit machine's, version 50**, revision
-15's version 51 and revision 16's version 52, which say the width: every word 5 bytes, `<7:0>` first and the tag last, so that main
+**A checkpoint of QUUX is a 40-bit machine's, version 55**, revision
+15's version 56 and revision 16's version 57, which say the width: every word 5 bytes, `<7:0>` first and the tag last, so that main
 memory in it is packed storage byte for byte (contract G2 appendix A1.13);
 the dispatch memory of 4,096 entries, the map's 8,192 and 4,096 entries,
-the overflow flag, and the rest. A checkpoint of the CADR is version 49,
+the overflow flag, and the rest. A checkpoint of the CADR is version 54,
 every word 4 bytes. QUUX refuses a checkpoint of 32-bit words, the CADR's
 (`a_32_bit_checkpoint_is_refused_on_revision_13` in
 `tests/revision_13_memory.rs`), and `quux` refuses one `cadr` wrote at the
 start, naming the executable. QUUX revision 12, the 32-bit QUUX before
-revision 13, wrote version 49 too. Its checkpoint records its machine, as
+revision 13, wrote the CADR's version too. Its checkpoint records its machine, as
 every 32-bit checkpoint does: a 6-bit level-1 map entry, multiply and
 divide, the tick and the fused return, where the CADR has a 5-bit entry
 and none of the three. Both executables refuse it by that record, naming
 revision 12 and saying it resumes only on an earlier muir-sim
 (`a_revision_12_checkpoint_is_refused_by_its_machine` in
-`tests/quux_revision.rs`); a CADR checkpoint keeps version 49's bytes and
-resumes (`a_cadr_checkpoint_keeps_version_49_s_bytes` in
-`tests/checkpoint.rs`).
+`tests/quux_revision.rs`); a CADR checkpoint keeps version 54's bytes and
+resumes (`a_cadr_checkpoint_keeps_version_54_s_bytes` in
+`tests/checkpoint.rs`). Versions 54 to 57 are 49, 50, 51 and 53 with the
+Chaosnet interface's pending state after it, which every machine has
+(`docs/chaosnet.md`); 49, 50, 51 and 53 are refused.
 
 ## The `.mcr` at 40 bits
 
@@ -1802,7 +1804,7 @@ page says revision 14 in word 0, 0 in word 1 (no level-1 map), the TLB's
 entries in word 2, and the buffer's device-window address, `34000000000`,
 in word 13.
 
-**The checkpoint** of revision 14 is version 50, as revision 13's, and says
+**The checkpoint** of revision 14 is version 55, as revision 13's, and says
 its revision by its geometry: no level-1 map. After revision 13's fields it
 keeps the location counter's `<33:32>`, the memory system's words and the
 redirect's two copies; the
@@ -2011,17 +2013,17 @@ The symbol area is refused when its start or extent passes the largest
 main memory, 64MW, and `Mcr::check_main_memory` holds it to a machine's own
 (`the_symbol_area_lies_in_main_memory`).
 
-**The checkpoint** of revision 15 is version 51, a 40-bit machine's as
-revision 14's version 50. It says its revision in the byte where revision
+**The checkpoint** of revision 15 is version 56, a 40-bit machine's as
+revision 14's version 55. It says its revision in the byte where revision
 13 keeps its level-1 entry's width and revision 14 a 0: `0o217`, 15 with
 `<7>` set, a value no width takes. It keeps the control store's 64 bits
 and the OA registers, in IMOD's registers' place, with no pending flag;
 after revision 14's fields, word 225 and the check's shadow
 (`a_checkpoint_records_revision_15_and_keeps_64_bits`). The pipeline's
 state in it holds no pending OA flag either; a revision-15 file of version
-50, which holds revision 14's two IMOD flags after the OA registers, still
-loads, and is written again as version 51
-(`a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_50_one_loads`).
+55, which holds revision 14's two IMOD flags after the OA registers, still
+loads, and is written again as version 56
+(`a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_55_one_loads`).
 `quux` refuses a checkpoint of revision 13 or 14 on revision 15 and the
 reverse, naming the revision that wrote it
 (`revision_15_and_the_others_refuse_each_other_s_checkpoints`).
@@ -2396,7 +2398,7 @@ is its interrupt. It loads revision 15's `.mcr` files, whose section 6
 says 15, the microinstruction's revision, and refuses any other, so one
 microcode runs on 15 and 16
 (`revision_16_loads_a_revision_15_mcr_and_refuses_others`); no boot PROM
-for it is built in. A checkpoint of it is version 53,
+for it is built in. A checkpoint of it is version 57,
 the device's state and 253-257 after revision 15's, and revisions 15 and 16 refuse
 each other's. What holds it is `tests/quux_ethernet.rs` and, for the
 posted writes and the cache, the last tests of `tests/revision_15_rtl.rs`.

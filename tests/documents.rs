@@ -337,6 +337,8 @@ fn the_chaosnet_page_quotes_the_sources_own_numbers() {
         ("TURN_LOAD_NS", board::TURN_LOAD_NS),
         ("TURN_START_NS", board::TURN_START_NS),
         ("CBLBSY_OFF_NS", board::CBLBSY_OFF_NS),
+        ("CBLBSY_HOLD_NS", board::CBLBSY_HOLD_NS),
+        ("FCLK_RISE_NS", board::FCLK_RISE_NS),
         ("TDONE_BEFORE_END_NS", board::TDONE_BEFORE_END_NS),
         ("TSR_LOAD_NS", board::TSR_LOAD_NS),
         ("TSR_WORD_NS", board::TSR_WORD_NS),

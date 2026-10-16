@@ -146,6 +146,42 @@ pub const TURN_START_NS: u64 = 468;
 /// with it.
 pub const CBLBSY_OFF_NS: u64 = 375;
 
+/// From the board's own frame's last edge to `-CBLBSY` lifting, `RDONE`
+/// with it: [`cable_idle_after`] for an edge on the board's clock, as the
+/// transmitter's are. The last edge is inside the trailing zero's cell, at
+/// its start when the last data bit is a 1 and at its middle when it is a
+/// 0 ([`wire::last_edge`]), so the cable goes idle 250 or 375 ns
+/// ([`CBLBSY_OFF_NS`]) after the frame's nominal end. Measured on the
+/// netlist board under Loop Back, frames ending in each, and held by
+/// `the_cable_goes_idle_500_ns_after_the_last_edge_on_both_alike` in
+/// `tests/chaos_rtl.rs`. Revision 15, whose interface is QUUX's own and
+/// keeps no such clock, keeps MP2b ruling Q19's delay from the frame's
+/// first edge, its length and [`CBLBSY_OFF_NS`], whatever its last bit.
+pub const CBLBSY_HOLD_NS: u64 = 500;
+
+/// Where in each [`crate::busint::IOB_FCLK_NS`] the board's `FCLK^` rises,
+/// counted from its power-on: 93 ns past each multiple of 125. Measured on
+/// the netlist board; it is why a frame's first edge, 468 ns after a
+/// count of the turn timer ([`TURN_START_NS`]), is on the clock.
+pub const FCLK_RISE_NS: u64 = 93;
+
+/// When `-CBLBSY` lifts after the line's last edge, a fall, at `fall`, on
+/// a board powered at `powered_at`, in units of `1/per_ns` ns: the busy
+/// one-shot, the 74LS161 at LMRCLK 0B05, is cleared while the line is high
+/// and counts `FCLK^` while it is low, and lifts the busy line at the
+/// fourth rise after the fall. So 500 ns after an edge on the board's
+/// clock, as its own transmitter's are, and 376 to 500 after another
+/// station's, by the phase: measured on the netlist board, a frame from
+/// another station ending in 0 idle at its nominal end plus 293 and one
+/// ending in 1 at 168, the fourth rise of `FCLK^` after the last edge each
+/// time.
+pub fn cable_idle_after(fall: u64, powered_at: u64, per_ns: u64) -> u64 {
+    let edge = crate::busint::IOB_FCLK_NS * per_ns;
+    let origin = powered_at + FCLK_RISE_NS * per_ns;
+    let first = if fall < origin { origin } else { origin + ((fall - origin) / edge + 1) * edge };
+    first + 3 * edge
+}
+
 /// Transmit Done comes this much before the frame's nominal end, as
 /// [`CBLBSY_OFF_NS`] reckons it: `-TDONE` 375 ns before the last edge,
 /// which is 125 before that end.  Measured.
@@ -250,8 +286,8 @@ impl Turn {
 
     /// `-CBLBSY` down at `t`: a frame's first edge is past and its busy
     /// one-shot has not run out.
-    fn busy_at(&self, t: u64, time: TimeBase) -> bool {
-        self.frames.iter().any(|&(s, _, e)| s <= t && t < e + time.ns(CBLBSY_OFF_NS))
+    fn busy_at(&self, t: u64) -> bool {
+        self.frames.iter().any(|&(s, _, idle)| s <= t && t < idle)
     }
 
     /// Takes the terminal count at `t`, for the interface at `me`: the
@@ -269,7 +305,7 @@ impl Turn {
             }
         }
         let mut starts = None;
-        if self.busy_at(t, time) {
+        if self.busy_at(t) {
             self.q = true;
         } else {
             self.q = !self.q;
@@ -282,7 +318,7 @@ impl Turn {
             }
         }
         self.taken += 1;
-        self.frames.retain(|&(_, _, e)| e + time.ns(CBLBSY_OFF_NS) >= t);
+        self.frames.retain(|&(_, _, idle)| idle >= t);
         starts
     }
 
@@ -495,6 +531,7 @@ impl Interface {
         let mut ether = ether.map(Box::new);
         if let Some(e) = ether.as_mut() {
             e.attach_board(address);
+            e.set_board_powered_at(powered_at);
         }
         Interface {
             address,
@@ -557,6 +594,7 @@ impl Interface {
             self.invalidate();
             if let Some(e) = self.ether.as_mut() {
                 e.set_per_ns(time.per_ns);
+                e.set_board_on_its_clock(time.period == 0);
             }
         }
     }
@@ -580,6 +618,8 @@ impl Interface {
     /// there.
     pub fn plug(&mut self, mut ether: Ether) {
         ether.attach_board(self.address);
+        ether.set_board_powered_at(self.turn.powered_at);
+        ether.set_board_on_its_clock(self.time.period == 0);
         ether.set_per_ns(self.time.per_ns);
         self.ether = Some(Box::new(ether));
         self.invalidate();
@@ -825,7 +865,7 @@ impl Interface {
         }
         self.rx_cell = e.board_open_cell();
         let loop_back = self.csr & csr::LOOP_BACK != 0;
-        while let Some((start, source, end)) = e.board_cable_frame() {
+        while let Some((start, source, end, idle)) = e.board_cable_frame() {
             if source == self.address {
                 // From the frame's first edge, which the turn timer put
                 // on a clock: rounded once from there, never from the
@@ -840,7 +880,7 @@ impl Interface {
                 }
             }
             if !loop_back || source == self.address {
-                self.turn.frames.push((start, source, end));
+                self.turn.frames.push((start, source, idle));
             }
         }
         // A transmitter aborted at `t`: its frame ends with its abort
@@ -852,7 +892,11 @@ impl Interface {
             if let Some(f) =
                 self.turn.frames.iter_mut().rev().find(|f| f.1 == source && f.0 <= t && f.2 > t)
             {
-                f.2 = end;
+                f.2 = if time.period == 0 {
+                    cable_idle_after(end, self.turn.powered_at, time.per_ns)
+                } else {
+                    end + time.ns(CBLBSY_OFF_NS)
+                };
             }
             if source == self.address {
                 self.transmit_abort = true;
@@ -905,7 +949,7 @@ impl Interface {
                 .filter(|&&(s, source, _)| source == from && s <= at)
                 .map(|&(_, _, e)| e)
                 .max();
-            let land = end.map_or(at, |e| e + time.ns(CBLBSY_OFF_NS));
+            let land = end.unwrap_or(at);
             self.incoming.push_back((land, r));
             self.incoming.make_contiguous().sort_by_key(|&(t, _)| t);
         }
@@ -932,7 +976,15 @@ impl Interface {
         let cells = super::packet::line(&line);
         let bits = cells.len() as u64;
         let length = bits * time.ns(wire::CELL_NS);
-        let end = start + length;
+        // When the cable goes idle after it: the busy one-shot from its last
+        // edge, the frame's first edge on the board's clock. Revision 15
+        // keeps MP2b ruling Q19's delay from that first edge, the length
+        // and `CBLBSY_OFF_NS`, whatever the frame's last bit.
+        let idle = if time.period == 0 {
+            time.ns(CBLBSY_HOLD_NS) + wire::last_edge(&cells, time.per_ns)
+        } else {
+            length + time.ns(CBLBSY_OFF_NS)
+        };
         if self.trace {
             eprintln!(
                 "chaos {t:>6}: interface {:o}'s turn, its frame ready since {ready_at}, {bits} bits from {start}",
@@ -940,11 +992,11 @@ impl Interface {
             );
         }
         if self.csr & csr::LOOP_BACK != 0 || self.ether.is_none() {
-            self.turn.frames.push((start, self.address, end));
+            self.turn.frames.push((start, self.address, start + idle));
             self.tdone_at = Some(time.after(start, length - time.ns(TDONE_BEFORE_END_NS)));
             if self.csr & csr::LOOP_BACK != 0 {
                 let r = unframe_any(&cells);
-                let land = time.after(start, length + time.ns(CBLBSY_OFF_NS));
+                let land = time.after(start, idle);
                 self.incoming.push_back((land, r));
                 self.incoming.make_contiguous().sort_by_key(|&(t, _)| t);
                 self.looped_start = Some((time.after(start, time.ns(RACT_NS)), land));
@@ -1171,11 +1223,9 @@ impl Interface {
         // Loop Back goes off with the CSR: the receiver no longer hears the
         // transmitter, and the frame looped back is over for it at once.
         if looped {
-            let (now, off, me) = (self.now, self.time.ns(CBLBSY_OFF_NS), self.address);
-            for f in
-                self.turn.frames.iter_mut().filter(|f| f.1 == me && f.0 <= now && now < f.2 + off)
-            {
-                f.2 = now.saturating_sub(off).max(f.0);
+            let (now, me) = (self.now, self.address);
+            for f in self.turn.frames.iter_mut().filter(|f| f.1 == me && f.0 <= now && now < f.2) {
+                f.2 = now;
             }
         }
         self.csr = 0;
@@ -1242,13 +1292,12 @@ impl Interface {
     /// The frame on the line now, from the interface's turn timer: its
     /// first edge and nominal end.
     fn frame_now(&self) -> Option<(u64, u64)> {
-        let off = self.time.ns(CBLBSY_OFF_NS);
         self.turn
             .frames
             .iter()
             .rev()
-            .find(|&&(s, _, e)| s <= self.now && self.now < e + off)
-            .map(|&(s, _, e)| (s, e))
+            .find(|&&(s, _, idle)| s <= self.now && self.now < idle)
+            .map(|&(s, _, idle)| (s, idle))
     }
 
     /// `RBCT` while the receiver takes the frame on the line: a step on
@@ -1273,7 +1322,9 @@ impl Interface {
         }
         self.frame_now().map_or(0, |(s, e)| {
             let k = if self.now >= s + late { (self.now - s - late) / cell } else { 0 };
-            (k as usize).min(((e - s) / cell) as usize - 1)
+            // The cable idle 250 or 375 ns after the nominal end: either
+            // way a cell and a part past it, which the bits are two short of.
+            (k as usize).min((((e - s) / cell) as usize).saturating_sub(2))
         })
     }
 
@@ -1356,7 +1407,7 @@ impl Interface {
     /// before it landed, if any has been: when, whose, when it would have
     /// landed and how many of its bits stayed in the buffer. A frame
     /// dropped never raises Receive Done, so this is how a caller knows of
-    /// it. Kept in a clone; not in a checkpoint.
+    /// it. Kept in a clone and in a checkpoint.
     pub fn dropped(&self) -> Option<Dropped> {
         self.dropped
     }
@@ -1388,7 +1439,6 @@ impl Interface {
     fn rreset(&mut self, looped: bool) {
         let (now, time) = (self.now, self.time);
         let full = self.receive_done;
-        let off = time.ns(CBLBSY_OFF_NS);
         // Under Loop Back the cable is not the receiver's, and its frames
         // are left as they were.
         let stored = self.ether.as_mut().filter(|_| !looped).and_then(|e| e.board_rreset());
@@ -1400,9 +1450,9 @@ impl Interface {
                 .frames
                 .iter()
                 .rev()
-                .find(|&&(s, _, e)| s <= now && now < e + off)
+                .find(|&&(s, _, idle)| s <= now && now < idle)
                 .copied();
-            let land = frame.map(|(_, _, e)| e + off);
+            let land = frame.map(|(_, _, idle)| idle);
             if land.is_none_or(|l| now < l) {
                 self.drop_frame(now, frame.map(|f| f.1), land, &bits);
             } else {
@@ -1421,7 +1471,7 @@ impl Interface {
                 .turn
                 .frames
                 .iter()
-                .find(|&&(s, source, e)| source == me && time.after(s, e - s + off) == land)
+                .find(|&&(s, source, idle)| source == me && time.after(s, idle - s) == land)
                 .map(|&(s, _, _)| s);
             let Some(start) = start.filter(|&s| now >= time.after(s, time.ns(RACT_NS))) else {
                 // `START^` still to come: `RACT` takes `-RDONE` then.
@@ -1499,7 +1549,11 @@ impl Interface {
             if let Some(f) =
                 self.turn.frames.iter_mut().rev().find(|f| f.1 == me && f.0 <= t && f.2 > hold)
             {
-                f.2 = hold;
+                f.2 = if time.period == 0 {
+                    cable_idle_after(hold, self.turn.powered_at, time.per_ns)
+                } else {
+                    hold + time.ns(CBLBSY_OFF_NS)
+                };
             }
         }
         if self.trace {
@@ -1570,9 +1624,13 @@ impl Interface {
 
 impl Interface {
     /// The interface into a checkpoint: its switches and registers, both
-    /// buffers, the frames due off the cable and the turn timer.  Not the
-    /// cable, which a resume plugs in afresh with whatever the flags put
-    /// on it, and not the trace switch.
+    /// buffers, the frames due off the cable and the turn timer, and after
+    /// them what is pending of a frame looped back and of the read path: a
+    /// `START^` to come, the busy receiver's decision at a destination word
+    /// to come, the read register, the reads' count down inside a dropped
+    /// frame, and the last frame dropped. Not the cable, which a resume
+    /// plugs in afresh with whatever the flags put on it --- nor so what
+    /// the receiver has of a frame on it --- and not the trace switch.
     pub fn save(&self, w: &mut crate::checkpoint::Writer) {
         let Interface {
             address,
@@ -1598,14 +1656,14 @@ impl Interface {
             ether: _,
             trace: _,
             time: _,
-            dropped: _,
+            dropped,
             cable_refused: _,
             rx_checks: _,
             rx_cell: _,
-            looped_start: _,
-            rd: _,
-            down: _,
-            looped_busy: _,
+            looped_start,
+            rd,
+            down,
+            looped_busy,
         } = self;
         w.u16(*address);
         w.u16(*csr);
@@ -1632,7 +1690,7 @@ impl Interface {
         // in it is read; the check of the words read is made again on load.
         // A buffer never written is written empty, as it always was, which
         // keeps a checkpoint of a machine that never took a frame the bytes
-        // it had (`a_cadr_checkpoint_keeps_version_49_s_bytes`).
+        // it had (`a_cadr_checkpoint_keeps_version_54_s_bytes`).
         if rcv.iter().all(|&w| w == NEVER_WRITTEN) {
             w.u16s(&[]);
         } else {
@@ -1652,6 +1710,26 @@ impl Interface {
         }
         turn.save(w, *address);
         w.u64(*polled);
+        w.opt(*looped_start, |w, (at, land)| {
+            w.u64(at);
+            w.u64(land);
+        });
+        w.opt(*looped_busy, |w, (at, dest)| {
+            w.u64(at);
+            w.u16(dest);
+        });
+        w.u16(*rd);
+        w.opt(*down, |w, (at, hw, check)| {
+            w.u64(at);
+            w.u16(hw);
+            w.u16(check);
+        });
+        w.opt(*dropped, |w, d| {
+            w.u64(d.at);
+            w.opt(d.source, crate::checkpoint::Writer::u16);
+            w.opt(d.would_land, crate::checkpoint::Writer::u64);
+            w.u64(d.bits as u64);
+        });
     }
 
     /// Back from a checkpoint, into an interface plugged in at the same
@@ -1719,18 +1797,23 @@ impl Interface {
         self.incoming = incoming;
         self.turn.load(r, self.address)?;
         self.polled = r.u64()?;
+        self.looped_start = r.opt(|r| Ok((r.u64()?, r.u64()?)))?;
+        self.looped_busy = r.opt(|r| Ok((r.u64()?, r.u16()?)))?;
+        self.rd = r.u16()?;
+        self.down = r.opt(|r| Ok((r.u64()?, r.u16()?, r.u16()?)))?;
+        self.dropped = r.opt(|r| {
+            Ok(Dropped {
+                at: r.u64()?,
+                source: r.opt(crate::checkpoint::Reader::u16)?,
+                would_land: r.opt(crate::checkpoint::Reader::u64)?,
+                bits: r.u64()? as usize,
+            })
+        })?;
         self.next_event = None;
-        self.dropped = None;
+        // The cable is plugged in afresh, with nothing of a frame on it.
         self.cable_refused = false;
         self.rx_checks.clear();
         self.rx_cell = None;
-        self.looped_start = None;
-        self.down = None;
-        self.looped_busy = None;
-        // The read register is the last word read, if a packet is being
-        // read; otherwise nothing kept says what it held.
-        self.rd =
-            if self.receive_done && self.rcv_at > 0 { self.rcv_word(self.rcv_at - 1) } else { 0 };
         self.tell_the_cable();
         Ok(())
     }
@@ -1886,6 +1969,187 @@ mod tests {
         let mut j = Interface::new(i.address, None, 0, false);
         j.load(&mut crate::checkpoint::Reader::new(&bytes)).unwrap();
         j
+    }
+
+    /// One step of a scenario on an interface: a write, or a read whose
+    /// word is kept.
+    #[derive(Clone, Copy)]
+    enum Step {
+        Write(u32, u16),
+        Read(u32),
+    }
+
+    /// `steps` at their instants on an interface at 3050 with no cable, on
+    /// `time`, to `until`; with `cut`, the interface goes through a
+    /// checkpoint at that instant and the rest runs on the one resumed.
+    /// Returns every word read, and the CSR, the bit count and the whole
+    /// checkpoint at the end.
+    fn scenario(
+        steps: &[(u64, Step)],
+        until: u64,
+        cut: Option<u64>,
+        time: TimeBase,
+    ) -> (Vec<u16>, u16, u16, Vec<u8>) {
+        let mut i = Interface::new(0o3050, None, 0, false);
+        i.set_time_base(time);
+        let mut cut = cut;
+        let mut reads = Vec::new();
+        let go = |i: &mut Interface, t: u64, cut: &mut Option<u64>| {
+            if let Some(c) = cut.filter(|&c| c <= t) {
+                i.advance(c);
+                let mut j = through_a_checkpoint(i);
+                j.set_time_base(time);
+                *i = j;
+                *cut = None;
+            }
+        };
+        for &(t, step) in steps {
+            go(&mut i, t, &mut cut);
+            match step {
+                Step::Write(a, v) => i.write(a, v, t),
+                Step::Read(a) => reads.push(i.read(a, t)),
+            }
+        }
+        go(&mut i, until, &mut cut);
+        i.advance(until);
+        let mut w = crate::checkpoint::Writer::new();
+        i.save(&mut w);
+        (reads, i.csr(), i.bit_count(), w.finish())
+    }
+
+    /// The first edge of the frame a scenario's START sends looped back,
+    /// found on a run of it.
+    fn first_edge(steps: &[(u64, Step)], time: TimeBase) -> u64 {
+        let mut i = Interface::new(0o3050, None, 0, false);
+        i.set_time_base(time);
+        for &(t, step) in steps {
+            match step {
+                Step::Write(a, v) => i.write(a, v, t),
+                Step::Read(a) => {
+                    i.read(a, t);
+                }
+            }
+        }
+        let mut t = steps.last().unwrap().0;
+        while i.turn.frames.is_empty() {
+            t += 1;
+            i.advance(t);
+        }
+        i.turn.frames[0].0
+    }
+
+    /// **A checkpoint taken anywhere in a frame looped back, a drop or a
+    /// read with Receive Done down resumes as the run without it.** The
+    /// interface's pending state goes into the checkpoint: a frame looped
+    /// back waiting for its `START^`, the busy receiver's decision waiting
+    /// for its destination word, the read register and the reads' count
+    /// down inside a dropped frame, and the last frame dropped. Four
+    /// scenarios, each cut at every 250 ns from before the frame's first
+    /// edge to after it is over, on the CADR's time and revision 15's:
+    /// a frame to this address taken; one finding the buffer full at
+    /// `START^`; one cleared before its destination word, read with Receive
+    /// Done down inside it and after; and the same cleared after it. Every
+    /// word read, the CSR, the bit count and the whole checkpoint at the end
+    /// are the straight run's.
+    #[test]
+    fn a_checkpoint_anywhere_in_a_frame_resumes_as_the_run_without_it() {
+        use Step::{Read, Write};
+        let words = [0o100000u16, 1, 2, 3, 4, 5, 6, 7, 0o10, 0o11, 0o12, 0o3050];
+        let mut bad = Vec::new();
+        for time in [TimeBase::NS, TimeBase::half_ns(17)] {
+            let u = |ns: u64| time.ns(ns);
+            let mut base = vec![
+                (u(1_000), Write(interface::CSR, csr::RESET)),
+                (u(1_100), Write(interface::CSR, csr::LOOP_BACK | csr::CLEAR_RECEIVER)),
+            ];
+            for (k, &w) in words.iter().enumerate() {
+                base.push((u(1_200 + 100 * k as u64), Write(interface::WRITE_BUFFER, w)));
+            }
+            base.push((u(3_000), Read(interface::START)));
+            let s0 = first_edge(&base, time);
+            let length = u(((words.len() as u64 + 2) * 16 + 1) * wire::CELL_NS);
+            let polls = |from: u64, to: u64| {
+                let mut v = Vec::new();
+                let mut t = from;
+                while t < to {
+                    v.push((t, Read(interface::CSR)));
+                    v.push((t + u(10), Read(interface::BIT_COUNT)));
+                    t += u(3_000);
+                }
+                v
+            };
+            // Taken.
+            let mut taken = base.clone();
+            taken.extend(polls(s0 - u(2_000), s0 + length + u(5_000)));
+            // The buffer full at `START^`: a second frame behind a first,
+            // landed and left.
+            let mut full = base.clone();
+            let t1 = s0 + length + u(10_000);
+            for (k, &w) in words.iter().enumerate() {
+                full.push((t1 + u(100 * k as u64), Write(interface::WRITE_BUFFER, w)));
+            }
+            full.push((t1 + u(2_000), Read(interface::START)));
+            let mut probe = full.clone();
+            probe.push((t1 + u(2_100), Read(interface::CSR)));
+            let s1 = {
+                let mut i = Interface::new(0o3050, None, 0, false);
+                i.set_time_base(time);
+                for &(t, step) in &probe {
+                    match step {
+                        Write(a, v) => i.write(a, v, t),
+                        Read(a) => {
+                            i.read(a, t);
+                        }
+                    }
+                }
+                let mut t = t1 + u(2_100);
+                while i.turn.frames.iter().all(|f| f.0 < t1) {
+                    t += 1;
+                    i.advance(t);
+                }
+                i.turn.frames.iter().find(|f| f.0 >= t1).unwrap().0
+            };
+            full.extend(polls(s1 - u(2_000), s1 + length + u(5_000)));
+            // Cleared before the destination word, and after it.
+            let cleared = |at: u64| {
+                let mut v = base.clone();
+                v.push((s0 + at, Write(interface::CSR, csr::LOOP_BACK | csr::CLEAR_RECEIVER)));
+                for k in 0..3 {
+                    v.push((s0 + at + u(500 + 1_000 * k), Read(interface::READ_BUFFER)));
+                }
+                v.extend(polls(s0 + at + u(4_000), s0 + length + u(3_000)));
+                for k in 0..3 {
+                    v.push((s0 + length + u(4_000 + 1_000 * k), Read(interface::READ_BUFFER)));
+                }
+                v
+            };
+            for (what, steps, from, to) in [
+                ("taken", taken, s0, s0 + length + u(2_000)),
+                ("full at START^", full, s1, s1 + length + u(2_000)),
+                (
+                    "cleared before the destination word",
+                    cleared(u(6_000)),
+                    s0,
+                    s0 + length + u(8_000),
+                ),
+                ("cleared after it", cleared(u(20_000)), s0, s0 + length + u(8_000)),
+            ] {
+                let until = steps.last().unwrap().0 + u(20_000);
+                let straight = scenario(&steps, until, None, time);
+                let mut cut = from.saturating_sub(u(1_000));
+                let mut differ = 0;
+                while cut < to {
+                    if scenario(&steps, until, Some(cut), time) != straight {
+                        differ += 1;
+                    }
+                    cut += u(250);
+                }
+                if differ > 0 {
+                    bad.push(format!("{time:?}, {what}: {differ} cuts unlike the straight run"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
     /// **A checkpoint keeps both buffers as they are, round and all.** A

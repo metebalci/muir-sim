@@ -195,16 +195,21 @@ fn the_file_names_its_engine_and_refuses_other_files() {
 /// machine's, QUUX revision 13's ([`checkpoint::VERSION_40`],
 /// `tests/revision_13_memory.rs`); version 51 revision 15's and 53 revision
 /// 16's, with its Ethernet device and 253-257 (`tests/quux_ethernet.rs`);
-/// 52, revision 16's before 253-257 were in it, is refused. QUUX revision
-/// 12, retired, wrote version 49 too, and its checkpoint is refused by the machine its body records
+/// 52, revision 16's before 253-257 were in it, is refused. Versions 54,
+/// 55, 56 and 57 are 49, 50, 51 and 53 with the Chaosnet interface's
+/// pending state after it and its turn timer's frames ending where the busy
+/// line lifts (`a_checkpoint_anywhere_in_a_frame_resumes_as_the_run_without_it`
+/// in `src/chaos/board.rs`), and 49, 50, 51 and 53 are refused. QUUX
+/// revision 12, retired, wrote the CADR's version, and its checkpoint is
+/// refused by the machine its body records
 /// (`a_revision_12_checkpoint_is_refused_by_its_machine` in
 /// `tests/quux_revision.rs`).
 #[test]
-fn the_format_is_version_49_and_another_version_is_refused() {
-    assert_eq!(checkpoint::VERSION, 49, "a new version needs its own tests");
-    assert_eq!(checkpoint::VERSION_40, 50);
-    assert_eq!(checkpoint::VERSION_15, 51);
-    assert_eq!(checkpoint::VERSION_16, 53);
+fn the_format_is_version_54_and_another_version_is_refused() {
+    assert_eq!(checkpoint::VERSION, 54, "a new version needs its own tests");
+    assert_eq!(checkpoint::VERSION_40, 55);
+    assert_eq!(checkpoint::VERSION_15, 56);
+    assert_eq!(checkpoint::VERSION_16, 57);
     let dir = std::env::temp_dir().join(format!("muir-checkpoint-version-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("a.chk");
@@ -212,14 +217,14 @@ fn the_format_is_version_49_and_another_version_is_refused() {
     let good = std::fs::read(&path).unwrap();
     // The version is the four bytes after the magic line.
     let at = b"muir checkpoint\n".len();
-    assert_eq!(&good[at..at + 4], 49u32.to_le_bytes());
-    for other in (1u32..checkpoint::VERSION).chain([52, 54, u32::MAX]) {
+    assert_eq!(&good[at..at + 4], 54u32.to_le_bytes());
+    for other in (1u32..checkpoint::VERSION).chain([58, u32::MAX]) {
         let mut file = good.clone();
         file[at..at + 4].copy_from_slice(&other.to_le_bytes());
         std::fs::write(&path, &file).unwrap();
         let err = checkpoint::read(&path).unwrap_err().to_string();
         assert!(err.contains(&format!("format version {other}")), "{err}");
-        assert!(err.contains("reads 49, 50, 51 and 53"), "{err}");
+        assert!(err.contains("reads 54, 55, 56 and 57"), "{err}");
     }
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -417,15 +422,15 @@ fn cadr_file<E: Engine>(engine: &str, mut e: E, at: u64, path: &std::path::Path)
     std::fs::read(path).unwrap()
 }
 
-/// **A checkpoint of the CADR keeps format version 49's bytes**, as
-/// written before QUUX's 32-bit revision 12 was retired: the retirement
-/// left the CADR's format alone, so that a CADR checkpoint written then,
-/// by `cadr` or by a board, still resumes. The digests are of the files
-/// that build wrote of this same run, on each engine; the file resumes
-/// here and runs on as the straight run does.
+/// **A checkpoint of the CADR keeps format version 54's bytes**: the
+/// digests are of the files the build that brought version 54 in wrote of
+/// this same run, on each engine, so that a CADR checkpoint written since,
+/// by `cadr` or by a board, still resumes; the file resumes here and runs on
+/// as the straight run does. Version 49's, before it, were `91ce5d6b229c2e47`
+/// and `110fe8dc822f2ce8`.
 #[test]
-fn a_cadr_checkpoint_keeps_version_49_s_bytes() {
-    let dir = std::env::temp_dir().join(format!("muir-checkpoint-49-{}", std::process::id()));
+fn a_cadr_checkpoint_keeps_version_54_s_bytes() {
+    let dir = std::env::temp_dir().join(format!("muir-checkpoint-54-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let machine = || {
         let mut m = Machine::with_memory_boards(1);
@@ -436,7 +441,7 @@ fn a_cadr_checkpoint_keeps_version_49_s_bytes() {
     let path = dir.join("micro.chk");
     let file = cadr_file("micro", Micro::new(machine()), at, &path);
     eprintln!("micro: {} bytes, digest {:#018x}", file.len(), fnv(&file));
-    assert_eq!(fnv(&file), MICRO_49, "micro: version 49's bytes");
+    assert_eq!(fnv(&file), MICRO_54, "micro: version 54's bytes");
     let (mut straight, mut resumed) = (Micro::new(machine()), Micro::new(machine()));
     straight.boot();
     straight.run(at);
@@ -451,7 +456,7 @@ fn a_cadr_checkpoint_keeps_version_49_s_bytes() {
     let path = dir.join("rtl.chk");
     let file = cadr_file("rtl", Rtl::new(machine()), at, &path);
     eprintln!("rtl: {} bytes, digest {:#018x}", file.len(), fnv(&file));
-    assert_eq!(fnv(&file), RTL_49, "rtl: version 49's bytes");
+    assert_eq!(fnv(&file), RTL_54, "rtl: version 54's bytes");
     let (mut straight, mut resumed) = (Rtl::new(machine()), Rtl::new(machine()));
     straight.boot();
     straight.run(at);
@@ -466,9 +471,9 @@ fn a_cadr_checkpoint_keeps_version_49_s_bytes() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The digests of [`a_cadr_checkpoint_keeps_version_49_s_bytes`]'s files.
-const MICRO_49: u64 = 0x91ce_5d6b_229c_2e47;
-const RTL_49: u64 = 0x110f_e8dc_822f_2ce8;
+/// The digests of [`a_cadr_checkpoint_keeps_version_54_s_bytes`]'s files.
+const MICRO_54: u64 = 0x1442_fb1e_d209_f53c;
+const RTL_54: u64 = 0xf9d4_6fc7_aa82_6ce9;
 
 // --- chip -------------------------------------------------------------------
 

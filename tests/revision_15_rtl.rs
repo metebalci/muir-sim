@@ -5669,17 +5669,17 @@ fn the_pipeline_runs_the_debug_ir_s_64_bits_as_micro_does() {
 }
 
 /// **A revision-15 checkpoint keeps no pending OA flag** (A15b.13: "no
-/// pending OA flag"; MP4 ruling Q3), and is version 51; one of version 50,
+/// pending OA flag"; MP4 ruling Q3), and is version 56; one of version 55,
 /// written with revision 14's two IMOD flags after the OA registers, still
 /// loads. Halted among fillers, the pipeline's checkpoint and the same with
 /// two zero flags put back resume alike, run on alike, and the second
 /// written again is the first: 45 bytes follow the flags when no SPC or map
 /// write is pending.
 #[test]
-fn a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_50_one_loads() {
+fn a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_55_one_loads() {
     use muir::checkpoint::{Checkpoint, VERSION_15, VERSION_40, Writer, version_for};
     assert_eq!(version_for(&REV15), VERSION_15);
-    assert_eq!(VERSION_15, 51);
+    assert_eq!(VERSION_15, 56);
     assert_eq!(version_for(&Geometry::QUUX_14), VERSION_40);
     let p = Prog::default();
     let e = pipeline_halted(&p);
@@ -5706,7 +5706,7 @@ fn a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_50_one_loads() {
         f
     };
     let (mut a, mut b) = (resume(&body, VERSION_15), resume(&old, VERSION_40));
-    assert_eq!(saved(&b), body, "version 50's, written again, is version 51's");
+    assert_eq!(saved(&b), body, "version 55's, written again, is version 56's");
     for f in [&mut a, &mut b] {
         f.skip_sweep();
         f.spy_write(muir::spy::CLK, 1);

@@ -120,9 +120,9 @@ fn retired(revision: u32) -> Geometry {
 
 /// **A checkpoint of QUUX revision 12 is refused by the machine it
 /// records**, on both executables and both engines, naming the revision
-/// and where it resumes. It is format version 49, the CADR's, which this
-/// build keeps so that the CADR's checkpoints, a board's among them, still
-/// resume; the body says which machine wrote it: a 6-bit level-1 map
+/// and where it resumes. It is written here at format version 54, the
+/// CADR's, as revision 12 wrote the CADR's version of its day; the body says
+/// which machine wrote it: a 6-bit level-1 map
 /// entry, multiply and divide, the tick and the fused return, where the
 /// CADR has a 5-bit entry and none of the three. Revision 11, without the
 /// fused return, is refused as 11. The body is the machine's alone, as
@@ -130,7 +130,7 @@ fn retired(revision: u32) -> Geometry {
 /// nothing past its geometry is read.
 #[test]
 fn a_revision_12_checkpoint_is_refused_by_its_machine() {
-    assert_eq!(muir::checkpoint::VERSION, 49);
+    assert_eq!(muir::checkpoint::VERSION, 54);
     let dir = scratch("revision-12-checkpoint");
     for revision in [12, 11] {
         let mut w = muir::checkpoint::Writer::new();

@@ -1086,7 +1086,7 @@ fn a_transmit_takes_20_us_at_every_period() {
 /// it is never refused on the device's account; the registers, the
 /// counters and the due time come back, and the frames go out at the times
 /// an unbroken run sends them. The file is revision 16's version, and
-/// revision 15's stays 51. **Fails** a checkpoint that drops the due time,
+/// revision 15's stays its own, 56. **Fails** a checkpoint that drops the due time,
 /// or refuses.
 #[test]
 fn a_checkpoint_with_transmits_waiting_resumes_and_sends_them() {
@@ -1129,8 +1129,8 @@ fn a_checkpoint_with_transmits_waiting_resumes_and_sends_them() {
     assert_eq!(straight.1, [0, 1, 0, 1]);
     assert_eq!(broken, straight, "resumed, the same frames at the same times");
     assert_eq!(muir::checkpoint::version_for(&Geometry::QUUX_16), muir::checkpoint::VERSION_16);
-    assert_eq!(muir::checkpoint::version_for(&Geometry::QUUX_15), 51);
-    assert_ne!(muir::checkpoint::VERSION_16, 51);
+    assert_eq!(muir::checkpoint::version_for(&Geometry::QUUX_15), 56);
+    assert_ne!(muir::checkpoint::VERSION_16, 56);
     let mut w = muir::checkpoint::Writer::new();
     rev16().save(&mut w);
     let g = Machine::checkpointed_geometry_at(&w.finish(), 40).unwrap();

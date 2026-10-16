@@ -59,6 +59,15 @@ pub const LOCKOUT_NS: u64 = 170;
 /// is the cable's decoders, which no board sets.
 pub const IDLE_NS: u64 = 2 * CELL_NS + CELL_NS / 2;
 
+/// The offset of the last level change that puts `bits` on the line, in
+/// units of `1/per_ns` ns from the first edge: inside the last cell, at its
+/// start if the bit before it differs, at its middle if the two are alike
+/// ([`encode_in`]). For a frame, whose last cell is the zero after it, the
+/// start when its last data bit is a 1 and the middle when a 0.
+pub fn last_edge(bits: &[bool], per_ns: u64) -> u64 {
+    encode_in(bits, per_ns).last().map_or(0, |&(t, _)| t)
+}
+
 /// The level changes that put `bits` on a line that is idle low, as
 /// `(offset_ns, level)` from the first edge. The line is low again
 /// after the last, which is why [`crate::chaos::packet::frame`] ends in
