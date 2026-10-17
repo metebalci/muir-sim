@@ -10,15 +10,23 @@
 # already held refuses a second open with EBUSY, so the next one is tried,
 # and the kernel frees a tap when its holder dies.
 #
-# **Each tap has its own address**, a /30 of its own: the host side of
-# quuxN is 169.254.1NN.1/30 and the machine behind it 169.254.1NN.2, with
-# NN the index N in two digits, so quux0's are 169.254.100.1 and .2 and
-# quux1's 169.254.101.1 and .2. At most 64 taps, so the pool ends with
-# quux63's 169.254.163.1. This script is the one place the rule lives: the
-# programs that use a tap read its address and prefix from the kernel.
-# Every tap has the same MAC address and MTU.
+# **A tap's link follows QUUX's address on it** (QUUX's Ethernet contract,
+# section 4). QUUX's address in 169.254.x.y, link-local, makes a
+# HOST-ONLY TAP: a link between this host and QUUX alone. Any other address
+# makes a LAN TAP: QUUX is a computer on the host's LAN, with an address of
+# its own, and the host answers ARP for that one address on the LAN and
+# forwards between the LAN and the tap. Every tap of the pool is host-only;
+# `--ip-address` makes quux0 a LAN tap, and quux1 up stay the pool's.
 #
-# On each tap, before it comes up:
+# **Each host-only tap has its own address**, a /30 of its own: the host
+# side of quuxN is 169.254.1NN.1/30 and the machine behind it
+# 169.254.1NN.2, with NN the index N in two digits, so quux0's are
+# 169.254.100.1 and .2 and quux1's 169.254.101.1 and .2. At most 64 taps,
+# so the pool ends with quux63's 169.254.163.1. This script is the one
+# place the rule lives: the programs that use a tap read its address and
+# prefix from the kernel. Every tap has the same MAC address and MTU.
+#
+# On each host-only tap, before it comes up:
 #   - IPv6 is off (net.ipv6.conf.quuxN.disable_ipv6=1), so Linux sends
 #     nothing of IPv6 on the link: no router solicitation, no MLD report,
 #     no address probe. QUUX's Ethernet device takes IPv4 and ARP only.
@@ -30,8 +38,52 @@
 #     route back to a packet's sender names the tap it arrived on. Linux
 #     uses the larger of conf.all and the device's own value, so a host
 #     whose conf.all is 2 still checks loosely.
+#   - proxy_arp and forwarding are 0, said explicitly: a host-only tap
+#     answers for nobody else and forwards nothing.
 #   - the host side is the tap's own address, the MAC address
 #     02:00:00:00:00:02 and the MTU 1500.
+#
+# **A LAN tap, quux0 under --ip-address A/N**, is made after the pool, in
+# the contract's order (section 4.3), the same steps as the boards' S82:
+#   1. the checks: A is muir's, not link-local, its subnet holds no
+#      link-local address, and the LAN interface L is the one interface,
+#      not a pool tap, with a connected route holding A at prefix N, whose
+#      own address A is not; refused before anything is touched;
+#   2. the tap made, if absent;
+#   3. on it: IPv6 off; arp_ignore 0, so QUUX reaches the host's own LAN
+#      address; arp_filter 1, so the host answers QUUX's ARP for its own
+#      addresses only for a sender whose route goes out of the tap;
+#      rp_filter 1, proxy_arp 1 (QUUX's ARP answered for every address
+#      routed elsewhere), forwarding 1, and the proxy delay 0, since the
+#      kernel's random 0.8 s would hold every first contact;
+#   4. the tap down, its MAC address and MTU, and NO ADDRESS: one would be
+#      answered on the LAN as well;
+#   5. the tap up, since a route needs its device up;
+#   6. the route A/32 through the tap;
+#   7. on L: forwarding 1 and the proxy delay 0, their old values kept in
+#      the run file /run/quux-taps.lan;
+#   8. ONE proxy entry, for A on L, after the route, so that the host never
+#      answers for A before it can deliver; any other proxy entry on L goes
+#      first;
+#   9. if L has an address, a warning when A is off its subnet or its prefix
+#      differs, and a refusal, undone, when A is L's own.
+# Never the global ip_forward, which resets every interface's forwarding
+# and would forward what the pool sends as well, and never proxy_arp on L
+# or on conf.all, which would answer for every address routed out of
+# another interface. The install refuses A when it is a gateway of the
+# host's routes or another machine's in L's neighbour table: the host
+# would answer for it on the LAN.
+#
+# **What forwarding on L opens.** Linux decides forwarding by the input
+# interface, so the host forwards whatever arrives on L to every route it
+# has: one way into the pool (a band's reply is dropped, its tap
+# forwarding nothing), back out of L, and into the host's other
+# interfaces. A LAN tap is for a host that stays on its LAN: L is fixed at
+# install, so install again without --ip-address before the host moves.
+# Forwarding on L also turns its LRO off, and the stop leaves it off. The stop undoes it in reverse: the proxy entry, L's
+# two values from the run file, then the tap, which takes its route and
+# its settings with it. If the LAN tap cannot be made, the pool still
+# works, quux0 is left down, and the unit fails, saying why.
 #
 # **Why a systemd oneshot unit.** A tap made by `ip tuntap` is gone at the
 # next boot. A systemd-networkd .netdev would make it again, but only where
@@ -41,33 +93,54 @@
 # unit waits for udev to settle after making the taps, so that udev's own
 # handling of a new link (a MAC address policy, sysctl.d settings for the
 # device) is done before the settings above are made, and cannot undo them.
+# With a LAN tap it wants L's device and is ordered after it; it does not
+# wait for L's lease.
+#
+# **--check** runs the contract's check (section 4.4) in throwaway network
+# namespaces that stand in for this host, a LAN switch, two LAN machines,
+# QUUX and a host-only QUUX, with documentation addresses only, and sets
+# the stand-in host up with this script's own functions. It touches none of
+# the host's interfaces. It prints seven lines, each a pass or a fail, and
+# exits non-zero on any fail; run from a muir-sim tree, its log goes to
+# notes/runs/. The install runs it first, and on a failure installs nothing
+# and leaves the old pool as it was.
 #
 # What it installs:
 #   /usr/local/sbin/quux-taps               a copy of this script
 #   /etc/systemd/system/quux-taps.service   the unit, enabled and started
 # and nothing else: no firewall rule, no sysctl.d file, no network
 # manager's configuration. --uninstall stops the unit, which deletes the
-# taps, and removes both files.
+# taps and undoes a LAN tap, and removes both files.
 #
 # usage:
-#   quux-taps [--count N] [--user U] [--dry-run]
+#   quux-taps [--count N] [--user U] [--ip-address A.B.C.D/N] [--dry-run]
+#   quux-taps --check
 #   quux-taps --uninstall [--dry-run]
 #   quux-taps --help
 #
-#   --count N    taps quux0 to quux<N-1>, 1 to 64; default 2. The host
-#                side of quuxN is 169.254.1NN.1/30, NN the index in two
-#                digits; there is no flag for another address
-#   --user U     the taps' owner; default the user who ran sudo, or the
-#                user running this with --dry-run
-#   --dry-run    print every command and the file it would write, and
-#                change nothing; needs no root
+#   --count N         taps quux0 to quux<N-1>, 1 to 64; default 2. The host
+#                     side of host-only quuxN is 169.254.1NN.1/30, NN the
+#                     index in two digits; there is no flag for another
+#                     address
+#   --user U          the taps' owner; default the user who ran sudo, or
+#                     the user running this with --dry-run
+#   --ip-address A/N  QUUX's address behind quux0, muir's flag with muir's
+#                     meaning, which makes quux0 a LAN tap on the host's LAN
+#                     interface: the one with a connected route holding A at
+#                     prefix N. A is a free address on the LAN, never
+#                     link-local. Without it every tap is host-only
+#   --check           the check, in throwaway network namespaces; as root
+#   --dry-run         print every command and the file it would write, and
+#                     change nothing; needs no root
 #
 # The unit itself runs `quux-taps --up ...` at boot and `quux-taps --down`
-# at shutdown; those two are the unit's and not for use by hand.
+# at shutdown, and the check runs `quux-taps --step ...`; those are theirs
+# and not for use by hand.
 set -eu
 
 sbin=/usr/local/sbin/quux-taps
 unit=/etc/systemd/system/quux-taps.service
+lanfile=/run/quux-taps.lan
 mac=02:00:00:00:00:02
 mtu=1500
 
@@ -84,19 +157,173 @@ mode=install
 count=2
 user=
 dry=0
+ip_address=
+lan=
 while [ $# -gt 0 ]; do
     case $1 in
     --count) [ $# -ge 2 ] || die "--count needs a number"; count=$2; shift 2 ;;
     --address) die "--address is gone: each tap has its own address, the host side of quuxN at 169.254.1NN.1/30 and the machine at 169.254.1NN.2, with NN the index N in two digits (quux0: 169.254.100.1, quux1: 169.254.101.1)" ;;
     --user) [ $# -ge 2 ] || die "--user needs a user"; user=$2; shift 2 ;;
+    --ip-address) [ $# -ge 2 ] || die "--ip-address wants A.B.C.D/N, QUUX's IPv4 address behind quux0 and its prefix length"; ip_address=$2; shift 2 ;;
+    --lan-interface) [ $# -ge 2 ] || die "--lan-interface needs an interface"; lan=$2; shift 2 ;;
+    --check) mode=check; shift ;;
     --dry-run) dry=1; shift ;;
     --uninstall) mode=uninstall; shift ;;
     --up) mode=up; shift ;;
     --down) mode=down; shift ;;
+    --step) mode=step; shift; break ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
     esac
 done
+
+# --- addresses -------------------------------------------------------------
+
+# A.B.C.D, four decimal parts from 0 to 255 with no leading zero, as muir
+# reads one.
+dotted_quad() {
+    case $1 in '' | *[!0-9.]* | .* | *. | *..*) return 1 ;; esac
+    _ifs=$IFS
+    IFS=.
+    # shellcheck disable=SC2086
+    set -- $1
+    IFS=$_ifs
+    [ $# -eq 4 ] || return 1
+    for _o; do
+        case $_o in 0) ;; 0* | ????*) return 1 ;; esac
+        [ "$_o" -le 255 ] || return 1
+    done
+}
+
+# A.B.C.D as one number; it is a dotted quad already.
+quad_value() {
+    _ifs=$IFS
+    IFS=.
+    # shellcheck disable=SC2086
+    set -- $1
+    IFS=$_ifs
+    echo $(($1 * 16777216 + $2 * 65536 + $3 * 256 + $4))
+}
+
+# The netmask of prefix $1 as one number.
+netmask() {
+    echo $(((4294967295 << (32 - $1)) & 4294967295))
+}
+
+# $1 and $2 on one subnet of prefix $3.
+same_subnet() {
+    _m=$(netmask "$3")
+    [ $(($(quad_value "$1") & _m)) -eq $(($(quad_value "$2") & _m)) ]
+}
+
+# **--ip-address as muir takes it** (muir-sim src/ethernet_socket.rs,
+# parse_ip_address, in its words), then the pool's rule: not link-local,
+# and no link-local address on its subnet. Sets q and n, or refuses.
+check_ip_address() {
+    _a=$1
+    _wants="--ip-address wants A.B.C.D/N, QUUX's IPv4 address and its prefix length: \"$_a\""
+    case $_a in */*) ;; *) die "$_wants" ;; esac
+    q=${_a%/*}
+    _p=${_a#*/}
+    case $_p in '' | ??? | *[!0-9]*) die "$_wants" ;; esac
+    dotted_quad "$q" || die "$_wants"
+    # Two digits may start with 0, which the shell's arithmetic reads as
+    # octal.
+    case ${#_p} in 1) n=$_p ;; *) n=$((1$_p - 100)) ;; esac
+    if [ "$n" -lt 1 ] || [ "$n" -gt 30 ]; then
+        die "--ip-address $_a: a prefix length of $n; it is 1 to 30, so that the subnet holds QUUX's address and its gateway besides its network and broadcast addresses"
+    fi
+    _v=$(quad_value "$q")
+    _m=$(netmask "$n")
+    _h=$((4294967295 & ~_m))
+    _first=${q%%.*}
+    _why=
+    if [ "$_first" -eq 0 ]; then
+        _why="in 0.x.x.x, this network"
+    elif [ "$_first" -eq 127 ]; then
+        _why="in 127.x.x.x, loopback"
+    elif [ "$_first" -ge 224 ] && [ "$_first" -le 239 ]; then
+        _why="from 224.0.0.0 to 239.255.255.255, multicast"
+    elif [ "$_first" -ge 240 ]; then
+        _why="from 240.0.0.0 up, reserved"
+    elif [ $((_v & _h)) -eq 0 ]; then
+        _why="the subnet's network address"
+    elif [ $((_v & _h)) -eq "$_h" ]; then
+        _why="the subnet's broadcast address"
+    fi
+    [ -z "$_why" ] || die "--ip-address $_a: not a host's address: $_why"
+    case $q in
+    169.254.*) die "--ip-address $_a: a link-local address (169.254.x.y) makes a host-only tap, and every tap of the pool is one already; --ip-address takes an address on the LAN, which makes quux0 a LAN tap" ;;
+    esac
+    # A LAN tap's subnet takes in no 169.254.x.y address: its gateway and
+    # the pool's host sides could otherwise be on QUUX's subnet, mixing the
+    # two kinds of tap.
+    if [ "$n" -le 16 ] && same_subnet "$q" 169.254.0.1 "$n"; then
+        die "--ip-address $_a: its subnet holds the link-local addresses (169.254.x.y) of the host-only taps, which mixes a LAN tap with the pool; give the LAN's own prefix"
+    fi
+}
+
+# The word after `dev` in an `ip -o` line, without a veth's @peer.
+dev_of() {
+    while [ $# -gt 1 ]; do
+        if [ "$1" = dev ]; then
+            echo "${2%@*}"
+            return
+        fi
+        shift
+    done
+}
+
+# A pool tap's name: quux and digits.
+pool_name() {
+    case $1 in quux*) ;; *) return 1 ;; esac
+    case ${1#quux} in '' | *[!0-9]*) return 1 ;; esac
+}
+
+# **The LAN interface**: every interface, not a pool tap and not loopback,
+# with a connected route (no gateway) holding $1 at prefix $2, one a line.
+lan_candidates() {
+    ip -4 -o route show table main | while read -r _d _rest; do
+        case $_d in [0-9]*) ;; *) continue ;; esac
+        case " $_rest " in *" via "*) continue ;; esac
+        case $_d in */*) _p=${_d#*/} _d=${_d%/*} ;; *) _p=32 ;; esac
+        [ "$_p" = "$2" ] || continue
+        dotted_quad "$_d" || continue
+        # shellcheck disable=SC2086
+        _dev=$(dev_of $_rest)
+        case $_dev in '' | lo) continue ;; esac
+        ! pool_name "$_dev" || continue
+        same_subnet "$1" "$_d" "$2" || continue
+        echo "$_dev"
+    done | sort -u
+}
+
+# The gateways of the host's routes, one a line: the LAN's routers.
+routers() {
+    ip -4 -o route show table main | while read -r _d _rest; do
+        # shellcheck disable=SC2086
+        set -- $_rest
+        while [ $# -gt 1 ]; do
+            [ "$1" != via ] || echo "$2"
+            shift
+        done
+    done | sort -u
+}
+
+# L's own IPv4 addresses, A.B.C.D/N, one a line.
+own_addresses() {
+    ip -4 -o address show | while read -r _i _dev _inet _a _rest; do
+        [ "${_dev%@*}" = "$1" ] && [ "$_inet" = inet ] && echo "$_a"
+    done
+}
+
+# The addresses of the proxy entries on L, one a line.
+proxy_on() {
+    ip neigh show proxy | while read -r _a _rest; do
+        # shellcheck disable=SC2086
+        [ "$(dev_of $_rest)" = "$1" ] && echo "$_a"
+    done
+}
 
 # --- the arguments ---------------------------------------------------------
 
@@ -108,14 +335,31 @@ case $count in 0?*) die "--count wants a number from 1 to 64, not '$count'" ;; e
 [ "$count" -ge 1 ] && [ "$count" -le 64 ] ||
     die "--count wants a number from 1 to 64, not '$count'"
 
+if [ -n "$ip_address" ]; then
+    case $mode in
+    install | up) ;;
+    *) die "--ip-address goes with an install, not with --$mode" ;;
+    esac
+    check_ip_address "$ip_address"
+fi
+if [ -n "$lan" ]; then
+    [ "$mode" = up ] && [ -n "$ip_address" ] ||
+        die "--lan-interface is the unit's, given with --up and --ip-address; an install finds the LAN interface itself"
+elif [ "$mode" = up ] && [ -n "$ip_address" ]; then
+    die "--up --ip-address wants --lan-interface, as the unit gives it"
+fi
+if [ "$mode" = check ] && [ "$dry" -eq 1 ]; then
+    die "--check has no dry run: it changes nothing outside its own namespaces, and runs as root"
+fi
+
 root=0
 [ "$(id -u)" -eq 0 ] && root=1
 
-if [ "$mode" = install ] || [ "$mode" = up ]; then
+if [ "$mode" = install ] || [ "$mode" = up ] || [ "$mode" = step ]; then
     if [ -z "$user" ]; then
         if [ -n "${SUDO_USER:-}" ]; then
             user=$SUDO_USER
-        elif [ "$root" -eq 0 ]; then
+        elif [ "$root" -eq 0 ] || [ "$mode" = step ]; then
             user=$(id -un)
         else
             die "name the taps' owner with --user"
@@ -124,31 +368,211 @@ if [ "$mode" = install ] || [ "$mode" = up ]; then
     id -u -- "$user" >/dev/null 2>&1 || die "no such user: $user"
 fi
 
+# **The LAN interface, found at install** (section 4.4), before anything
+# is touched and before the question of root.
+if [ "$mode" = install ] && [ -n "$ip_address" ]; then
+    lans=$(lan_candidates "$q" "$n")
+    case $lans in
+    '') die "--ip-address $ip_address: no interface but the pool's taps has a connected route holding $q at prefix $n, so there is no LAN interface for it; give a free address of the LAN this host is on, with the LAN's prefix (ip -4 route shows it)" ;;
+    *"
+"*) die "--ip-address $ip_address: $(echo $lans | sed 's/ / and /g') each have a connected route holding $q at prefix $n; a LAN tap needs one LAN interface" ;;
+    esac
+    lan=$lans
+    for a in $(own_addresses "$lan"); do
+        [ "${a%/*}" != "$q" ] || die "--ip-address $ip_address: $q is $lan's own address; QUUX takes a free address of the LAN"
+    done
+    # Nobody else's: the host would answer ARP for it on the LAN, at once,
+    # and take its traffic.
+    for g in $(routers); do
+        [ "$g" != "$q" ] || die "--ip-address $ip_address: $q is a router's, a gateway of this host's routes; QUUX takes a free address of the LAN"
+    done
+    ip neigh show to "$q" dev "$lan" | while read -r _a _rest; do
+        [ "$_a" = "$q" ] || continue
+        # shellcheck disable=SC2086
+        set -- $_rest
+        eval "_state=\${$#}"
+        case $_state in
+        REACHABLE | STALE | DELAY | PROBE | PERMANENT) exit 1 ;;
+        esac
+    done || die "--ip-address $ip_address: $lan's neighbour table shows another machine that answers for $q; QUUX takes a free address of the LAN"
+fi
+
+if [ "$mode" = install ] && [ -n "$ip_address" ]; then
+    command -v systemd-escape >/dev/null 2>&1 ||
+        die "systemd's systemd-escape is not here; the unit names the LAN interface's device by it" 1
+fi
+
 if [ "$root" -eq 0 ] && [ "$dry" -eq 0 ]; then
+    if [ "$mode" = check ]; then
+        die "--check makes network namespaces and must run as root (sudo)" 1
+    fi
     die "this changes the system and must run as root (sudo), or with --dry-run to see what it would do" 1
 fi
 
 # --- doing, or saying ------------------------------------------------------
 
-# Every command is printed; with --dry-run it is only printed.
+# Every command is printed; with --dry-run it is only printed. The last one
+# is kept, to say which failed.
+last=
 run() {
+    last=$*
     echo "$*"
     [ "$dry" -eq 1 ] || "$@"
 }
 
-# The taps this pool owns now: tun devices named quux<digits>.
+# The taps this pool owns now, quux0 up: tun devices named quux<digits>.
 pool_now() {
     for d in /sys/class/net/quux*; do
         [ -e "$d/tun_flags" ] || continue
-        n=${d##*/}
-        case ${n#quux} in '' | *[!0-9]*) continue ;; esac
-        echo "$n"
+        t=${d##*/}
+        pool_name "$t" || continue
+        echo "${t#quux}"
+    done | sort -n | sed 's/^/quux/'
+}
+
+# **A host-only tap's settings**, $1 named and of index $2, once it is made:
+# the contract's list (section 4.3), the board's own.
+host_only_tap() {
+    _t=$1
+    # A kernel booted without IPv6 has no such sysctl, and nothing to turn
+    # off.
+    if [ "$dry" -eq 1 ] || [ -d "/proc/sys/net/ipv6/conf/$_t" ]; then
+        run sysctl -q -w "net.ipv6.conf.$_t.disable_ipv6=1" || return 1
+    fi
+    run sysctl -q -w "net.ipv4.conf.$_t.arp_ignore=2" || return 1
+    run sysctl -q -w "net.ipv4.conf.$_t.rp_filter=1" || return 1
+    run sysctl -q -w "net.ipv4.conf.$_t.proxy_arp=0" || return 1
+    run sysctl -q -w "net.ipv4.conf.$_t.forwarding=0" || return 1
+    run ip link set dev "$_t" down || return 1
+    run ip link set dev "$_t" address "$mac" mtu "$mtu" || return 1
+    run ip address flush dev "$_t" || return 1
+    # quuxN's host side: 169.254.1NN.1/30, NN being N in two digits.
+    run ip address add "169.254.$((100 + $2)).1/30" dev "$_t" || return 1
+    run ip link set dev "$_t" up
+}
+
+# **The pool**, host-only taps quux$1 to quux<count-1>: every tap made,
+# udev settled, then each set up.
+make_pool() {
+    k=$1
+    while [ "$k" -lt "$count" ]; do
+        run ip tuntap add dev "quux$k" mode tap user "$user"
+        k=$((k + 1))
+    done
+    # udev handles each new link; its settings must land before ours.
+    if [ "$1" -lt "$count" ] && { [ "$dry" -eq 1 ] || command -v udevadm >/dev/null 2>&1; }; then
+        run udevadm settle
+    fi
+    k=$1
+    while [ "$k" -lt "$count" ]; do
+        host_only_tap "quux$k" "$k"
+        k=$((k + 1))
     done
 }
 
+# A value the run file $1 keeps: $2 the key.
+saved() {
+    sed -n "s/^$2 //p" "$1" 2>/dev/null
+}
+
+# **A LAN tap, in the contract's order** (section 4.3): the tap $1 for
+# QUUX's address $3 at prefix $4, on the LAN interface $2, keeping L's
+# values in the run file $5. The checks of step 1 that need no root were
+# made at install; here L must be present. On a failure `why` says why,
+# and the caller undoes it.
+lan_up() {
+    _t=$1 _l=$2 _q=$3 _n=$4 _f=$5
+    why=
+    if [ "$dry" -eq 0 ] && [ ! -e "/sys/class/net/$_l" ]; then
+        why="the LAN interface $_l is not here"
+        return 1
+    fi
+    # 2. The tap, if absent.
+    if [ "$dry" -eq 1 ] || [ ! -e "/sys/class/net/$_t" ]; then
+        run ip tuntap add dev "$_t" mode tap user "$user" || return 1
+        if [ "$dry" -eq 1 ] || command -v udevadm >/dev/null 2>&1; then
+            run udevadm settle || return 1
+        fi
+    fi
+    # 3. Its settings.
+    if [ "$dry" -eq 1 ] || [ -d "/proc/sys/net/ipv6/conf/$_t" ]; then
+        run sysctl -q -w "net.ipv6.conf.$_t.disable_ipv6=1" || return 1
+    fi
+    run sysctl -q -w "net.ipv4.conf.$_t.arp_ignore=0" || return 1
+    run sysctl -q -w "net.ipv4.conf.$_t.arp_filter=1" || return 1
+    run sysctl -q -w "net.ipv4.conf.$_t.rp_filter=1" || return 1
+    run sysctl -q -w "net.ipv4.conf.$_t.proxy_arp=1" || return 1
+    run sysctl -q -w "net.ipv4.conf.$_t.forwarding=1" || return 1
+    run sysctl -q -w "net.ipv4.neigh.$_t.proxy_delay=0" || return 1
+    # 4. Down, its MAC address and MTU, and no address.
+    run ip link set dev "$_t" down || return 1
+    run ip link set dev "$_t" address "$mac" mtu "$mtu" || return 1
+    run ip address flush dev "$_t" || return 1
+    # 5, 6. Up, and QUUX's address routed to it.
+    run ip link set dev "$_t" up || return 1
+    run ip route replace "$_q/32" dev "$_t" || return 1
+    # 7. L's two values kept, then set.
+    echo "# write $_f: tap, lan, quux, and $_l's forwarding and proxy_delay as they are"
+    if [ "$dry" -eq 0 ]; then
+        _fw=$(cat "/proc/sys/net/ipv4/conf/$_l/forwarding") || return 1
+        _pd=$(cat "/proc/sys/net/ipv4/neigh/$_l/proxy_delay") || return 1
+        printf 'tap %s\nlan %s\nquux %s\nforwarding %s\nproxy_delay %s\n' \
+            "$_t" "$_l" "$_q" "$_fw" "$_pd" >"$_f.new" || return 1
+        mv "$_f.new" "$_f" || return 1
+    fi
+    run sysctl -q -w "net.ipv4.conf.$_l.forwarding=1" || return 1
+    run sysctl -q -w "net.ipv4.neigh.$_l.proxy_delay=0" || return 1
+    # 8. Any other proxy entry on L goes: it would answer again as soon as a
+    # route took its address out of the tap. Then QUUX's.
+    for _o in $(proxy_on "$_l"); do
+        [ "$_o" = "$_q" ] || run ip neigh del proxy "$_o" dev "$_l" || return 1
+    done
+    run ip neigh add proxy "$_q" dev "$_l" || return 1
+    # 9. L's own address, if the lease has come.
+    if [ "$dry" -eq 0 ]; then
+        for _a in $(own_addresses "$_l"); do
+            if [ "${_a%/*}" = "$_q" ]; then
+                why="$_q is $_l's own address"
+                return 1
+            fi
+            if [ "${_a#*/}" != "$_n" ] || ! same_subnet "$_q" "${_a%/*}" "$_n"; then
+                echo "quux-taps: warning: QUUX's $_q/$_n is not on $_l's subnet, $_a; the LAN tap is made all the same" >&2
+            fi
+        done
+    fi
+}
+
+# A LAN tap's LAN side undone from its run file $1: the proxy entry, then
+# L's two values as they were, then the run file.
+lan_undo() {
+    [ -f "$1" ] || return 0
+    _l=$(saved "$1" lan)
+    _q=$(saved "$1" quux)
+    _fw=$(saved "$1" forwarding)
+    _pd=$(saved "$1" proxy_delay)
+    [ -z "$_q" ] || run ip neigh del proxy "$_q" dev "$_l" || :
+    [ -z "$_fw" ] || run sysctl -q -w "net.ipv4.conf.$_l.forwarding=$_fw" || :
+    [ -z "$_pd" ] || run sysctl -q -w "net.ipv4.neigh.$_l.proxy_delay=$_pd" || :
+    run rm -f "$1"
+}
+
+# **The LAN tap's stop** (section 4.3, "The stop"), from its run file $1:
+# the LAN side undone, then the tap down and deleted, which takes its route
+# and its settings with it.
+lan_down() {
+    [ -f "$1" ] || return 0
+    _tap=$(saved "$1" tap)
+    lan_undo "$1"
+    if [ -n "$_tap" ] && { [ "$dry" -eq 1 ] || [ -e "/sys/class/net/$_tap" ]; }; then
+        run ip link set dev "$_tap" down || :
+        run ip link delete dev "$_tap" || :
+    fi
+}
+
 down() {
-    for n in $(pool_now); do
-        run ip link delete dev "$n"
+    lan_down "$lanfile"
+    for t in $(pool_now); do
+        run ip link delete dev "$t"
     done
 }
 
@@ -156,49 +580,46 @@ up() {
     # Whatever is left of an earlier pool goes first, so the pool is exactly
     # quux0 to quux<count-1>, each made afresh.
     down
-    make_pool
+    if [ -z "$ip_address" ]; then
+        make_pool 0
+        return
+    fi
+    make_pool 1
+    if ! lan_up quux0 "$lan" "$q" "$n" "$lanfile"; then
+        why=${why:-"$last failed"}
+        lan_undo "$lanfile" || :
+        if [ -e /sys/class/net/quux0 ]; then
+            run ip link set dev quux0 down || :
+        fi
+        die "the LAN tap quux0 for $ip_address on $lan is not made: $why. It is undone and down; the pool's host-only taps are up. \`systemctl restart quux-taps.service\` tries again" 1
+    fi
 }
 
-make_pool() {
-    k=0
-    while [ "$k" -lt "$count" ]; do
-        run ip tuntap add dev "quux$k" mode tap user "$user"
-        k=$((k + 1))
-    done
-    # udev handles each new link; its settings must land before ours.
-    if [ "$dry" -eq 1 ] || command -v udevadm >/dev/null 2>&1; then
-        run udevadm settle
-    fi
-    k=0
-    while [ "$k" -lt "$count" ]; do
-        n=quux$k
-        # A kernel booted without IPv6 has no such sysctl, and nothing to
-        # turn off.
-        if [ "$dry" -eq 1 ] || [ -d "/proc/sys/net/ipv6/conf/$n" ]; then
-            run sysctl -q -w "net.ipv6.conf.$n.disable_ipv6=1"
-        fi
-        run sysctl -q -w "net.ipv4.conf.$n.arp_ignore=2"
-        run sysctl -q -w "net.ipv4.conf.$n.rp_filter=1"
-        run ip link set dev "$n" address "$mac" mtu "$mtu"
-        # quuxN's host side: 169.254.1NN.1/30, NN being N in two digits.
-        run ip address add "169.254.$((100 + k)).1/30" dev "$n"
-        run ip link set dev "$n" up
-        k=$((k + 1))
-    done
+# The unit's --up arguments.
+up_args() {
+    echo "--up --count $count --user $user${ip_address:+ --ip-address $ip_address --lan-interface $lan}"
 }
 
 unit_text() {
     taps=quux0
     [ "$count" -eq 1 ] || taps="quux0 to quux$((count - 1))"
+    echo "# Written by quux-taps; \`quux-taps --uninstall\` removes it."
+    echo "[Unit]"
+    if [ -n "$ip_address" ]; then
+        echo "Description=QUUX tap pool: $taps, owned by $user; quux0 a LAN tap on $lan"
+        # systemd's own name for L's device: a dash in L is \x2d there.
+        devunit=$(systemd-escape --path --suffix=device "/sys/subsystem/net/devices/$lan")
+        echo "Wants=$devunit"
+        echo "After=$devunit"
+    else
+        echo "Description=QUUX tap pool: $taps, owned by $user"
+    fi
     cat <<EOF
-# Written by quux-taps; \`quux-taps --uninstall\` removes it.
-[Unit]
-Description=QUUX tap pool: $taps, owned by $user
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=$sbin --up --count $count --user $user
+ExecStart=$sbin $(up_args)
 ExecStop=$sbin --down
 
 [Install]
@@ -206,44 +627,86 @@ WantedBy=multi-user.target
 EOF
 }
 
+# What starting the unit will run, said with dry set.
+up_text() {
+    if [ -z "$ip_address" ]; then
+        make_pool 0
+    else
+        make_pool 1
+        lan_up quux0 "$lan" "$q" "$n" "$lanfile"
+    fi
+}
+
+# What stopping the unit will run, for the pool this install makes.
+stop_text() {
+    k=0
+    if [ -n "$ip_address" ]; then
+        echo "ip neigh del proxy $q dev $lan"
+        echo "sysctl -q -w net.ipv4.conf.$lan.forwarding=<from $lanfile>"
+        echo "sysctl -q -w net.ipv4.neigh.$lan.proxy_delay=<from $lanfile>"
+        echo "rm -f $lanfile"
+        echo "ip link set dev quux0 down"
+        echo "ip link delete dev quux0"
+        k=1
+    fi
+    while [ "$k" -lt "$count" ]; do
+        echo "ip link delete dev quux$k"
+        k=$((k + 1))
+    done
+}
+
 install_pool() {
     command -v systemctl >/dev/null 2>&1 || [ "$dry" -eq 1 ] ||
         die "systemd's systemctl is not here; the pool is a systemd unit" 1
     self=$(readlink -f "$0")
+    # The check first: on a failure nothing is installed, and the pool
+    # running now is left as it is.
+    run sh "$self" --check ||
+        die "the check failed, so nothing is installed and the pool is as it was; its lines are above" 1
+    # Both files are made beside their places first, so that a failure
+    # before the stop leaves the old pool running, and one after it never
+    # leaves half a file.
+    if [ "$self" != "$sbin" ]; then
+        run install -D -m 0755 "$self" "$sbin.new"
+    fi
+    echo "# write $unit.new, mode 0644:"
+    unit_text | sed 's/^/| /'
+    echo "# end of $unit.new"
+    if [ "$dry" -eq 0 ]; then
+        umask 022
+        unit_text >"$unit.new"
+        chmod 0644 "$unit.new"
+    fi
     # A pool already running is taken down by its own unit before either
     # file changes.
     if [ "$dry" -eq 1 ] || [ -e "$unit" ]; then
         run systemctl stop quux-taps.service
     fi
+    back="the old pool is stopped; \`sudo systemctl start quux-taps.service\` starts it again from the unit in place, and \`journalctl -u quux-taps.service\` says why it failed"
     if [ "$self" != "$sbin" ]; then
-        run install -D -m 0755 "$self" "$sbin"
+        run mv -f "$sbin.new" "$sbin" || die "$sbin.new is not moved into place: $back" 1
     fi
-    echo "# write $unit, mode 0644:"
-    unit_text | sed 's/^/| /'
-    echo "# end of $unit"
-    if [ "$dry" -eq 0 ]; then
-        umask 022
-        unit_text >"$unit.new"
-        chmod 0644 "$unit.new"
-        mv "$unit.new" "$unit"
-    fi
-    run systemctl daemon-reload
-    run systemctl enable --now quux-taps.service
-    echo "# starting the unit runs $sbin --up --count $count --user $user:"
+    run mv -f "$unit.new" "$unit" || die "$unit.new is not moved into place: $back" 1
+    run systemctl daemon-reload || die "systemctl daemon-reload failed: $back" 1
+    run systemctl enable --now quux-taps.service ||
+        die "the new unit did not start; \`journalctl -u quux-taps.service\` says why. Its pool is down or partly up: \`sudo systemctl restart quux-taps.service\` tries again, and \`sudo $sbin --uninstall\` removes it" 1
+    echo "# starting the unit runs $sbin $(up_args):"
     # Say what the unit will do; it does it itself. The stop above took any
     # earlier pool down, so there is nothing for its first step to delete.
     real_dry=$dry
     dry=1
-    make_pool | sed 's/^/>   /'
+    up_text | sed 's/^/>   /'
     dry=$real_dry
+    echo "# stopping the unit runs $sbin --down:"
+    stop_text | sed 's/^/<   /'
 }
 
 uninstall_pool() {
     if [ "$dry" -eq 1 ] || [ -e "$unit" ]; then
         run systemctl disable --now quux-taps.service
     fi
-    # The unit's stop deletes the taps; this catches a unit that was not
-    # running.
+    # The unit's stop deletes the taps and undoes a LAN tap; this catches a
+    # unit that was not running.
     down
     if [ "$dry" -eq 1 ] || [ -e "$unit" ]; then
         run rm -f "$unit"
@@ -254,9 +717,743 @@ uninstall_pool() {
     fi
 }
 
+# **The check's own entries**: the stand-in host set up, in its namespace,
+# by the functions above, with the namespace's names.
+#   --step host-only TAP INDEX
+#   --step lan-up TAP LAN ADDRESS PREFIX RUN-FILE
+#   --step lan-down RUN-FILE
+step() {
+    case ${1:-} in
+    host-only) [ $# -eq 3 ] || die "--step host-only TAP INDEX"; host_only_tap "$2" "$3" ;;
+    lan-up)
+        [ $# -eq 6 ] || die "--step lan-up TAP LAN ADDRESS PREFIX RUN-FILE"
+        lan_up "$2" "$3" "$4" "$5" "$6" || die "the LAN tap $2 on $3 is not made: ${why:-"$last failed"}" 1
+        ;;
+    lan-down) [ $# -eq 2 ] || die "--step lan-down RUN-FILE"; lan_down "$2" ;;
+    *) die "--step is the check's: host-only, lan-up or lan-down" ;;
+    esac
+}
+
+# **The check** (section 4.4), as root: the program below, in python3.
+check() {
+    command -v python3 >/dev/null 2>&1 ||
+        die "--check wants python3, for its ARP, its sniffers and its listener" 1
+    command -v ping >/dev/null 2>&1 || die "--check wants ping" 1
+    self=$(readlink -f "$0")
+    work=$(mktemp -d "${TMPDIR:-/tmp}/quux-taps-check.XXXXXX")
+    trap 'rm -rf "$work"' EXIT
+    trap 'rm -rf "$work"; exit 130' INT TERM HUP
+    check_program >"$work/check.py"
+    log=
+    notes=$(dirname "$self")/../notes
+    if [ -d "$notes" ]; then
+        mkdir -p "$notes/runs"
+        log=$(cd "$notes/runs" && pwd)/quux-taps-check-$(date -u +%Y%m%dT%H%M%SZ).log
+    fi
+    status=0
+    python3 -I -B "$work/check.py" --self "$self" --work "$work" ${log:+--log "$log"} || status=$?
+    if [ -n "$log" ]; then
+        if [ -n "${SUDO_USER:-}" ]; then
+            chown -h "$SUDO_USER" "$log" 2>/dev/null || :
+        fi
+        echo "quux-taps --check: its log is $log"
+    fi
+    return "$status"
+}
+
+check_program() {
+    cat <<'CHECK_PROGRAM'
+"""quux-taps --check: QUUX's Ethernet contract, section 4.4, in throwaway
+network namespaces with documentation addresses.
+
+Namespaces stand in for the host (H), a LAN switch (S), two LAN machines
+(L1, L2; L2 also the router at .1), QUUX (Q) and a host-only QUUX (Q2):
+
+    L1 192.0.2.20 --+
+    L2 192.0.2.30 --+-- S (a bridge) -- lan0 192.0.2.10 H quux0 -- Q 192.0.2.50/24
+       and .1     --+                                     quux1 -- Q2 169.254.101.2/30
+
+H's quux0 and quux1 are veth links rather than taps, so that the kernel in
+Q and Q2 plays QUUX; H is set up by quux-taps' own functions (--step). It
+prints seven lines, each a pass or a fail, and exits 1 on any fail. Run as
+`--role ROLE ...` inside a namespace, it is one of the check's helpers.
+"""
+
+import json
+import os
+import re
+import select
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+H_LAN, L1_IP, L2_IP, ROUTER, Q_IP, PREFIX = "192.0.2.10", "192.0.2.20", "192.0.2.30", "192.0.2.1", "192.0.2.50", 24
+LAN_BROADCAST = "192.0.2.255"
+Q2_IP, Q2_GW, POOL0_HOST = "169.254.101.2", "169.254.101.1", "169.254.100.1"
+PLANTED = "198.51.100.7"
+QUUX_MAC, HOST_MAC = "02:00:00:00:00:01", "02:00:00:00:00:02"
+# Line 2's addresses, asked three times each before H's LAN tap and after.
+ASKED = [Q_IP, "192.0.2.49", "192.0.2.51", "192.0.2.99", L2_IP, ROUTER, POOL0_HOST, Q2_GW, Q2_IP, PLANTED]
+L2_ADDRESSES = [L2_IP, ROUTER]
+# Line 5's other addresses, asked for once each.
+OTHERS = ["192.0.2.%d" % k for k in range(100, 120)]
+LIMIT_MS = 50.0
+BANNER = "quux-taps check"
+ECHO_BYTES = 1 << 20
+PINGS = 100
+ETH_P_ALL, ETH_P_ARP = 0x0003, 0x0806
+PACKET_OUTGOING = 4
+
+# Line 1: what H reads once its LAN tap and its host-only tap are set up.
+EXPECTED = {
+    "net.ipv4.conf.all.forwarding": "0",
+    "net.ipv4.conf.default.forwarding": "0",
+    "net.ipv4.conf.all.proxy_arp": "0",
+    "net.ipv4.conf.lan0.proxy_arp": "0",
+    "net.ipv4.conf.lan0.forwarding": "1",
+    "net.ipv4.conf.quux0.forwarding": "1",
+    "net.ipv4.conf.quux0.proxy_arp": "1",
+    "net.ipv4.conf.quux0.arp_ignore": "0",
+    "net.ipv4.conf.quux0.arp_filter": "1",
+    "net.ipv4.conf.quux0.rp_filter": "1",
+    "net.ipv4.neigh.quux0.proxy_delay": "0",
+    "net.ipv4.neigh.lan0.proxy_delay": "0",
+    "net.ipv4.conf.quux1.forwarding": "0",
+    "net.ipv4.conf.quux1.proxy_arp": "0",
+    "net.ipv4.conf.quux1.arp_ignore": "2",
+}
+# Line 7: what the stop puts back as it was at the start.
+UNDONE = [
+    "net.ipv4.conf.all.forwarding",
+    "net.ipv4.conf.default.forwarding",
+    "net.ipv4.conf.all.proxy_arp",
+    "net.ipv4.conf.lan0.proxy_arp",
+    "net.ipv4.conf.lan0.forwarding",
+    "net.ipv4.neigh.lan0.proxy_delay",
+]
+NAMES = [
+    "the settings",
+    "the ARP difference",
+    "latency",
+    "reach",
+    "isolation",
+    "a host-only tap stays host-only",
+    "the stop",
+]
+REACH = ["L1 to Q", "Q to L1", "Q to the router", "Q to H", "H to Q"]
+
+
+# --- frames ---------------------------------------------------------------
+
+def mac_bytes(text):
+    return bytes.fromhex(text.replace(":", ""))
+
+
+def mac_text(b):
+    return ":".join("%02x" % x for x in b)
+
+
+def arp_request(src_mac, src_ip, target):
+    """A broadcast ARP request from `src_mac` at `src_ip` for `target`."""
+    m = mac_bytes(src_mac)
+    return (b"\xff" * 6 + m + struct.pack("!H", ETH_P_ARP)
+            + struct.pack("!HHBBH", 1, 0x0800, 6, 4, 1)
+            + m + socket.inet_aton(src_ip) + bytes(6) + socket.inet_aton(target))
+
+
+def arp_reply(f):
+    """An ARP reply's sender, (IPv4 address, MAC address), or None."""
+    if len(f) < 42 or f[12:14] != b"\x08\x06":
+        return None
+    if struct.unpack("!HHBBH", f[14:22]) != (1, 0x0800, 6, 4, 2):
+        return None
+    return socket.inet_ntoa(f[28:32]), mac_text(f[22:28])
+
+
+def frame(f):
+    """An Ethernet frame's type, MAC addresses and IPv4 destination."""
+    if len(f) < 14:
+        return {"type": None, "dst": None, "src": None, "ip_dst": None}
+    t = struct.unpack("!H", f[12:14])[0]
+    ip_dst = socket.inet_ntoa(f[30:34]) if t == 0x0800 and len(f) >= 34 else None
+    return {"type": t, "dst": mac_text(f[0:6]), "src": mac_text(f[6:12]), "ip_dst": ip_dst}
+
+
+def ping_counts(text):
+    m = re.search(r"(\d+) packets transmitted, (\d+) received", text)
+    return [int(m.group(1)), int(m.group(2))] if m else None
+
+
+# --- judging --------------------------------------------------------------
+
+def j_settings(r):
+    s = r["settings"]
+    fails = []
+    for k, v in EXPECTED.items():
+        got = s["sysctl"].get(k)
+        if got != v:
+            fails.append(f"{k} is {got}, not {v}")
+    if s["quux0 addresses"]:
+        fails.append("quux0 has an IPv4 address: " + ", ".join(s["quux0 addresses"]))
+    if f"{Q_IP} dev quux0" not in s["routes"]:
+        fails.append(f"no route {Q_IP}/32 dev quux0")
+    if sorted(s["proxy"]) != [f"{Q_IP} dev lan0"]:
+        fails.append("the proxy entries are " + (", ".join(s["proxy"]) or "none") + f", not {Q_IP} dev lan0 alone")
+    return fails
+
+
+def answered_by(table, mac):
+    return {t for t, macs in table.items() if mac in macs}
+
+
+def j_arp(r):
+    lan, l2, before, after = r["lan_mac"], r["l2_mac"], r["baseline"], r["after"]
+    fails = []
+    for t in ASKED:
+        if t not in before or t not in after:
+            fails.append(f"{t} not asked")
+    b, a = answered_by(before, lan), answered_by(after, lan)
+    if Q_IP in b:
+        fails.append(f"{Q_IP} answered by H before its LAN tap")
+    if a - b != {Q_IP}:
+        fails.append("H's answers grew by " + (", ".join(sorted(a - b)) or "nothing") + f", not {Q_IP} alone")
+    if b - a:
+        fails.append("H no longer answers " + ", ".join(sorted(b - a)))
+    for when, table in (("before", before), ("after", after)):
+        for t, macs in table.items():
+            if t in L2_ADDRESSES:
+                if sorted(macs) != [l2]:
+                    fails.append(f"{t} answered {when} by {', '.join(macs) or 'nobody'}, not by L2 alone")
+            elif set(macs) - {lan}:
+                fails.append(f"{t} answered {when} by " + ", ".join(sorted(set(macs) - {lan})))
+    return fails
+
+
+def j_latency(r):
+    t = r["latency"]
+    fails = []
+    if len(t) != 20:
+        fails.append(f"{len(t)} asks, not 20")
+    lost = sum(1 for x in t if x is None)
+    if lost:
+        fails.append(f"{lost} of {len(t)} asks unanswered")
+    slow = [x for x in t if x is not None and x >= LIMIT_MS]
+    if slow:
+        fails.append("replies at " + ", ".join(f"{x:.1f} ms" for x in slow) + f", not under {LIMIT_MS:.0f} ms")
+    return fails
+
+
+def j_reach(r):
+    x = r["reach"]
+    fails = []
+    for k in REACH:
+        sent, got = x[k]
+        if sent != PINGS or got != PINGS:
+            fails.append(f"{k}: {got} of {sent} pings")
+    if x["H's source"] != H_LAN:
+        source = x["H's source"]
+        fails.append(f"H pings Q from {source}, not {H_LAN}")
+    if x["banner"] != BANNER:
+        fails.append(f"L1's TCP to {Q_IP}:23 got {x['banner']!r}, not Q's banner")
+    if not x["echo"]:
+        fails.append(f"the echo of {ECHO_BYTES} bytes came back other than sent")
+    return fails
+
+
+def describe(f):
+    t = "?" if f["type"] is None else "0x%04x" % f["type"]
+    return f"{t} {f['src']} to {f['dst']}" + (f" ({f['ip_dst']})" if f["ip_dst"] else "")
+
+
+def j_isolation(r):
+    fails = []
+    bad = [f for f in r["q_frames"]
+           if not ((f["type"] == 0x0800 and f["dst"] == QUUX_MAC and f["ip_dst"] == Q_IP)
+                   or (f["type"] == 0x0806 and f["src"] == HOST_MAC))]
+    if bad:
+        fails.append(f"Q saw {len(bad)} frames it should not: " + "; ".join(describe(f) for f in bad[:8]))
+    seen = [f for f in r["l1_frames"] if f["src"] == QUUX_MAC]
+    if seen:
+        fails.append(f"L1 saw QUUX's MAC address {QUUX_MAC} in {len(seen)} frames")
+    return fails
+
+
+def j_host_only(r):
+    n = r["host_only"]
+    return [f"{n} replies from {Q2_IP} reached L1"] if n else []
+
+
+def j_stop(r):
+    s, start = r["stopped"], r["start"]
+    fails = []
+    for k in UNDONE:
+        if s["sysctl"].get(k) != start.get(k):
+            fails.append(f"{k} is {s['sysctl'].get(k)}, not the start's {start.get(k)}")
+    if s["proxy"]:
+        fails.append("proxy entries left: " + ", ".join(s["proxy"]))
+    norm = lambda t: {k: sorted(v) for k, v in t.items()}
+    if norm(s["arp"]) != norm(r["baseline"]):
+        diff = [k for k in ASKED if sorted(s["arp"].get(k, [])) != sorted(r["baseline"].get(k, []))]
+        fails.append("ARP answers differ from the baseline's for " + ", ".join(diff))
+    return fails
+
+
+JUDGES = [j_settings, j_arp, j_latency, j_reach, j_isolation, j_host_only, j_stop]
+
+
+def judge(r):
+    """The seven lines as [(name, why)], why empty for a pass."""
+    out = []
+    for name, j in zip(NAMES, JUDGES):
+        try:
+            why = "; ".join(j(r))
+        except (KeyError, TypeError, ValueError) as e:
+            why = "no result" + (f": {r['errors'][name]}" if name in r.get("errors", {}) else f" ({type(e).__name__}: {e})")
+        out.append((name, why))
+    return out
+
+
+def report(judged):
+    """The lines to print, and whether all passed."""
+    lines, failed = [], []
+    for n, (name, why) in enumerate(judged, 1):
+        lines.append(f"line {n}, {name}: " + (f"FAIL: {why}" if why else "pass"))
+        if why:
+            failed.append(str(n))
+    if failed:
+        lines.append(f"quux-taps --check: FAILED (line{'s' if len(failed) > 1 else ''} {', '.join(failed)})")
+    else:
+        lines.append("quux-taps --check: passed")
+    return lines, not failed
+
+
+# --- the helpers, inside a namespace ---------------------------------------
+
+def raw(iface, proto):
+    s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(proto))
+    s.bind((iface, 0))
+    return s
+
+
+def own_mac(iface):
+    with open(f"/sys/class/net/{iface}/address") as f:
+        return f.read().strip()
+
+
+def role_arp_ask(iface, src, targets):
+    """Three asks for each target; who answered each, by MAC address."""
+    s = raw(iface, ETH_P_ARP)
+    mac = own_mac(iface)
+    targets = targets.split(",")
+    answers = {t: set() for t in targets}
+
+    def collect(seconds):
+        end = time.monotonic() + seconds
+        while (left := end - time.monotonic()) > 0:
+            if not select.select([s], [], [], left)[0]:
+                continue
+            data, addr = s.recvfrom(65536)
+            if addr[2] == PACKET_OUTGOING:
+                continue
+            got = arp_reply(data)
+            if got and got[0] in answers:
+                answers[got[0]].add(got[1])
+
+    for t in targets:
+        for _ in range(3):
+            s.send(arp_request(mac, src, t))
+            collect(0.1)
+    collect(0.3)
+    return {t: sorted(v) for t, v in answers.items()}
+
+
+def role_arp_latency(iface, src, target, count):
+    """Broadcast asks for target, one at a time; each reply's time in ms."""
+    s = raw(iface, ETH_P_ARP)
+    mac = own_mac(iface)
+    times = []
+    for _ in range(int(count)):
+        t0 = time.monotonic()
+        s.send(arp_request(mac, src, target))
+        got = None
+        while (left := t0 + 1.0 - time.monotonic()) > 0 and got is None:
+            if not select.select([s], [], [], left)[0]:
+                continue
+            data, addr = s.recvfrom(65536)
+            reply = arp_reply(data)
+            if addr[2] != PACKET_OUTGOING and reply and reply[0] == target:
+                got = (time.monotonic() - t0) * 1000.0
+        times.append(got)
+        time.sleep(0.05)
+    return times
+
+
+def ready_then_wait(sock_list, each):
+    """Say ready, then serve `sock_list` with `each` until stdin closes."""
+    print("ready", flush=True)
+    while True:
+        r = select.select(sock_list + [sys.stdin], [], [])[0]
+        if sys.stdin in r and not sys.stdin.readline():
+            return
+        for s in r:
+            if s is not sys.stdin:
+                each(s)
+
+
+def role_sniff(iface):
+    """Every frame arriving on iface until stdin closes."""
+    s = raw(iface, ETH_P_ALL)
+    frames = []
+
+    def each(sock):
+        data, addr = sock.recvfrom(65536)
+        if addr[2] != PACKET_OUTGOING and len(frames) < 5000:
+            frames.append(frame(data))
+
+    ready_then_wait([s], each)
+    return frames
+
+
+def role_listen(address, port):
+    """Q's listener: a banner, then everything echoed back."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((address, int(port)))
+    srv.listen(4)
+
+    def serve(c):
+        try:
+            c.sendall((BANNER + "\r\n").encode())
+            while data := c.recv(65536):
+                c.sendall(data)
+        except OSError:
+            pass
+        finally:
+            c.close()
+
+    def each(sock):
+        c, _ = sock.accept()
+        threading.Thread(target=serve, args=(c,), daemon=True).start()
+
+    ready_then_wait([srv], each)
+    return {}
+
+
+def role_echo(address, port, size):
+    """L1's TCP to Q: the banner, and `size` bytes echoed byte for byte."""
+    c = socket.create_connection((address, int(port)), timeout=10)
+    held = b""
+    while b"\r\n" not in held:
+        got = c.recv(4096)
+        if not got:
+            break
+        held += got
+    banner, _, held = held.partition(b"\r\n")
+    data = os.urandom(int(size))
+
+    def send():
+        c.sendall(data)
+        c.shutdown(socket.SHUT_WR)
+
+    t = threading.Thread(target=send, daemon=True)
+    t.start()
+    while len(held) < len(data):
+        got = c.recv(65536)
+        if not got:
+            break
+        held += got
+    t.join(10)
+    c.close()
+    return {"banner": banner.decode(errors="replace"), "echo": held == data}
+
+
+def role_isolation(iface, src):
+    """L1's sends that must not reach Q: ARP for other addresses, an IPv6
+    frame to ff02::1, a broadcast 0x0804 frame, UDP to both broadcasts."""
+    s = raw(iface, ETH_P_ALL)
+    mac = mac_bytes(own_mac(iface))
+    for t in OTHERS:
+        s.send(arp_request(mac_text(mac), src, t))
+    all_nodes = bytes.fromhex("ff020000000000000000000000000001")
+    ipv6 = struct.pack("!IHBB", 6 << 28, 8, 58, 1) + bytes.fromhex("fe800000000000000000000000000001") + all_nodes
+    s.send(bytes.fromhex("333300000001") + mac + b"\x86\xdd" + ipv6 + struct.pack("!BBHI", 128, 0, 0, 0))
+    s.send(b"\xff" * 6 + mac + b"\x08\x04" + bytes(46))
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    u.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    u.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
+    for to in ("255.255.255.255", LAN_BROADCAST):
+        u.sendto(BANNER.encode(), (to, 9))
+    return {}
+
+
+def role_settings():
+    """What line 1 and line 7 read in H."""
+    def sysctl(name):
+        try:
+            with open("/proc/sys/" + name.replace(".", "/")) as f:
+                return f.read().strip()
+        except OSError:
+            return None
+
+    def ip(*args):
+        return subprocess.run(["ip", *args], capture_output=True, text=True).stdout.splitlines()
+
+    def entry(line):
+        w = line.split()
+        dev = w[w.index("dev") + 1] if "dev" in w else "?"
+        return f"{w[0]} dev {dev}"
+
+    names = sorted(set(EXPECTED) | set(UNDONE))
+    return {
+        "sysctl": {k: sysctl(k) for k in names},
+        "quux0 addresses": [l.split()[3] for l in ip("-4", "-o", "address", "show", "dev", "quux0") if " inet " in l],
+        "routes": [entry(l) for l in ip("-4", "-o", "route", "show", "table", "main") if l.strip()],
+        "proxy": [entry(l) for l in ip("neigh", "show", "proxy") if l.strip()],
+    }
+
+
+ROLES = {
+    "arp-ask": role_arp_ask,
+    "arp-latency": role_arp_latency,
+    "sniff": role_sniff,
+    "listen": role_listen,
+    "echo": role_echo,
+    "isolation": role_isolation,
+    "settings": role_settings,
+}
+
+
+# --- the run, as root ------------------------------------------------------
+
+class Failed(Exception):
+    pass
+
+
+class Check:
+    def __init__(self, self_path, work, log):
+        self.script = self_path
+        self.work = work
+        # A new file: never one already there, nor a link planted at its
+        # name, since this runs as root in a tree its user can write.
+        self.log = open(log, "x") if log else None
+        self.ns = {k: f"qtc{os.getpid()}{k}" for k in ("h", "s", "l1", "l2", "q", "q2")}
+        self.made = []
+        self.background = []
+
+    def note(self, text):
+        if self.log:
+            self.log.write(text + "\n")
+            self.log.flush()
+
+    def say(self, text):
+        print(text, flush=True)
+        self.note(text)
+
+    def sh(self, *argv, ns=None, check=True, timeout=120):
+        """A command, in namespace `ns`. Nothing runs in the host's own
+        namespace but `ip netns`, which makes and removes the namespaces."""
+        argv = list(argv)
+        if ns is None:
+            assert argv[:2] == ["ip", "netns"], argv
+            cmd = argv
+        else:
+            cmd = ["ip", "netns", "exec", self.ns[ns]] + argv
+        self.note("$ " + " ".join(cmd))
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        for line in (p.stdout + p.stderr).splitlines()[:200]:
+            self.note("  " + line)
+        if check and p.returncode:
+            raise Failed(f"{' '.join(argv)} in {ns or 'the host'}: " + (p.stderr.strip() or f"status {p.returncode}"))
+        return p
+
+    def role(self, ns, *args, timeout=120):
+        p = self.sh(sys.executable, "-I", "-B", __file__, "--role", *args, ns=ns, timeout=timeout)
+        return json.loads(p.stdout)
+
+    def start(self, ns, *args):
+        cmd = ["ip", "netns", "exec", self.ns[ns], sys.executable, "-I", "-B", __file__, "--role", *args]
+        self.note("$ " + " ".join(cmd) + " &")
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.background.append(p)
+        if not select.select([p.stdout], [], [], 15)[0] or p.stdout.readline().strip() != "ready":
+            p.kill()
+            raise Failed(f"{' '.join(args)} in {ns} did not start: " + p.stderr.read(2000).strip())
+        return p
+
+    def finish(self, p):
+        out, err = p.communicate(input="", timeout=60)
+        self.note("  " + out[:2000] + err[:2000])
+        return json.loads(out)
+
+    def ping(self, ns, to, count=PINGS):
+        p = self.sh("ping", "-c", str(count), "-i", "0.01", "-W", "1", "-q", to, ns=ns, check=False)
+        return ping_counts(p.stdout) or [count, 0]
+
+    def step(self, *args):
+        self.sh("sh", self.script, "--step", *args, ns="h")
+
+    def setup(self):
+        for k, name in self.ns.items():
+            self.sh("ip", "netns", "add", name)
+            self.made.append(name)
+            self.sh("ip", "link", "set", "lo", "up", ns=k)
+        for k in ("s", "l1", "l2", "q", "q2"):
+            for c in ("all", "default"):
+                self.sh("sysctl", "-q", "-w", f"net.ipv6.conf.{c}.disable_ipv6=1", ns=k, check=False)
+        self.sh("ip", "link", "add", "br0", "type", "bridge", "stp_state", "0", ns="s")
+        self.sh("ip", "link", "set", "br0", "up", ns="s")
+        for ns, here, there in (("h", "lan0", "sh"), ("l1", "eth0", "s1"), ("l2", "eth0", "s2")):
+            self.sh("ip", "link", "add", here, "type", "veth", "peer", "name", there, "netns", self.ns["s"], ns=ns)
+            self.sh("ip", "link", "set", there, "master", "br0", ns="s")
+            self.sh("ip", "link", "set", there, "up", ns="s")
+        self.sh("ip", "link", "add", "quux0", "type", "veth", "peer", "name", "eth0", "netns", self.ns["q"], ns="h")
+        self.sh("ip", "link", "add", "quux1", "type", "veth", "peer", "name", "eth0", "netns", self.ns["q2"], ns="h")
+        for ns, dev, addresses in (("h", "lan0", [f"{H_LAN}/{PREFIX}"]),
+                                   ("l1", "eth0", [f"{L1_IP}/{PREFIX}"]),
+                                   ("l2", "eth0", [f"{L2_IP}/{PREFIX}", f"{ROUTER}/{PREFIX}"]),
+                                   ("q", "eth0", [f"{Q_IP}/{PREFIX}"]),
+                                   ("q2", "eth0", [f"{Q2_IP}/30"])):
+            if ns in ("q", "q2"):
+                self.sh("ip", "link", "set", dev, "address", QUUX_MAC, ns=ns)
+            for a in addresses:
+                self.sh("ip", "address", "add", a, "dev", dev, ns=ns)
+            self.sh("ip", "link", "set", dev, "up", ns=ns)
+        self.sh("ip", "route", "add", "default", "via", ROUTER, ns="q")
+        self.sh("ip", "route", "add", "default", "via", Q2_GW, ns="q2")
+
+    def mac(self, ns, dev):
+        return self.sh("cat", f"/sys/class/net/{dev}/address", ns=ns).stdout.strip()
+
+    def ask(self):
+        return self.role("l1", "arp-ask", "eth0", L1_IP, ",".join(ASKED))
+
+    def run(self):
+        r = {"errors": {}}
+
+        def part(name, f):
+            try:
+                f()
+            except (Failed, OSError, subprocess.SubprocessError, ValueError, KeyError) as e:
+                r["errors"][name] = str(e)
+                self.note(f"! {name}: {e}")
+
+        def prepare():
+            self.setup()
+            r["start"] = {k: v for k, v in self.role("h", "settings")["sysctl"].items() if k in UNDONE}
+            r["lan_mac"], r["l2_mac"] = self.mac("h", "lan0"), self.mac("l2", "eth0")
+            self.step("host-only", "quux1", "1")
+            r["baseline"] = self.ask()
+            self.step("lan-up", "quux0", "lan0", Q_IP, str(PREFIX), os.path.join(self.work, "check.lan"))
+
+        def settings():
+            r["settings"] = self.role("h", "settings")
+
+        def arp():
+            self.sh("ip", "route", "add", f"{PLANTED}/32", "dev", "quux0", ns="h")
+            r["after"] = self.ask()
+
+        def latency():
+            r["latency"] = (self.role("l1", "arp-latency", "eth0", L1_IP, Q_IP, "10")
+                            + self.role("q", "arp-latency", "eth0", Q_IP, L1_IP, "10"))
+
+        l1_sniff = []
+
+        def reach():
+            l1_sniff.append(self.start("l1", "sniff", "eth0"))
+            listener = self.start("q", "listen", "0.0.0.0", "23")
+            x = {"L1 to Q": self.ping("l1", Q_IP), "Q to L1": self.ping("q", L1_IP),
+                 "Q to the router": self.ping("q", ROUTER), "Q to H": self.ping("q", H_LAN),
+                 "H to Q": self.ping("h", Q_IP)}
+            route = self.sh("ip", "-4", "route", "get", Q_IP, ns="h").stdout.split()
+            x["H's source"] = route[route.index("src") + 1] if "src" in route else None
+            x.update(self.role("l1", "echo", Q_IP, "23", str(ECHO_BYTES)))
+            self.finish(listener)
+            r["reach"] = x
+
+        def isolation():
+            q_sniff = self.start("q", "sniff", "eth0")
+            time.sleep(0.3)
+            self.role("l1", "isolation", "eth0", L1_IP)
+            self.sh("ping", "-b", "-c", "3", "-i", "0.2", "-W", "1", LAN_BROADCAST, ns="l1", check=False)
+            time.sleep(0.5)
+            r["q_frames"] = self.finish(q_sniff)
+            if not l1_sniff:
+                raise Failed("L1's sniffer did not run, since line 4 failed to start")
+            r["l1_frames"] = self.finish(l1_sniff[0])
+
+        def host_only():
+            self.sh("ip", "route", "add", f"{Q2_IP}/32", "via", H_LAN, ns="l1")
+            r["host_only"] = self.ping("l1", Q2_IP, 5)[1]
+
+        def stop():
+            self.step("lan-down", os.path.join(self.work, "check.lan"))
+            s = self.role("h", "settings")
+            r["stopped"] = {"sysctl": s["sysctl"], "proxy": s["proxy"], "arp": self.ask()}
+
+        part("the settings", prepare)
+        if not r["errors"]:
+            for name, f in zip(NAMES, [settings, arp, latency, reach, isolation, host_only, stop]):
+                part(name, f)
+        else:
+            for name in NAMES:
+                r["errors"][name] = r["errors"]["the settings"]
+        self.note(json.dumps(r, indent=1, default=str))
+        return r
+
+    def close(self):
+        for p in self.background:
+            if p.poll() is None:
+                p.kill()
+        for name in self.made:
+            try:
+                self.sh("ip", "netns", "del", name, check=False)
+            except (Failed, OSError, subprocess.SubprocessError) as e:
+                self.note(f"! ip netns del {name}: {e}")
+        if self.log:
+            self.log.close()
+
+
+def main(argv):
+    if argv[:1] == ["--role"]:
+        print(json.dumps(ROLES[argv[1]](*argv[2:])), flush=True)
+        return 0
+    args = dict(zip(argv[::2], argv[1::2]))
+
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)
+
+    # A SIGTERM or SIGHUP ends the run through close(), as ^C does, and
+    # nothing cuts close() short: the namespaces always go.
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGHUP, stop)
+    c = Check(args["--self"], args["--work"], args.get("--log"))
+    ok = False
+    try:
+        c.say("quux-taps --check: the LAN tap and the pool in throwaway network namespaces")
+        lines, ok = report(judge(c.run()))
+        for line in lines:
+            c.say(line)
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)
+        c.close()
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+CHECK_PROGRAM
+}
+
 case $mode in
 install) install_pool ;;
 uninstall) uninstall_pool ;;
 up) up ;;
 down) down ;;
+step) step "$@" ;;
+check) check ;;
 esac

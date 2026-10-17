@@ -28,10 +28,26 @@ on stdout: the tap, and the two flags quux wants behind it, for example
 
   quux1 --ip-address 169.254.101.2/30 --ip-gateway 169.254.101.1
 
-It reads them from the kernel: the tap's own address and prefix, which is
-the host side and so the machine's gateway, and the /30's other host
-address, which is the machine's. The rule that gives each tap its address
-lives in quux-taps alone. quux0's are muir's defaults.
+It reads them from the kernel. A host-only tap has a /30 of its own: its
+own address and prefix are the host side and so the machine's gateway,
+and the /30's other host address is the machine's. The rule that gives
+each tap its address lives in quux-taps alone. quux0's are muir's
+defaults, so a machine behind a host-only quux0 needs no flags.
+
+**A LAN tap**, quux0 under `quux-taps --ip-address`, has no address of
+its own, and the line is read from the kernel too, for example
+
+  quux0 --ip-address 192.0.2.50/24 --ip-gateway 192.0.2.1
+
+the machine's address from the tap's /32 route, the LAN interface from
+the one proxy entry for that address, the prefix from the LAN interface's
+connected route, and the gateway from the default route on the LAN
+interface; one off the machine's subnet, or none, is refused, naming
+--ip-gateway. Before it takes a LAN tap it reads quux-taps' settings back
+(/proc/sys, `ip neigh show proxy`, the tap's /32 and its being up); if one
+is gone, it refuses and names the fix:
+
+  sudo systemctl restart quux-taps.service
 
 **The warning.** When the machine sends an ARP or IPv4 Ethernet frame
 from another address than its tap's QUUX address, the mover says so once
@@ -59,6 +75,7 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
 import sys
 
 PROGRAM = "ethernet-frame-mover"
@@ -81,6 +98,14 @@ TAKEN = 75
 
 ETHERTYPE_IPV4 = 0x0800
 ETHERTYPE_ARP = 0x0806
+
+
+# What puts a LAN tap's settings back: quux-taps' unit, started again.
+FIX = "sudo systemctl restart quux-taps.service"
+
+# <linux/route.h>.
+RTF_GATEWAY = 0x0002
+IFF_UP = 0x1
 
 
 class Refused(Exception):
@@ -136,27 +161,27 @@ def open_tap(name):
     return fd
 
 
-def is_tap(name):
-    return os.path.exists(f"/sys/class/net/{name}/tun_flags")
-
-
-def take(names, named):
-    """The first of `names` that can be taken, as (name, fd). A tap that is
-    taken is passed for the next; when none is left, the refusal says why
-    for each."""
+def take(names, named, kernel=None):
+    """The first of `names` that can be taken, as (name, fd, quux, line):
+    the tap, its descriptor, QUUX's address behind it and the line. A tap
+    that is taken is passed for the next; when none is left, the refusal
+    says why for each. A LAN tap whose settings are gone is refused, before
+    it is opened, for the whole run."""
+    kernel = kernel or Kernel()
     why = []
     for name in names:
         if len(name.encode()) >= IFNAMSIZ or "/" in name or not name:
             why.append(f"{name}: not a network interface's name")
             continue
-        if not os.path.exists(f"/sys/class/net/{name}"):
+        if not kernel.exists(name):
             why.append(f"{name}: no such tap")
             continue
-        if not is_tap(name):
+        if not kernel.is_tap(name):
             why.append(f"{name}: not a tap")
             continue
+        quux, line = tap_line(name, kernel)
         try:
-            return name, open_tap(name)
+            return name, open_tap(name), quux, line
         except OSError as e:
             if e.errno == errno.EBUSY:
                 why.append(f"{name}: taken: another program holds it")
@@ -169,12 +194,13 @@ def take(names, named):
     raise Refused(f"no tap of {where} could be taken: " + "; ".join(why), TAKEN if every_taken else 1)
 
 
-def pool():
+def pool(kernel=None):
     """The pool from quux0 up, as far as it goes."""
+    kernel = kernel or Kernel()
     names = []
     for k in range(POOL_MAX):
         name = f"{POOL}{k}"
-        if not os.path.exists(f"/sys/class/net/{name}"):
+        if not kernel.exists(name):
             break
         names.append(name)
     if not names:
@@ -183,7 +209,8 @@ def pool():
 
 
 def tap_addresses(name):
-    """The tap's own IPv4 address and netmask, from the kernel."""
+    """The tap's own IPv4 address and netmask, from the kernel, or None for
+    a tap with no address."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         out = []
@@ -191,11 +218,172 @@ def tap_addresses(name):
             try:
                 r = fcntl.ioctl(s.fileno(), request, ifreq(name))
             except OSError as e:
-                raise Refused(f"{name}: no IPv4 address: {e.strerror}; quux-taps gives each tap one")
+                if e.errno == errno.EADDRNOTAVAIL:
+                    return None
+                raise Refused(f"{name}: its IPv4 address cannot be read: {e.strerror}")
             out.append(struct.unpack("!I", r[20:24])[0])
         return out[0], out[1]
     finally:
         s.close()
+
+
+class Kernel:
+    """What the mover reads of the kernel, unprivileged: the network
+    interfaces, a tap's address, the routes (/proc/net/route, the main
+    table), /proc/sys and the proxy entries (`ip neigh show proxy`)."""
+
+    def exists(self, name):
+        return os.path.exists(f"/sys/class/net/{name}")
+
+    def is_tap(self, name):
+        return os.path.exists(f"/sys/class/net/{name}/tun_flags")
+
+    def is_up(self, name):
+        try:
+            with open(f"/sys/class/net/{name}/flags") as f:
+                return bool(int(f.read().strip(), 16) & IFF_UP)
+        except (OSError, ValueError):
+            return False
+
+    def ipv4(self, name):
+        return tap_addresses(name)
+
+    def route_text(self):
+        with open("/proc/net/route") as f:
+            return f.read()
+
+    def sysctl(self, path):
+        """/proc/sys/`path`, stripped, or None when there is none."""
+        try:
+            with open(f"/proc/sys/{path}") as f:
+                return f.read().strip()
+        except OSError:
+            return None
+
+    def proxy_text(self):
+        try:
+            p = subprocess.run(["ip", "neigh", "show", "proxy"], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise Refused(f"`ip neigh show proxy` cannot run: {e}")
+        if p.returncode:
+            raise Refused(f"`ip neigh show proxy` failed: {p.stderr.strip()}")
+        return p.stdout
+
+
+def routes(text):
+    """/proc/net/route's lines as dicts: iface, dest, gateway, mask (each a
+    number, the address in network order), flags and metric. The kernel
+    prints each address as its 32 bits in the host's own order."""
+    out = []
+    for line in text.splitlines()[1:]:
+        w = line.split()
+        if len(w) < 8:
+            continue
+        native = lambda h: struct.unpack("!I", struct.pack("=I", int(h, 16)))[0]
+        out.append({"iface": w[0], "dest": native(w[1]), "gateway": native(w[2]),
+                    "flags": int(w[3], 16), "metric": int(w[6]), "mask": native(w[7])})
+    return out
+
+
+def proxy_entries(text):
+    """`ip neigh show proxy`'s lines as (address, device)."""
+    out = []
+    for line in text.splitlines():
+        w = line.split()
+        if len(w) >= 3 and "dev" in w[:-1]:
+            try:
+                out.append((struct.unpack("!I", socket.inet_aton(w[0]))[0], w[w.index("dev") + 1]))
+            except OSError:
+                continue
+    return out
+
+
+def tap_line(name, kernel):
+    """QUUX's address behind the tap `name` and the line, read from the
+    kernel: a host-only tap's from its own /30, a LAN tap's from the routes
+    and the proxy entry, once its settings are read back."""
+    own = kernel.ipv4(name)
+    if own is not None:
+        host, netmask = own
+        return quux_side(name, host, netmask), flags_line(name, host, netmask)
+    return lan_line(name, kernel)
+
+
+def lan_settings(t, lan):
+    """quux-taps' settings for a LAN tap `t` on the LAN interface `lan`
+    (QUUX's Ethernet contract, §4.3), as /proc/sys paths and values."""
+    return [
+        ("net/ipv4/conf/all/forwarding", "0"),
+        ("net/ipv4/conf/default/forwarding", "0"),
+        ("net/ipv4/conf/all/proxy_arp", "0"),
+        (f"net/ipv4/conf/{lan}/proxy_arp", "0"),
+        (f"net/ipv4/conf/{lan}/forwarding", "1"),
+        (f"net/ipv4/neigh/{lan}/proxy_delay", "0"),
+        (f"net/ipv4/conf/{t}/forwarding", "1"),
+        (f"net/ipv4/conf/{t}/proxy_arp", "1"),
+        (f"net/ipv4/conf/{t}/arp_ignore", "0"),
+        (f"net/ipv4/conf/{t}/arp_filter", "1"),
+        (f"net/ipv4/conf/{t}/rp_filter", "1"),
+        (f"net/ipv4/neigh/{t}/proxy_delay", "0"),
+    ]
+
+
+def lan_line(name, kernel):
+    """A LAN tap's QUUX address and line, or a refusal: one that names the
+    fix when quux-taps' settings are gone, one that names --ip-gateway when
+    the LAN interface has no gateway on QUUX's subnet."""
+    gone = lambda what: Refused(
+        f"{name} has no IPv4 address of its own, so it is a LAN tap, and {what}; {FIX} puts quux-taps' settings back"
+    )
+    table = routes(kernel.route_text())
+    host_routes = [r for r in table if r["iface"] == name and r["mask"] == 0xFFFFFFFF
+                   and not r["flags"] & RTF_GATEWAY]
+    if len(host_routes) != 1:
+        raise gone(f"it has {len(host_routes)} /32 routes, not the one for QUUX's address")
+    quux = host_routes[0]["dest"]
+    lans = [dev for address, dev in proxy_entries(kernel.proxy_text()) if address == quux]
+    if len(lans) != 1:
+        raise gone(f"the one proxy entry for {text(quux)}, on the LAN interface, is "
+                   + ("gone" if not lans else "on " + " and ".join(lans)))
+    lan = lans[0]
+    wrong = []
+    for path, want in lan_settings(name, lan):
+        got = kernel.sysctl(path)
+        if got != want:
+            wrong.append(f"{path.replace('/', '.')} is {got if got is not None else 'missing'}, not {want}")
+    if kernel.sysctl(f"net/ipv6/conf/{name}/disable_ipv6") not in (None, "1"):
+        wrong.append(f"net.ipv6.conf.{name}.disable_ipv6 is not 1")
+    if not kernel.is_up(name):
+        wrong.append(f"{name} is down")
+    if wrong:
+        raise gone("; ".join(wrong))
+    connected = [r for r in table if r["iface"] == lan and not r["flags"] & RTF_GATEWAY
+                 and r["mask"] != 0xFFFFFFFF and r["mask"] != 0 and quux & r["mask"] == r["dest"]]
+    if not connected:
+        raise Refused(f"{name}: {lan}, the LAN interface, has no connected route holding {text(quux)}, "
+                      "so there is no prefix for it; it comes with the LAN interface's address")
+    netmask = max(r["mask"] for r in connected)
+    n = prefix_length(netmask)
+    a = f"--ip-address {text(quux)}/{n}"
+    defaults = sorted((r for r in table if r["iface"] == lan and r["dest"] == 0 and r["mask"] == 0
+                       and r["flags"] & RTF_GATEWAY), key=lambda r: r["metric"])
+    if not defaults:
+        raise Refused(f"{name}: {lan}, the LAN interface, has no default route, so there is no gateway for "
+                      f"quux's --ip-gateway on {a}'s subnet")
+    g = defaults[0]["gateway"]
+    why = None
+    if g == quux:
+        why = "is QUUX's own address"
+    elif g & netmask != quux & netmask:
+        why = f"is off {a}'s subnet"
+    elif g & ~netmask & 0xFFFFFFFF == 0:
+        why = "is the subnet's network address"
+    elif g & ~netmask & 0xFFFFFFFF == ~netmask & 0xFFFFFFFF:
+        why = "is the subnet's broadcast address"
+    if why:
+        raise Refused(f"{name}: the default route on {lan}, the LAN interface, goes through {text(g)}, which {why}, "
+                      "so it cannot be quux's --ip-gateway")
+    return quux, f"{name} {a} --ip-gateway {text(g)}"
 
 
 def sender(frame):
@@ -217,12 +405,11 @@ class Mover:
     """The Ethernet frames between a tap's descriptor and one connection
     at a time. `err` takes the notices and the warning."""
 
-    def __init__(self, tap_fd, name, host, netmask, err=sys.stderr):
+    def __init__(self, tap_fd, name, quux, line, err=sys.stderr):
         self.tap_fd = tap_fd
         self.name = name
-        self.host = host
-        self.quux = quux_side(name, host, netmask)
-        self.line = flags_line(name, host, netmask)
+        self.quux = quux
+        self.line = line
         self.err = err
 
     def say(self, what):
@@ -354,9 +541,9 @@ def main(argv):
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     listener = None
     try:
-        name, fd = take(names if names is not None else pool(), names is not None)
-        host, netmask = tap_addresses(name)
-        mover = Mover(fd, name, host, netmask)
+        kernel = Kernel()
+        name, fd, quux, line = take(names if names is not None else pool(kernel), names is not None, kernel)
+        mover = Mover(fd, name, quux, line)
         listener = listen(path)
         print(mover.line, flush=True)
         mover.serve(listener)

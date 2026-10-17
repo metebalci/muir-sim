@@ -148,7 +148,8 @@ fn frames_move_both_ways_and_a_foreign_sender_is_warned_of_once() {
         r#"
 tap, far = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
 err = io.StringIO()
-mv = m.Mover(tap.fileno(), "quux1", ip("169.254.101.1"), mask(30), err)
+h = ip("169.254.101.1")
+mv = m.Mover(tap.fileno(), "quux1", m.quux_side("quux1", h, mask(30)), m.flags_line("quux1", h, mask(30)), err)
 assert mv.line == "quux1 --ip-address 169.254.101.2/30 --ip-gateway 169.254.101.1", mv.line
 far.settimeout(10)
 
@@ -227,4 +228,181 @@ fn a_named_tap_it_cannot_take_is_refused_with_the_reason() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("--tap NAME[,NAME...]"));
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A host's kernel as the mover reads it, standing in for `/proc/net/route`,
+/// `/proc/sys`, `ip neigh show proxy`, the taps' addresses and their
+/// flags: quux0 a LAN tap for 192.0.2.50/24 on `eth0`, whose router is
+/// 192.0.2.1, set up as `quux-taps` sets it (QUUX's Ethernet contract,
+/// §4.3), and quux1 a host-only tap.
+const KERNEL: &str = r#"
+def rt(iface, dest, mask_bits, gateway="0.0.0.0", flags=1, metric=0):
+    def h(t):
+        return "%08X" % struct.unpack("=I", socket.inet_aton(t))[0]
+    return f"{iface}\t{h(dest)}\t{h(gateway)}\t{flags:04X}\t0\t0\t{metric}\t{h(m.text(mask(mask_bits)) if mask_bits else '0.0.0.0')}\t0\t0\t0\n"
+
+HEADER = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+ROUTES = (HEADER + rt("eth0", "0.0.0.0", 0, "192.0.2.1", 3, 100) + rt("eth0", "192.0.2.0", 24, metric=100)
+          + rt("quux0", "192.0.2.50", 32, flags=5) + rt("eth0", "198.51.100.0", 24, "192.0.2.1", 3))
+SYSCTLS = {
+    "net/ipv4/conf/all/forwarding": "0", "net/ipv4/conf/default/forwarding": "0",
+    "net/ipv4/conf/all/proxy_arp": "0", "net/ipv4/conf/eth0/proxy_arp": "0",
+    "net/ipv4/conf/eth0/forwarding": "1", "net/ipv4/neigh/eth0/proxy_delay": "0",
+    "net/ipv4/conf/quux0/forwarding": "1", "net/ipv4/conf/quux0/proxy_arp": "1",
+    "net/ipv4/conf/quux0/arp_ignore": "0", "net/ipv4/conf/quux0/arp_filter": "1",
+    "net/ipv4/conf/quux0/rp_filter": "1", "net/ipv4/neigh/quux0/proxy_delay": "0",
+    "net/ipv6/conf/quux0/disable_ipv6": "1",
+}
+
+class Fake(m.Kernel):
+    def __init__(self, routes=ROUTES, sysctls=None, proxy="192.0.2.50 dev eth0 proxy \n",
+                 addresses=None, up=("quux0", "quux1")):
+        self.r, self.p, self.u = routes, proxy, set(up)
+        self.s = dict(SYSCTLS if sysctls is None else sysctls)
+        self.a = {"quux1": (ip("169.254.101.1"), mask(30))} if addresses is None else addresses
+    def route_text(self):
+        return self.r
+    def sysctl(self, path):
+        return self.s.get(path)
+    def proxy_text(self):
+        return self.p
+    def ipv4(self, name):
+        return self.a.get(name)
+    def is_up(self, name):
+        return name in self.u
+    def exists(self, name):
+        return name in ("quux0", "quux1", "eth0")
+    def is_tap(self, name):
+        return name.startswith("quux")
+
+def refused(kernel, *says, name="quux0"):
+    try:
+        got = m.tap_line(name, kernel)
+    except m.Refused as e:
+        for s in says:
+            assert s in str(e), (s, str(e))
+        return str(e)
+    raise AssertionError(f"taken: {got}")
+"#;
+
+/// **On a LAN tap the line is read from the kernel** (§3, "A LAN tap";
+/// amendment 3, §5.2): QUUX's address from quux0's /32, the prefix from
+/// the LAN interface's connected route, the LAN interface named by the
+/// proxy entry for that address, and the gateway from the default route on
+/// it; a host-only tap's line is as before. **Fails** a mover that prints
+/// the pool's /30 rule for a LAN tap, takes the prefix from anywhere but
+/// L's connected route, or a gateway from another interface.
+#[test]
+fn a_lan_tap_s_line_is_read_from_the_kernel() {
+    passes(&format!(
+        "{KERNEL}\n{}",
+        r#"
+assert m.tap_line("quux0", Fake()) == (ip("192.0.2.50"), "quux0 --ip-address 192.0.2.50/24 --ip-gateway 192.0.2.1"), m.tap_line("quux0", Fake())
+q, line = m.tap_line("quux1", Fake())
+assert line == "quux1 --ip-address 169.254.101.2/30 --ip-gateway 169.254.101.1", line
+assert m.text(q) == "169.254.101.2"
+# The lowest metric of two default routes on L; a default route on another
+# interface is not L's.
+two = ROUTES + rt("eth0", "0.0.0.0", 0, "192.0.2.254", 3, 50) + rt("eth1", "0.0.0.0", 0, "192.0.2.7", 3, 1)
+assert m.tap_line("quux0", Fake(routes=two))[1].endswith("--ip-gateway 192.0.2.254")
+# A /25 inside L's /24 that is not connected (through a gateway) is not
+# the prefix.
+via = ROUTES + rt("eth0", "192.0.2.0", 25, "192.0.2.1", 3)
+assert m.tap_line("quux0", Fake(routes=via))[1] == "quux0 --ip-address 192.0.2.50/24 --ip-gateway 192.0.2.1"
+"#
+    ));
+}
+
+/// **A LAN tap's gateway must pass muir's refusals, or the mover refuses
+/// and names `--ip-gateway`** (amendment 3, §5.2): no default route on L,
+/// one through a gateway off QUUX's subnet, at QUUX's own address, or at
+/// the subnet's broadcast address; and with no connected route for QUUX's
+/// address on L there is no prefix. **Fails** a line printed with a
+/// gateway muir would refuse.
+#[test]
+fn a_lan_tap_s_gateway_off_its_subnet_is_refused_by_name() {
+    passes(&format!(
+        "{KERNEL}\n{}",
+        r#"
+no_default = HEADER + rt("eth0", "192.0.2.0", 24) + rt("quux0", "192.0.2.50", 32, flags=5)
+refused(Fake(routes=no_default), "--ip-gateway", "eth0")
+other_iface = no_default + rt("eth1", "0.0.0.0", 0, "192.0.2.1", 3)
+refused(Fake(routes=other_iface), "--ip-gateway")
+for g in ["198.51.100.1", "192.0.2.50", "192.0.2.255", "192.0.2.0"]:
+    refused(Fake(routes=no_default + rt("eth0", "0.0.0.0", 0, g, 3)), "--ip-gateway", g)
+no_prefix = HEADER + rt("eth0", "0.0.0.0", 0, "192.0.2.1", 3) + rt("quux0", "192.0.2.50", 32, flags=5)
+refused(Fake(routes=no_prefix), "eth0", "connected route")
+"#
+    ));
+}
+
+/// **Before it takes a LAN tap the mover reads its settings back, and
+/// refuses with the fix when one is gone** (amendment 3, §5.2): each of
+/// §4.3's settings on quux0 and on L, `conf.all` and `conf.default`
+/// forwarding (a later global `ip_forward`), `proxy_arp` on all or on L,
+/// the proxy entry, quux0's /32 and quux0 being up; each refusal names the
+/// setting and `sudo systemctl restart quux-taps.service`, and no tap is
+/// opened. **Fails** a mover that takes a LAN tap whose host side a network
+/// manager or a global write has undone.
+#[test]
+fn a_lan_tap_whose_settings_are_gone_is_refused_with_the_fix() {
+    passes(&format!(
+        "{KERNEL}\n{}",
+        r#"
+FIX = "sudo systemctl restart quux-taps.service"
+assert m.FIX == FIX
+wrong = {"0": "1", "1": "0"}
+for path, value in SYSCTLS.items():
+    s = dict(SYSCTLS)
+    s[path] = wrong[value]
+    refused(Fake(sysctls=s), FIX, path.replace("/", "."))
+    s = dict(SYSCTLS)
+    del s[path]
+    if path != "net/ipv6/conf/quux0/disable_ipv6":
+        refused(Fake(sysctls=s), FIX, path.replace("/", "."))
+# A kernel without IPv6 has nothing to turn off.
+s = dict(SYSCTLS); del s["net/ipv6/conf/quux0/disable_ipv6"]
+assert m.tap_line("quux0", Fake(sysctls=s))[0] == ip("192.0.2.50")
+s = dict(SYSCTLS); s["net/ipv4/neigh/eth0/proxy_delay"] = "80"
+refused(Fake(sysctls=s), FIX, "proxy_delay")
+refused(Fake(proxy=""), FIX, "proxy entry")
+refused(Fake(proxy="192.0.2.51 dev eth0 proxy \n"), FIX, "proxy entry")
+refused(Fake(proxy="192.0.2.50 dev eth0 proxy \n192.0.2.50 dev eth1 proxy \n"), FIX, "proxy entry", "eth1")
+refused(Fake(up=("quux1",)), FIX, "down")
+no_route = HEADER + rt("eth0", "0.0.0.0", 0, "192.0.2.1", 3) + rt("eth0", "192.0.2.0", 24)
+refused(Fake(routes=no_route), FIX, "/32")
+two = ROUTES + rt("quux0", "198.51.100.7", 32, flags=5)
+refused(Fake(routes=two), FIX, "/32")
+# Taking: the refusal comes before any tap is opened, and is the run's.
+def no_open(name):
+    raise AssertionError(f"{name} opened")
+m.open_tap = no_open
+try:
+    m.take(["quux0", "quux1"], False, Fake(proxy=""))
+    raise AssertionError("taken")
+except m.Refused as e:
+    assert FIX in str(e) and e.status == 1, str(e)
+"#
+    ));
+}
+
+/// **The warning on a LAN tap names its own flags** (§3): a band sending
+/// from another address than quux0's LAN address is told the line's
+/// flags. **Fails** a warning with the pool's rule for a LAN tap.
+#[test]
+fn a_lan_tap_s_warning_names_its_flags() {
+    passes(&format!(
+        "{KERNEL}\n{}",
+        r#"
+tap, far = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+err = io.StringIO()
+q, line = m.tap_line("quux0", Fake())
+mv = m.Mover(tap.fileno(), "quux0", q, line, err)
+mv.to_tap(arp("169.254.100.2"), False)
+w = err.getvalue()
+assert "--ip-address 192.0.2.50/24 --ip-gateway 192.0.2.1" in w and "169.254.100.2" in w, w
+err.truncate(0); err.seek(0)
+assert not mv.to_tap(arp("192.0.2.50"), False) and err.getvalue() == ""
+"#
+    ));
 }

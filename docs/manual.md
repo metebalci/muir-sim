@@ -694,7 +694,10 @@ network and broadcast addresses are refused, and so are 0.x.x.x, 127.x.x.x
 and every address from 224.0.0.0 up (RFC 1122 §3.2.1.3). Behind the tap
 `quuxN` of [`quux-taps`'s pool](../tools/README.md#quux-taps) it is
 169.254.1NN.2/30, NN the tap's index in two digits; the Ethernet frame
-mover prints the flags for the tap it took. The start says it. A
+mover prints the flags for the tap it took. Any address that is not
+link-local is a LAN address: behind `quux0` made a LAN tap by `quux-taps
+--ip-address`, the machine is on the host's LAN, and the mover prints
+that address with the LAN's router. The start says it. A
 checkpoint carries it, and a resume under another, given or by default, is
 refused. The CADR and revisions below 16 refuse the flag.
 
