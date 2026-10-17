@@ -74,11 +74,21 @@
 # host's routes or another machine's in L's neighbour table: the host
 # would answer for it on the LAN.
 #
-# **What forwarding on L opens.** Linux decides forwarding by the input
-# interface, so the host forwards whatever arrives on L to every route it
-# has: one way into the pool (a band's reply is dropped, its tap
-# forwarding nothing), back out of L, and into the host's other
-# interfaces. A LAN tap is for a host that stays on its LAN: L is fixed at
+# **The link-local rule.** Right after the tap is made, before any
+# forwarding is on, every routing rule at priority 1169 is removed and two
+# are added: `iif L to $link_local blackhole` and the same for `iif
+# quux0`. Nothing that arrives on L or on the LAN tap for a link-local
+# destination is forwarded, so nothing on the LAN and no QUUX on a LAN tap
+# reaches a host-only tap through the host; the host's own traffic, which
+# has no input interface, and its own link-local addresses (the local
+# table, priority 0) are not touched. The rules need policy routing
+# (CONFIG_IP_MULTIPLE_TABLES); without it the LAN tap is refused and
+# undone. The stop removes them after L's forwarding is back; a start with
+# no LAN tap removes any left and adds none.
+#
+# **What forwarding on L still opens.** Linux decides forwarding by the
+# input interface, so the host forwards what else arrives on L to every
+# route it has: back out of L, and into the host's other interfaces. A LAN tap is for a host that stays on its LAN: L is fixed at
 # install, so install again without --ip-address before the host moves.
 # Forwarding on L also turns its LRO off, and the stop leaves it off. The stop undoes it in reverse: the proxy entry, L's
 # two values from the run file, then the tap, which takes its route and
@@ -141,6 +151,10 @@ set -eu
 sbin=/usr/local/sbin/quux-taps
 unit=/etc/systemd/system/quux-taps.service
 lanfile=/run/quux-taps.lan
+# The link-local destinations (169.254.x.y) a LAN tap's two routing rules
+# drop, at priority 1169 (section 4.3, "the link-local rule"). The one place
+# the block is written.
+link_local=169.254.0.0/16
 mac=02:00:00:00:00:02
 mtu=1500
 
@@ -470,6 +484,28 @@ make_pool() {
     done
 }
 
+# **The link-local rule, off**: every routing rule at priority 1169 gone,
+# repeating the delete until it fails. 1169 is these rules' alone.
+rules_off() {
+    echo "while ip rule del priority 1169; do :; done"
+    [ "$dry" -eq 0 ] || return 0
+    _k=0
+    while [ "$_k" -lt 64 ] && ip rule del priority 1169 2>/dev/null; do
+        _k=$((_k + 1))
+    done
+}
+
+# **The link-local rule, on**: whatever arrives on the LAN interface $1 or
+# on the LAN tap $2 for a link-local destination is dropped, so nothing on
+# the LAN and no QUUX on a LAN tap reaches a host-only tap through the
+# host. The rules name an input interface, so the host's own traffic is
+# not touched, and priority 1169 comes after the local table's 0, so the
+# host's own link-local addresses still answer.
+rules_on() {
+    run ip rule add iif "$1" to "$link_local" priority 1169 blackhole || return 1
+    run ip rule add iif "$2" to "$link_local" priority 1169 blackhole
+}
+
 # A value the run file $1 keeps: $2 the key.
 saved() {
     sed -n "s/^$2 //p" "$1" 2>/dev/null
@@ -493,6 +529,12 @@ lan_up() {
         if [ "$dry" -eq 1 ] || command -v udevadm >/dev/null 2>&1; then
             run udevadm settle || return 1
         fi
+    fi
+    # The link-local rule, before any forwarding is on.
+    rules_off
+    if ! rules_on "$_l" "$_t"; then
+        why="\`$last\` failed: the routing rules that keep the LAN out of the host-only taps need the kernel's policy routing, CONFIG_IP_MULTIPLE_TABLES"
+        return 1
     fi
     # 3. Its settings.
     if [ "$dry" -eq 1 ] || [ -d "/proc/sys/net/ipv6/conf/$_t" ]; then
@@ -563,6 +605,8 @@ lan_down() {
     [ -f "$1" ] || return 0
     _tap=$(saved "$1" tap)
     lan_undo "$1"
+    # After L's forwarding is back, so that there is no gap.
+    rules_off
     if [ -n "$_tap" ] && { [ "$dry" -eq 1 ] || [ -e "/sys/class/net/$_tap" ]; }; then
         run ip link set dev "$_tap" down || :
         run ip link delete dev "$_tap" || :
@@ -581,18 +625,26 @@ up() {
     # quux0 to quux<count-1>, each made afresh.
     down
     if [ -z "$ip_address" ]; then
-        make_pool 0
+        host_only_start
         return
     fi
     make_pool 1
     if ! lan_up quux0 "$lan" "$q" "$n" "$lanfile"; then
         why=${why:-"$last failed"}
         lan_undo "$lanfile" || :
+        rules_off
         if [ -e /sys/class/net/quux0 ]; then
             run ip link set dev quux0 down || :
         fi
         die "the LAN tap quux0 for $ip_address on $lan is not made: $why. It is undone and down; the pool's host-only taps are up. \`systemctl restart quux-taps.service\` tries again" 1
     fi
+}
+
+# **A start with no LAN tap**: no rule of an earlier LAN tap stays, and the
+# pool, quux0 up, is host-only. Both `--up` and the dry run say it so.
+host_only_start() {
+    rules_off
+    make_pool 0
 }
 
 # The unit's --up arguments.
@@ -630,7 +682,7 @@ EOF
 # What starting the unit will run, said with dry set.
 up_text() {
     if [ -z "$ip_address" ]; then
-        make_pool 0
+        host_only_start
     else
         make_pool 1
         lan_up quux0 "$lan" "$q" "$n" "$lanfile"
@@ -645,6 +697,7 @@ stop_text() {
         echo "sysctl -q -w net.ipv4.conf.$lan.forwarding=<from $lanfile>"
         echo "sysctl -q -w net.ipv4.neigh.$lan.proxy_delay=<from $lanfile>"
         echo "rm -f $lanfile"
+        rules_off
         echo "ip link set dev quux0 down"
         echo "ip link delete dev quux0"
         k=1
@@ -743,7 +796,7 @@ check() {
     work=$(mktemp -d "${TMPDIR:-/tmp}/quux-taps-check.XXXXXX")
     trap 'rm -rf "$work"' EXIT
     trap 'rm -rf "$work"; exit 130' INT TERM HUP
-    check_program >"$work/check.py"
+    check_program | sed "s|@LINK_LOCAL@|$link_local|" >"$work/check.py"
     log=
     notes=$(dirname "$self")/../notes
     if [ -d "$notes" ]; then
@@ -795,6 +848,9 @@ H_LAN, L1_IP, L2_IP, ROUTER, Q_IP, PREFIX = "192.0.2.10", "192.0.2.20", "192.0.2
 LAN_BROADCAST = "192.0.2.255"
 Q2_IP, Q2_GW, POOL0_HOST = "169.254.101.2", "169.254.101.1", "169.254.100.1"
 PLANTED = "198.51.100.7"
+# The link-local block the two rules drop, quux-taps' `link_local`, put in
+# when --check writes this program.
+LINK_LOCAL = "@LINK_LOCAL@"
 QUUX_MAC, HOST_MAC = "02:00:00:00:00:01", "02:00:00:00:00:02"
 # Line 2's addresses, asked three times each before H's LAN tap and after.
 ASKED = [Q_IP, "192.0.2.49", "192.0.2.51", "192.0.2.99", L2_IP, ROUTER, POOL0_HOST, Q2_GW, Q2_IP, PLANTED]
@@ -875,12 +931,15 @@ def arp_reply(f):
 
 
 def frame(f):
-    """An Ethernet frame's type, MAC addresses and IPv4 destination."""
+    """An Ethernet frame's type, MAC addresses and IPv4 source and
+    destination."""
     if len(f) < 14:
-        return {"type": None, "dst": None, "src": None, "ip_dst": None}
+        return {"type": None, "dst": None, "src": None, "ip_src": None, "ip_dst": None}
     t = struct.unpack("!H", f[12:14])[0]
-    ip_dst = socket.inet_ntoa(f[30:34]) if t == 0x0800 and len(f) >= 34 else None
-    return {"type": t, "dst": mac_text(f[0:6]), "src": mac_text(f[6:12]), "ip_dst": ip_dst}
+    ipv4 = t == 0x0800 and len(f) >= 34
+    return {"type": t, "dst": mac_text(f[0:6]), "src": mac_text(f[6:12]),
+            "ip_src": socket.inet_ntoa(f[26:30]) if ipv4 else None,
+            "ip_dst": socket.inet_ntoa(f[30:34]) if ipv4 else None}
 
 
 def ping_counts(text):
@@ -903,6 +962,7 @@ def j_settings(r):
         fails.append(f"no route {Q_IP}/32 dev quux0")
     if sorted(s["proxy"]) != [f"{Q_IP} dev lan0"]:
         fails.append("the proxy entries are " + (", ".join(s["proxy"]) or "none") + f", not {Q_IP} dev lan0 alone")
+    fails += j_rules(s["rules"])
     return fails
 
 
@@ -982,9 +1042,49 @@ def j_isolation(r):
     return fails
 
 
+def rule_fields(line):
+    """A line of `ip rule show` at priority 1169 as (its words by key, its
+    action), or None for another priority."""
+    w = line.split()
+    if not w or w[0] != "1169:":
+        return None
+    fields, action, i = {}, None, 1
+    while i < len(w):
+        if w[i] in ("blackhole", "unreachable", "prohibit"):
+            action, i = w[i], i + 1
+        else:
+            fields[w[i]] = w[i + 1] if i + 1 < len(w) else None
+            i += 2
+    return fields, action
+
+
+def j_rules(rules):
+    """Exactly the two rules: iif lan0 and iif quux0, each to the
+    link-local block, blackhole, and nothing else."""
+    got = [rule_fields(l) for l in rules]
+    got = [g for g in got if g]
+    want = [({"from": "all", "to": LINK_LOCAL, "iif": i}, "blackhole") for i in ("lan0", "quux0")]
+    key = lambda g: sorted(g[0].items()) + [("action", g[1])]
+    if sorted(map(key, got)) != sorted(map(key, want)):
+        shown = "; ".join(" ".join(l.split()) for l in rules) or "none"
+        return [f"the rules at priority 1169 are {shown}, not iif lan0 and iif quux0 to {LINK_LOCAL} blackhole"]
+    return []
+
+
 def j_host_only(r):
-    n = r["host_only"]
-    return [f"{n} replies from {Q2_IP} reached L1"] if n else []
+    x = r["host_only"]
+    fails = []
+    seen = [f for f in x["q2_frames"] if f["type"] == 0x0800 and f["ip_src"] != Q2_GW]
+    if seen:
+        fails.append(f"Q2 saw {len(seen)} IPv4 frames: " + "; ".join(
+            f"{f['ip_src']} to {f['ip_dst']}" for f in seen[:8]))
+    for k in ("L1 to Q2", "Q to Q2"):
+        if x[k][1]:
+            fails.append(f"{k}: {x[k][1]} of {x[k][0]} pings answered")
+    sent, got = x["H to Q2"]
+    if sent != PINGS or got != PINGS:
+        fails.append(f"H to Q2: {got} of {sent} pings, so the rules touch the host's own traffic")
+    return fails
 
 
 def j_stop(r):
@@ -995,6 +1095,9 @@ def j_stop(r):
             fails.append(f"{k} is {s['sysctl'].get(k)}, not the start's {start.get(k)}")
     if s["proxy"]:
         fails.append("proxy entries left: " + ", ".join(s["proxy"]))
+    left = [l for l in s["rules"] if rule_fields(l)]
+    if left:
+        fails.append("rules left at priority 1169: " + "; ".join(" ".join(l.split()) for l in left))
     norm = lambda t: {k: sorted(v) for k, v in t.items()}
     if norm(s["arp"]) != norm(r["baseline"]):
         diff = [k for k in ASKED if sorted(s["arp"].get(k, [])) != sorted(r["baseline"].get(k, []))]
@@ -1213,6 +1316,7 @@ def role_settings():
         "quux0 addresses": [l.split()[3] for l in ip("-4", "-o", "address", "show", "dev", "quux0") if " inet " in l],
         "routes": [entry(l) for l in ip("-4", "-o", "route", "show", "table", "main") if l.strip()],
         "proxy": [entry(l) for l in ip("neigh", "show", "proxy") if l.strip()],
+        "rules": [l for l in ip("rule", "show") if l.startswith("1169:")],
     }
 
 
@@ -1386,13 +1490,20 @@ class Check:
             r["l1_frames"] = self.finish(l1_sniff[0])
 
         def host_only():
+            q2_sniff = self.start("q2", "sniff", "eth0")
+            time.sleep(0.3)
             self.sh("ip", "route", "add", f"{Q2_IP}/32", "via", H_LAN, ns="l1")
-            r["host_only"] = self.ping("l1", Q2_IP, 5)[1]
+            x = {"L1 to Q2": self.ping("l1", Q2_IP, 5), "Q to Q2": self.ping("q", Q2_IP, 5)}
+            time.sleep(0.3)
+            x["q2_frames"] = self.finish(q2_sniff)
+            # After the sniffer: the host's own ping, which the rules leave.
+            x["H to Q2"] = self.ping("h", Q2_IP)
+            r["host_only"] = x
 
         def stop():
             self.step("lan-down", os.path.join(self.work, "check.lan"))
             s = self.role("h", "settings")
-            r["stopped"] = {"sysctl": s["sysctl"], "proxy": s["proxy"], "arp": self.ask()}
+            r["stopped"] = {"sysctl": s["sysctl"], "proxy": s["proxy"], "rules": s["rules"], "arp": self.ask()}
 
         part("the settings", prepare)
         if not r["errors"]:

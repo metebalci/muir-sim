@@ -94,7 +94,8 @@ subnet holds link-local addresses, and when `quux` would refuse it: a
 prefix outside 1 to 30, 0.x.x.x, 127.x.x.x, from 224.0.0.0 up, and the
 subnet's network and broadcast addresses.
 
-On `quux0`, after the pool is up: IPv6 off; `arp_ignore` 0, so the
+On `quux0`, after the pool is up, and before any forwarding is on: the
+link-local rule (below); then IPv6 off; `arp_ignore` 0, so the
 machine reaches the host's own LAN address; `arp_filter` 1, so the host
 answers the machine's ARP for its own addresses only on `quux0`;
 `rp_filter` 1; `proxy_arp` 1, so the machine's ARP for any address on the
@@ -107,7 +108,7 @@ address, and any older proxy entry there removed. Nothing else: never
 the global `ip_forward`, which would also forward everything the pool's
 taps and the host's other interfaces send, and never `proxy_arp` on the
 LAN interface. The stop removes the proxy entry, puts the LAN interface's
-two values back and deletes the tap. If the LAN tap cannot be made, the
+two values back, removes the link-local rule and deletes the tap. If the LAN tap cannot be made, the
 pool still works, `quux0` is down, and `systemctl status
 quux-taps.service` says why.
 
@@ -116,14 +117,24 @@ of the host's gateways (the LAN's router), or one the host's neighbour
 table shows another machine answering for. The host would otherwise
 answer ARP for that address on the LAN and take its traffic.
 
-**What forwarding on the LAN interface opens.** Linux decides forwarding
-by the interface a packet arrives on, so with a LAN tap the host forwards
-whatever arrives on its LAN interface to every route it has:
-- into the pool, one way: a LAN machine that routes 169.254.x.y through
-  the host reaches a host-only tap's machine, and that machine's reply is
-  dropped, since the host-only tap forwards nothing;
-- back out of the LAN interface, and into the host's other interfaces (a
-  VPN, a container or virtual machine bridge).
+**The link-local rule.** With a LAN tap, the host drops every packet
+that arrives on its LAN interface, or on the LAN tap, for a link-local
+destination (169.254.x.y). Two routing rules do it, of type blackhole, at
+priority 1169. That is after the local table's rule at priority 0, so the
+host's own link-local addresses still answer, and its own traffic is not
+touched, since the rules name an input interface. Routers never forward
+link-local addresses (RFC 3927, section 2.7). So nothing on the LAN, and
+no machine on a LAN tap, reaches a host-only tap's machine through the
+host. The rules need the kernel's policy routing
+(`CONFIG_IP_MULTIPLE_TABLES`); without it, the LAN tap is refused and
+undone. Every start first removes any rule at priority 1169, which
+belongs to these two alone, and a start with no LAN tap adds none.
+
+**What forwarding on the LAN interface still opens.** Linux decides
+forwarding by the interface a packet arrives on, so with a LAN tap the
+host forwards what arrives on its LAN interface for any other destination
+to every route it has: back out of the LAN interface, and into the host's
+other interfaces (a VPN, a container or virtual machine bridge).
 
 So a LAN tap is for a host that stays on its LAN. The LAN interface is
 fixed at install, and the host answers ARP for the machine's address on

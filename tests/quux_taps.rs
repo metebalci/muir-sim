@@ -249,8 +249,37 @@ fn pool(first: usize, count: usize, user: &str) -> Vec<String> {
     v
 }
 
+/// The loop that removes every routing rule at priority 1169 (§4.3, "the
+/// link-local rule"), as the dry run prints it.
+const RULES_OFF: &str = "while ip rule del priority 1169; do :; done";
+
+/// The link-local destinations the rules drop, as the script names them
+/// in its one variable, `link_local`; held here to the block itself,
+/// 169.254.x.y with a prefix of 16, by its numbers.
+fn link_local() -> String {
+    let text = std::fs::read_to_string(script()).unwrap();
+    let v = text
+        .lines()
+        .find_map(|l| l.strip_prefix("link_local="))
+        .expect("the script names the link-local block in `link_local`")
+        .to_string();
+    let (a, n) = v.split_once('/').expect("A.B.C.D/N");
+    let o: Vec<u32> = a.split('.').map(|x| x.parse().unwrap()).collect();
+    assert_eq!((o.as_slice(), n), (&[169, 254, 0, 0][..], "16"), "{v}");
+    v
+}
+
+/// A routing rule of the pair, for `iif`.
+fn rule(iif: &str) -> String {
+    format!("ip rule add iif {iif} to {} priority 1169 blackhole", link_local())
+}
+
+/// What starting the unit runs with no LAN tap: no rule left at 1169, and
+/// the pool.
 fn up(count: usize, user: &str) -> Vec<String> {
-    pool(0, count, user)
+    let mut v = vec![RULES_OFF.to_string()];
+    v.extend(pool(0, count, user));
+    v
 }
 
 /// **A LAN tap's list, literally** (§4.3, "A LAN tap, in this order"): T
@@ -262,6 +291,9 @@ fn lan_list(user: &str, l: &str, run_file: &str) -> Vec<String> {
     [
         format!("ip tuntap add dev quux0 mode tap user {user}"),
         "udevadm settle".to_string(),
+        RULES_OFF.to_string(),
+        rule(l),
+        rule("quux0"),
         "sysctl -q -w net.ipv6.conf.quux0.disable_ipv6=1".to_string(),
         "sysctl -q -w net.ipv4.conf.quux0.arp_ignore=0".to_string(),
         "sysctl -q -w net.ipv4.conf.quux0.arp_filter=1".to_string(),
@@ -293,6 +325,7 @@ fn lan_stop(l: &str, count: usize) -> Vec<String> {
         format!("sysctl -q -w net.ipv4.conf.{l}.forwarding=<from {RUN_FILE}>"),
         format!("sysctl -q -w net.ipv4.neigh.{l}.proxy_delay=<from {RUN_FILE}>"),
         format!("rm -f {RUN_FILE}"),
+        RULES_OFF.to_string(),
         "ip link set dev quux0 down".to_string(),
         "ip link delete dev quux0".to_string(),
     ];
@@ -398,6 +431,7 @@ fn a_host_only_tap_s_list_literally() {
     assert_eq!(
         d.up,
         [
+            RULES_OFF.to_string(),
             format!("ip tuntap add dev quux0 mode tap user {}", me()),
             "udevadm settle".to_string(),
             "sysctl -q -w net.ipv6.conf.quux0.disable_ipv6=1".to_string(),
@@ -545,6 +579,7 @@ fn the_check_s_host_side_is_up_s_own_code() {
             "sysctl -q -w net.ipv4.conf.lan0.forwarding=0".to_string(),
             "sysctl -q -w net.ipv4.neigh.lan0.proxy_delay=80".to_string(),
             format!("rm -f {fs}"),
+            RULES_OFF.to_string(),
             "ip link set dev quux0 down".to_string(),
             "ip link delete dev quux0".to_string(),
         ]
@@ -782,7 +817,7 @@ fn judged(check: &str) {
         std::env::temp_dir().join(format!("muir-quux-taps-{}-judge-{call}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let prog = dir.join("check.py");
-    std::fs::write(&prog, check_program()).unwrap();
+    std::fs::write(&prog, check_program().replace("@LINK_LOCAL@", &link_local())).unwrap();
     let code = format!(
         "import importlib.machinery, importlib.util, sys\n\
          loader = importlib.machinery.SourceFileLoader('check', sys.argv[1])\n\
@@ -826,7 +861,9 @@ def good():
         "start": start,
         "settings": {"sysctl": settings, "quux0 addresses": [],
                      "routes": ["192.0.2.50 dev quux0", "192.0.2.0/24 dev lan0"],
-                     "proxy": ["192.0.2.50 dev lan0"]},
+                     "proxy": ["192.0.2.50 dev lan0"],
+                     "rules": [f"1169:\tfrom all to {c.LINK_LOCAL} iif lan0 blackhole",
+                               f"1169:\tfrom all to {c.LINK_LOCAL} iif quux0 blackhole"]},
         "baseline": baseline, "after": after,
         "latency": [3.0] * 10 + [2.0] * 10,
         "reach": {"L1 to Q": [100, 100], "Q to L1": [100, 100], "Q to the router": [100, 100],
@@ -835,8 +872,10 @@ def good():
         "q_frames": [{"type": 0x0806, "src": c.HOST_MAC, "dst": c.QUUX_MAC, "ip_dst": None},
                      {"type": 0x0800, "src": c.HOST_MAC, "dst": c.QUUX_MAC, "ip_dst": c.Q_IP}],
         "l1_frames": [{"type": 0x0800, "src": LAN_MAC, "dst": "0a:00:00:00:00:20", "ip_dst": c.L1_IP}],
-        "host_only": 0,
-        "stopped": {"sysctl": dict(start), "proxy": [], "arp": copy.deepcopy(baseline)},
+        "host_only": {"q2_frames": [{"type": 0x0806, "src": c.HOST_MAC, "dst": c.QUUX_MAC,
+                                     "ip_src": None, "ip_dst": None}],
+                      "L1 to Q2": [5, 0], "Q to Q2": [5, 0], "H to Q2": [100, 100]},
+        "stopped": {"sysctl": dict(start), "proxy": [], "arp": copy.deepcopy(baseline), "rules": []},
     }
 
 def failing(r):
@@ -866,8 +905,38 @@ def case(change):
 
 def global_forwarding(r):
     r["settings"]["sysctl"]["net.ipv4.conf.all.forwarding"] = "1"
-    r["host_only"] = 5
-assert case(global_forwarding) == [1, 6], case(global_forwarding)
+assert case(global_forwarding) == [1], case(global_forwarding)
+
+# The link-local rule (§4.4, since 17 Oct): no rule, or only one of the
+# two, lets a ping through to Q2, and fails 1 and 6; a rule without iif
+# drops H's own ping of Q2, and fails 1 and 6; a rule left after the stop
+# fails 7.
+ping_l1 = {"type": 0x0800, "src": c.HOST_MAC, "dst": c.QUUX_MAC, "ip_src": c.L1_IP, "ip_dst": c.Q2_IP}
+ping_q = dict(ping_l1, ip_src=c.Q_IP)
+def no_rule(r):
+    r["settings"]["rules"] = []
+    r["host_only"]["q2_frames"] += [ping_l1, ping_q]
+assert case(no_rule) == [1, 6], case(no_rule)
+def only_lan0(r):
+    r["settings"]["rules"] = r["settings"]["rules"][:1]
+    r["host_only"]["q2_frames"].append(ping_q)
+assert case(only_lan0) == [1, 6]
+def only_quux0(r):
+    r["settings"]["rules"] = r["settings"]["rules"][1:]
+    r["host_only"]["q2_frames"].append(ping_l1)
+assert case(only_quux0) == [1, 6]
+def without_iif(r):
+    r["settings"]["rules"] = [f"1169:\tfrom all to {c.LINK_LOCAL} blackhole"]
+    r["host_only"]["H to Q2"] = [100, 0]
+assert case(without_iif) == [1, 6]
+assert case(lambda r: r["host_only"].__setitem__("H to Q2", [100, 0])) == [6]
+assert case(lambda r: r["host_only"].__setitem__("L1 to Q2", [5, 5])) == [6]
+def other_rules(r):
+    r["settings"]["rules"][1] = f"1169:\tfrom all to {c.LINK_LOCAL} iif quux0 lookup main"
+assert case(other_rules) == [1]
+def rule_left(r):
+    r["stopped"]["rules"] = r["settings"]["rules"][:1]
+assert case(rule_left) == [7]
 
 def proxy_arp_on_lan0(r):
     r["settings"]["sysctl"]["net.ipv4.conf.lan0.proxy_arp"] = "1"
@@ -902,12 +971,11 @@ assert case(address_on_quux0) == [1, 2]
 
 def forwarding_on_quux1(r):
     r["settings"]["sysctl"]["net.ipv4.conf.quux1.forwarding"] = "1"
-    r["host_only"] = 5
-assert case(forwarding_on_quux1) == [1, 6]
+assert case(forwarding_on_quux1) == [1]
 
 def no_undo(r):
     r["stopped"] = {"sysctl": dict(r["settings"]["sysctl"]), "proxy": ["192.0.2.50 dev lan0"],
-                    "arp": copy.deepcopy(r["after"])}
+                    "arp": copy.deepcopy(r["after"]), "rules": []}
 assert case(no_undo) == [7]
 
 # The isolation line: a LAN broadcast, an IPv6 frame or ARP from the LAN
@@ -992,7 +1060,7 @@ ipv4 = (bytes.fromhex("020000000001") + bytes.fromhex("020000000002") + b"\x08\x
         + bytes([0x45, 0]) + struct.pack("!H", 20) + bytes(8) + socket.inet_aton("192.0.2.20")
         + socket.inet_aton("192.0.2.50"))
 f = c.frame(ipv4)
-assert f == {"type": 0x0800, "dst": "02:00:00:00:00:01", "src": "02:00:00:00:00:02", "ip_dst": "192.0.2.50"}, f
+assert f == {"type": 0x0800, "dst": "02:00:00:00:00:01", "src": "02:00:00:00:00:02", "ip_src": "192.0.2.20", "ip_dst": "192.0.2.50"}, f
 assert c.frame(req)["ip_dst"] is None and c.frame(req)["type"] == 0x0806
 assert c.ping_counts("100 packets transmitted, 97 received, 3% packet loss, time 1010ms") == [100, 97]
 assert c.ping_counts("5 packets transmitted, 0 received, +5 errors, 100% packet loss") == [5, 0]
@@ -1066,13 +1134,13 @@ def sh(*argv, ns=None, check=True, timeout=0):
 def role(ns, name, *args, timeout=0):
     order.append(name)
     if name == "settings":
-        return {"sysctl": {}, "proxy": [], "routes": [], "quux0 addresses": []}
+        return {"sysctl": {}, "proxy": [], "routes": [], "quux0 addresses": [], "rules": []}
     return {"arp-latency": [], "echo": {"banner": c.BANNER, "echo": True}}.get(name, {})
 k.sh, k.role = sh, role
 k.setup = lambda: order.append("setup")
 k.start = lambda ns, *a: order.append("start " + a[0]) or a[0]
 k.finish = lambda p: order.append("finish " + p) or []
-k.ping = lambda ns, to, count=100: [count, count]
+k.ping = lambda ns, to, count=100: order.append(f"ping {ns} {to}") or [count, count]
 k.mac = lambda ns, dev: "0a:00:00:00:00:10"
 r = k.run()
 assert not r["errors"], r["errors"]
@@ -1083,6 +1151,11 @@ tail = ["step lan-down", "settings", "arp-ask"]
 assert order[-3:] == tail, order
 assert order.index("route 169.254.101.2/32") < order.index("step lan-down")
 assert order.index("finish sniff") < order.index("step lan-down")
+# Line 6: Q2's sniffer watches L1's and Q's pings, and is done before H's
+# own ping of Q2, which it must not count.
+at = lambda what: max(i for i, x in enumerate(order) if x == what)
+assert at("start sniff") < order.index("route 169.254.101.2/32") < order.index(f"ping l1 {c.Q2_IP}")
+assert order.index(f"ping q {c.Q2_IP}") < at("finish sniff") < order.index(f"ping h {c.Q2_IP}")
 "#,
     );
 }
