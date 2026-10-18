@@ -6541,15 +6541,10 @@ fn eth_receive_program() -> Prog {
     p
 }
 
-/// `p`'s machine on revision 16 under `coherence`, its scripted peer
-/// sending `frames` at their times.
-fn eth_machine(
-    p: &Prog,
-    coherence: muir::ethernet_device::Coherence,
-    frames: &[(u64, Vec<u8>)],
-) -> (Machine, muir::ethernet_device::Script) {
+/// `p`'s machine on revision 16, its scripted peer sending `frames` at
+/// their times.
+fn eth_machine(p: &Prog, frames: &[(u64, Vec<u8>)]) -> (Machine, muir::ethernet_device::Script) {
     let mut m = machine(p, REV16);
-    m.ethernet.coherence = coherence;
     let s = muir::ethernet_device::Script::default();
     for (t, f) in frames {
         s.arrive(*t, f.clone());
@@ -6559,49 +6554,44 @@ fn eth_machine(
 }
 
 /// **A received Ethernet frame over lines the cache holds is read after
-/// 251 moves, under either mechanism** (QUUX's Ethernet contract, §2.5):
-/// the processor has caught buffer A's word, the entry's word 2 and a word
-/// elsewhere; the frame arrives while it rounds on 251; after it, it reads
-/// the frame's word and its length, on the pipeline as on `micro`. The
-/// sweep swept, and the word elsewhere missed again; line clearing swept
-/// nothing, and the word elsewhere still hit.
+/// 251 moves** (QUUX's Ethernet contract, §2.5 (ii)): the processor has
+/// caught buffer A's word, the entry's word 2 and a word elsewhere; the
+/// frame arrives while it rounds on 251; after it, it reads the frame's
+/// word and its length, on the pipeline as on `micro`. Line clearing
+/// swept nothing: the two lines it cleared missed again, and the word
+/// elsewhere still hit.
 #[test]
-fn a_received_frame_is_seen_after_251_moves_under_both_mechanisms() {
-    use muir::ethernet_device::Coherence;
+fn a_received_frame_is_seen_after_251_moves() {
     let p = eth_receive_program();
     let f = eth_frame(0x40);
     let frames = [(200_000, f.clone())];
-    let mut misses = Vec::new();
-    for coherence in [Coherence::Sweep, Coherence::LineClearing] {
-        let (m, _) = eth_machine(&p, coherence, &frames);
-        let u = match run_engine(Micro::new(m)) {
-            Ok(u) => u,
-            Err((h, _)) => panic!("micro halted: {h:?}"),
-        };
-        let (m, _) = eth_machine(&p, coherence, &frames);
-        let e = ends_on(m, &|_| {});
-        let (m, um) = (e.machine(), u.machine());
-        for (name, m) in [("micro", um), ("rtl", m)] {
-            assert_eq!(
-                (m.mmem[0o24], m.mmem[0o25], m.mmem[0o27]),
-                (0o1111, 0o2222, 0o3333),
-                "{coherence:?} {name}: before"
-            );
-            assert_eq!(
-                m.mmem[0o26] & 0xffff_ffff,
-                eth_word(&f, 3),
-                "{coherence:?} {name}: the frame"
-            );
-            assert_eq!(m.mmem[0o26] >> 32, 0o005, "{coherence:?} {name}: a fixnum");
-            assert_eq!(m.mmem[0o30] & 0xffff_ffff, 60, "{coherence:?} {name}: its length");
-            assert_eq!(m.mmem[0o31], 0o3333, "{coherence:?} {name}: the word elsewhere");
-        }
-        assert_eq!(state(m), state(um), "{coherence:?}: the pipeline against micro");
-        let sweeps = e.port.meters.sweeps;
-        assert_eq!(sweeps > 0, coherence == Coherence::Sweep, "{coherence:?}: sweeps {sweeps}");
-        misses.push(e.port.cache.misses);
+    let (m, _) = eth_machine(&p, &frames);
+    let u = match run_engine(Micro::new(m)) {
+        Ok(u) => u,
+        Err((h, _)) => panic!("micro halted: {h:?}"),
+    };
+    let (m, _) = eth_machine(&p, &frames);
+    let e = ends_on(m, &|_| {});
+    let (m, um) = (e.machine(), u.machine());
+    for (name, m) in [("micro", um), ("rtl", m)] {
+        assert_eq!(
+            (m.mmem[0o24], m.mmem[0o25], m.mmem[0o27]),
+            (0o1111, 0o2222, 0o3333),
+            "{name}: before"
+        );
+        assert_eq!(m.mmem[0o26] & 0xffff_ffff, eth_word(&f, 3), "{name}: the frame");
+        assert_eq!(m.mmem[0o26] >> 32, 0o005, "{name}: a fixnum");
+        assert_eq!(m.mmem[0o30] & 0xffff_ffff, 60, "{name}: its length");
+        assert_eq!(m.mmem[0o31], 0o3333, "{name}: the word elsewhere");
     }
-    assert_eq!(misses[0], misses[1] + 1, "the sweep's one more miss is the word elsewhere");
+    assert_eq!(state(m), state(um), "the pipeline against micro");
+    assert_eq!(e.port.meters.sweeps, 0, "no sweep");
+    assert_eq!(e.port.meters.engine_reads, 1, "the entry read once");
+    assert_eq!(
+        e.port.cache.misses,
+        3 + 2,
+        "three lines caught, two of them cleared and missed again"
+    );
 }
 
 /// **A transmit entry still in the posted writes when 244 is written is
@@ -6611,7 +6601,7 @@ fn a_received_frame_is_seen_after_251_moves_under_both_mechanisms() {
 /// is answered, and sends the frame as written.
 #[test]
 fn a_transmit_entry_in_the_posted_writes_is_read_whole() {
-    use muir::ethernet_device::{Coherence, TX_CONS, TX_PROD};
+    use muir::ethernet_device::{TX_CONS, TX_PROD};
     let f = eth_frame(0x50);
     let mut p = Prog::default();
     eth_enable(&mut p);
@@ -6628,7 +6618,7 @@ fn a_transmit_entry_in_the_posted_writes_is_read_whole() {
         let t = muir::pipeline::PortTiming { read_ns: 247, write_ns: 25_000, occupancy_ns: 10 };
         e.configure(e.period(), t, 65_536);
     };
-    let (m, s) = eth_machine(&p, Coherence::Sweep, &[]);
+    let (m, s) = eth_machine(&p, &[]);
     let e = ends_on(m, &slow);
     assert_eq!(s.sent().len(), 1, "one frame sent");
     assert_eq!(s.sent()[0].1, f, "the entry and the frame read whole");
@@ -6644,7 +6634,7 @@ fn a_transmit_entry_in_the_posted_writes_is_read_whole() {
 /// goes into B. A device that took 250 at once would put the first into A.
 #[test]
 fn a_receive_entry_in_the_posted_writes_is_taken_once_it_lands() {
-    use muir::ethernet_device::{Coherence, RX_CONS, RX_PROD, STATUS, TX_PROD};
+    use muir::ethernet_device::{RX_CONS, RX_PROD, STATUS, TX_PROD};
     let (one, two) = (eth_frame(0x11), eth_frame(0x22));
     let mut p = Prog::default();
     p.main.push((ETH_RX as usize, ETH_A));
@@ -6670,7 +6660,7 @@ fn a_receive_entry_in_the_posted_writes_is_taken_once_it_lands() {
         let t = muir::pipeline::PortTiming { read_ns: 247, write_ns: 25_000, occupancy_ns: 10 };
         e.configure(e.period(), t, 65_536);
     };
-    let (m, s) = eth_machine(&p, Coherence::Sweep, &[]);
+    let (m, s) = eth_machine(&p, &[]);
     s.reply(0, one);
     s.reply(200_000, two.clone());
     let e = ends_on(m, &slow);
@@ -6680,4 +6670,423 @@ fn a_receive_entry_in_the_posted_writes_is_taken_once_it_lands() {
     assert_eq!(m.mmem[0o27], 0o1111, "nothing in A");
     assert_eq!(m.mmem[0o30] >> 16 & 0xff, 1, "the first dropped, no buffer given");
     assert!(e.meters.cmd_prod_wait > 0, "250 waited for the write");
+}
+
+// --- Line clearing: 251 after the last set (QUUX's Ethernet contract, §2.5 (ii)) --
+
+/// A buffer for the longest Ethernet frame, on a line: 1,514 bytes are 379
+/// words, 48 lines.
+const ETH_BIG: u64 = 0o10000;
+
+/// An ARP Ethernet frame of `n` bytes to the device's own MAC address.
+fn eth_frame_of(n: usize, seed: u8) -> Vec<u8> {
+    let mut f = vec![0x02, 0, 0, 0, 0, 0x01, 0x02, 0, 0, 0, 0, 0x02, 0x08, 0x06];
+    f.extend((0..n - 14).map(|k| seed.wrapping_add(k as u8)));
+    f
+}
+
+/// Counts M 26 down from `n`: a delay that touches no memory.
+fn eth_delay(p: &mut Prog, n: u64) {
+    let k = p.k(n);
+    p.op(ALU | SETA | a_src(k) | m_dest(0o26));
+    let top = p.at();
+    p.op(ALU | muir::isa::asm::SUB | a_src(ONE) | m_src(0o26) | m_dest(0o26));
+    p.op(jcond(3) | 1 << 6 | a_src(ZERO) | m_src(0o26) | target(top) | N);
+    p.fill(1);
+}
+
+/// The receive program for line clearing: the device enabled, receive
+/// entry 0 given the buffer at `buf` of `room` bytes, a word of each line
+/// in `cached` read, so that the cache holds it, 250 written 1, then
+/// `tail`.
+fn eth_lc_program(buf: u64, room: u64, cached: &[u64], tail: impl FnOnce(&mut Prog)) -> Prog {
+    let mut p = Prog::default();
+    eth_enable(&mut p);
+    p.write(buf, PHYS | ETH_RX);
+    p.write(room, PHYS | (ETH_RX + 1));
+    for &a in cached {
+        p.main.push((a as usize, 0o5252525252 ^ a));
+        p.read(PHYS | a, 0o24);
+    }
+    p.write(1, eth_reg(muir::ethernet_device::RX_PROD));
+    tail(&mut p);
+    p.stop();
+    p
+}
+
+/// What a delivery did, clock by clock: the clock the device filled the
+/// entry in (the host's RX_CONS moved), the clock after which the machine's
+/// 251 had moved (status `<8>`), the clock each line of `lines` stopped
+/// being held, and the run.
+struct EthClocks {
+    landed: u64,
+    moved: u64,
+    cleared: Vec<Option<u64>>,
+    e: Pipeline,
+}
+
+/// `p` on revision 16 at `period` and the Kria's memory timing, `frames`
+/// arriving at their clocks, run clock by clock until 251 has moved and
+/// `after` clocks more.
+fn eth_clocks(
+    p: &Prog,
+    period: u64,
+    frames: &[(u64, Vec<u8>)],
+    lines: &[u64],
+    after: u64,
+) -> EthClocks {
+    eth_clocks_of(p, period, frames, lines, after, 1)
+}
+
+/// [`eth_clocks`] for the delivery that fills entry `index` - 1, 252
+/// taken up to the one before it first.
+fn eth_clocks_of(
+    p: &Prog,
+    period: u64,
+    frames: &[(u64, Vec<u8>)],
+    lines: &[u64],
+    after: u64,
+    index: u32,
+) -> EthClocks {
+    use muir::ethernet_device::RX_CONS;
+    let mut m = machine(p, REV16);
+    let s = muir::ethernet_device::Script::default();
+    for (clock, f) in frames {
+        s.arrive(clock * period, f.clone());
+    }
+    m.attach_ethernet_peer(Box::new(s));
+    let mut e = Pipeline::new(m);
+    e.configure(period, muir::pipeline::PortTiming::KRIA, 65_536);
+    e.events = Some(Vec::new());
+    e.boot();
+    e.skip_sweep();
+    let (mut landed, mut moved) = (None, None);
+    let mut cleared = vec![None; lines.len()];
+    for _ in 0..400_000 {
+        let before: Vec<bool> = lines.iter().map(|&a| e.port.cache.holds(a as u32)).collect();
+        e.tick().expect("no halt");
+        let c = e.clock();
+        let d = &e.machine().ethernet;
+        if landed.is_none() && d.read(RX_CONS) == index {
+            landed = Some(c);
+        }
+        if moved.is_none() && landed.is_some() && d.waiting() {
+            moved = Some(c);
+        }
+        for (k, &a) in lines.iter().enumerate() {
+            if before[k] && !e.port.cache.holds(a as u32) && cleared[k].is_none() {
+                cleared[k] = Some(c);
+            }
+        }
+        if moved.is_some_and(|m| c >= m + after) {
+            let (landed, moved) = (landed.unwrap(), moved.unwrap());
+            return EthClocks { landed, moved, cleared, e };
+        }
+    }
+    panic!("251 never moved: landed {landed:?}");
+}
+
+/// The clock of each event `want` picks, in order.
+fn eth_event_clocks(e: &Pipeline, want: impl Fn(&muir::pipeline::Event) -> bool) -> Vec<u64> {
+    e.events.as_ref().unwrap().iter().filter(|(_, ev)| want(ev)).map(|&(c, _)| c).collect()
+}
+
+/// The buffer's lines for `n` bytes at `buf`: one word of each, at its
+/// line's own offset.
+fn eth_lines(buf: u64, n: u64) -> Vec<u64> {
+    (0..n.div_ceil(4).div_ceil(8)).map(|l| buf + 8 * l + (l & 7)).collect()
+}
+
+/// **251 moves at the edge of clock T = R + 9 + L after the delivery's
+/// clock, as the fabric's line clearing moves it** (QUUX's Ethernet
+/// contract, §2.5 (ii)), R the port's read latency in clocks and L the
+/// buffer's lines cleared: at the Kria's memory timing a 42-byte Ethernet
+/// frame into an aligned buffer (L = 2) and a 1,514-byte one (L = 48) give
+/// T = 46 and 92 at 10 ns (R = 35), 52 and 98 at 8.5 ns (R = 41), and 31
+/// and 77 at 18 ns (R = 20), the fabric's measured figures. The machine's
+/// reads of 251 granted before clock T read the old index and those from T
+/// the new one. **Fails** a device whose 251 moves at the delivery (T =
+/// 0), or an engine a clock off anywhere.
+#[test]
+fn line_clearing_moves_251_at_r_plus_9_plus_l() {
+    use muir::pipeline::Event;
+    let page_251 = muir::tlb::REGISTER_PAGE_BUS | muir::ethernet_device::RX_CONS;
+    for (period, r, want) in [(20, 35, [46, 92]), (17, 41, [52, 98]), (36, 20, [31, 77])] {
+        for ((n, buf, room), want) in [(42, ETH_A, 64), (1514, ETH_BIG, 1536)].into_iter().zip(want)
+        {
+            let p =
+                eth_lc_program(buf, room, &[], |p| eth_wait(p, muir::ethernet_device::RX_CONS, 1));
+            let run = eth_clocks(&p, period, &[(3000, eth_frame_of(n, 7))], &[], 16);
+            assert_eq!(run.e.port.clocks().read, r, "period {period}: R");
+            let l = (n as u64).div_ceil(4).div_ceil(8);
+            assert_eq!(run.moved - run.landed, want, "period {period}, {n} bytes: T");
+            assert_eq!(want, r + 9 + l, "period {period}, {n} bytes: R + 9 + L");
+            // The poll's reads of 251, each with the word it returned.
+            let evs = run.e.events.as_ref().unwrap();
+            let mut reads = Vec::new();
+            for (k, &(c, ev)) in evs.iter().enumerate() {
+                if ev == Event::Register(page_251)
+                    && let Some(&(_, Event::Md(w))) =
+                        evs[k + 1..].iter().find(|(_, e)| matches!(e, Event::Md(_)))
+                {
+                    reads.push((c, w));
+                }
+            }
+            let at = run.landed + want;
+            assert!(reads.iter().any(|&(c, _)| c < at) && reads.iter().any(|&(c, _)| c >= at));
+            for (c, w) in reads {
+                assert_eq!(
+                    w & 0xffff,
+                    Word::from(c >= at),
+                    "period {period}, {n} bytes: 251 read at {c}"
+                );
+            }
+        }
+    }
+}
+
+/// **The sets are cleared one a clock, the buffer's lines first and the
+/// entry's last, and 251 moves only after the last** (QUUX's Ethernet
+/// contract, §2.5 (ii)): every one of the 48 lines a 1,514-byte Ethernet
+/// frame fills, and the entry's, is held in the cache before the delivery;
+/// buffer line i stops being held at clock R + 9 + i after the delivery's,
+/// the entry's at R + 9 + 48 = T, the clock 251 moves at; a line elsewhere
+/// stays. The same for a 42-byte frame's 2 lines. **Fails** a sweep, sets
+/// cleared all at once, out of order or after 251, or the entry's line
+/// left.
+#[test]
+fn line_clearing_clears_the_sets_line_by_line_before_251_moves() {
+    for (n, buf, room) in [(42, ETH_A, 64), (1514, ETH_BIG, 1536)] {
+        let mut lines = eth_lines(buf, n);
+        let l = lines.len() as u64;
+        lines.push(ETH_RX + 2);
+        lines.push(ELSEWHERE);
+        let p =
+            eth_lc_program(buf, room, &lines, |p| eth_wait(p, muir::ethernet_device::RX_CONS, 1));
+        let run = eth_clocks(&p, 20, &[(6000, eth_frame_of(n as usize, 9))], &lines, 16);
+        let r = run.e.port.clocks().read;
+        let t = run.moved - run.landed;
+        assert_eq!(t, r + 9 + l, "{n} bytes: T");
+        for (i, c) in run.cleared[..l as usize].iter().enumerate() {
+            assert_eq!(*c, Some(run.landed + r + 9 + i as u64), "{n} bytes: buffer line {i}");
+        }
+        assert_eq!(
+            run.cleared[l as usize],
+            Some(run.moved),
+            "{n} bytes: the entry's line, at 251's move"
+        );
+        assert_eq!(run.cleared[l as usize + 1], None, "{n} bytes: the line elsewhere stays");
+    }
+}
+
+/// **Lookups never wait for line clearing** (QUUX's Ethernet contract,
+/// §2.5 (ii)): the processor reads a line elsewhere, cached, over and over
+/// while a 1,514-byte Ethernet frame is delivered; its lookups go on in the
+/// clocks the sets are cleared in, every one a hit, and no sweep is made.
+/// **Fails** the whole-cache sweep, or clears that hold the lookups.
+#[test]
+fn line_clearing_never_holds_a_lookup() {
+    use muir::pipeline::Event;
+    let p = eth_lc_program(ETH_BIG, 1536, &[ELSEWHERE], |p| {
+        let k = p.k(1500);
+        p.op(ALU | SETA | a_src(k) | m_dest(0o26));
+        let top = p.at();
+        p.read(PHYS | ELSEWHERE, 0o27);
+        p.op(ALU | muir::isa::asm::SUB | a_src(ONE) | m_src(0o26) | m_dest(0o26));
+        p.op(jcond(3) | 1 << 6 | a_src(ZERO) | m_src(0o26) | target(top) | N);
+        p.fill(1);
+    });
+    let run = eth_clocks(&p, 20, &[(3000, eth_frame_of(1514, 3))], &[ELSEWHERE], 16);
+    let r = run.e.port.clocks().read;
+    let misses = run.e.port.cache.misses;
+    let reads = eth_event_clocks(&run.e, |ev| *ev == Event::Grant(ELSEWHERE as u32, false));
+    let clears = run.moved - 48..=run.moved;
+    let during = reads.iter().filter(|c| clears.contains(c)).count();
+    assert_eq!((run.e.port.meters.sweeps, run.e.port.meters.sweep_clocks), (0, 0), "no sweep");
+    assert!(run.moved - run.landed >= r + 9 + 48, "T no shorter than R + 9 + L");
+    assert!(during >= 4, "lookups in the clears' clocks: {during}");
+    assert_eq!(run.cleared[0], None, "the line elsewhere stays");
+    let e = run.e;
+    let mut e = e;
+    for _ in 0..200 {
+        e.tick().unwrap();
+    }
+    assert_eq!(e.port.cache.misses, misses, "every read of the line elsewhere a hit");
+    assert_eq!(e.machine().mmem[0o27], 0o5252525252 ^ ELSEWHERE, "its word");
+}
+
+/// **A processor's fill delays the entry's read, and a fill's install
+/// delays a clear by a clock** (QUUX's Ethernet contract, §2.5 (ii)): the
+/// engine reads the entry through the port's one fill, so its read waits
+/// while a fill of the processor's is in flight, or a lookup is made in the
+/// clock or was in the clock before; and a set is not cleared in the clock
+/// a fill installs. A program makes one read that misses, at clock g, and
+/// an Ethernet frame is delivered at each clock across it, so that the
+/// engine's read, wanted from clock c = delivery + 5, comes before the
+/// processor's, at its grant, while its fill is in flight, or after:
+/// - **42 bytes:** the entry's fill goes at c, or at g + 1 + R when c is in
+///   g..=g + R, and T = (that clock − the delivery) + R + 4 + L;
+/// - **1,514 bytes,** the processor's read after the entry's: T = R + 9 +
+///   L, one more when the processor's fill installs at the edge of a clock
+///   a set is cleared in.
+///
+/// **Fails** an engine that reads beside a processor's fill, ignores a
+/// lookup's clocks, or clears beside an install.
+#[test]
+fn line_clearing_waits_for_a_processor_s_fill_and_its_install() {
+    use muir::pipeline::Event;
+    let program = |buf: u64| {
+        eth_lc_program(buf, 1536, &[], |p| {
+            eth_delay(p, 400);
+            p.read(PHYS | ELSEWHERE, 0o27);
+        })
+    };
+    let grants =
+        |e: &Pipeline| eth_event_clocks(e, |ev| *ev == Event::Grant(ELSEWHERE as u32, false));
+    // The read's grant, with the frame long after it.
+    let quiet = eth_clocks(&program(ETH_A), 20, &[(40_000, eth_frame_of(42, 1))], &[], 4);
+    let g = grants(&quiet.e)[0];
+    let r = quiet.e.port.clocks().read;
+    assert!(g > 100 && g + 4 * r < 40_000, "the read at {g}, well before the frame");
+    let mut waited = 0;
+    for d in -4..=r as i64 + 4 {
+        let (c, l) = ((g as i64 + d) as u64, 2);
+        let run = eth_clocks(&program(ETH_A), 20, &[(c - 5, eth_frame_of(42, 5))], &[], 4);
+        assert_eq!(run.landed + 5, c, "the delivery at its clock");
+        let go = if (g..=g + r).contains(&c) { g + 1 + r } else { c };
+        assert_eq!(run.moved - run.landed, go - run.landed + r + 4 + l, "42 bytes, c = g {d:+}: T");
+        waited += u64::from(go > c);
+    }
+    assert_eq!(waited, r + 1, "the entry's fill waited for the processor's");
+    let mut held = 0;
+    for d in r - 2..=r + 60 {
+        let (c, l) = (g - d, 48);
+        let run = eth_clocks(&program(ETH_BIG), 20, &[(c - 5, eth_frame_of(1514, 5))], &[], 4 * r);
+        assert_eq!(run.landed + 5, c, "the delivery at its clock");
+        // The processor's fill installs at the edge of the clock before its
+        // word lands in MD.
+        let first = grants(&run.e)[0];
+        let evs = run.e.events.as_ref().unwrap();
+        let md = evs.iter().find(|&&(k, ev)| k > first && matches!(ev, Event::Md(_))).unwrap().0;
+        let clears = c + r + 4..=c + r + 4 + l;
+        let extra = u64::from(clears.contains(&(md - 1)));
+        assert_eq!(run.moved - run.landed, r + 9 + l + extra, "1,514 bytes, c = g - {d}: T");
+        held += extra;
+    }
+    // The processor's read granted at g, c + d, installs at the edge of
+    // g + R, a clear's clock for d in 4..=4 + L: 17 of d in R + 1..=R + 60;
+    // and for d in R - 2..=R, its read busy behind the entry's fill, it is
+    // granted as that fill lands and installs inside the clears too.
+    assert_eq!(held, (4..=4 + 48).filter(|d| *d > r).count() as u64 + 3, "installs held a clear");
+}
+
+/// **Each delivery's entry is read again** (QUUX's Ethernet contract, §2.5
+/// (ii)): through a ring of one entry, a 42-byte Ethernet frame and then,
+/// the entry taken back and written again, a 1,514-byte one; the engine
+/// drops the line it read the first time and reads the entry again, so the
+/// second's T is R + 9 + 48 and its 48 lines are cleared. **Fails** an
+/// engine that keeps its line from one entry to the next, which reads the
+/// first entry's words.
+#[test]
+fn line_clearing_reads_the_entry_again_for_each_delivery() {
+    use muir::ethernet_device::{RX_CONS, RX_PROD, RX_TAKEN};
+    let lines = eth_lines(ETH_BIG, 1514);
+    let p = eth_lc_program(ETH_A, 64, &[], |p| {
+        eth_wait(p, RX_CONS, 1);
+        p.write(1, eth_reg(RX_TAKEN));
+        p.write(ETH_BIG, PHYS | ETH_RX);
+        p.write(1536, PHYS | (ETH_RX + 1));
+        for &a in &lines {
+            p.main.push((a as usize, 0o5252525252 ^ a));
+            p.read(PHYS | a, 0o24);
+        }
+        p.write(2, eth_reg(RX_PROD));
+        eth_wait(p, RX_CONS, 2);
+    });
+    let frames = [(3000, eth_frame_of(42, 1)), (12_000, eth_frame_of(1514, 2))];
+    let first = eth_clocks_of(&p, 20, &frames, &[], 4, 1);
+    let r = first.e.port.clocks().read;
+    assert_eq!(first.moved - first.landed, r + 9 + 2, "the first: T");
+    let second = eth_clocks_of(&p, 20, &frames, &lines, 4, 2);
+    assert_eq!(second.moved - second.landed, r + 9 + 48, "the second: T");
+    assert_eq!(second.e.port.meters.engine_reads, 2, "the entry read twice");
+    for (i, c) in second.cleared.iter().enumerate() {
+        assert_eq!(*c, Some(second.landed + r + 9 + i as u64), "the second's line {i}");
+    }
+}
+
+/// **The halt's drain waits for line clearing** (QUUX's Ethernet contract,
+/// §2.5 (ii)): a halt asked for ten clocks after a 1,514-byte Ethernet
+/// frame is delivered ends only once 251 has moved, at the delivery's
+/// clock + T or after, so that a checkpoint taken in the halt has 251 at
+/// the entries filled. **Fails** a drain that leaves the engine at work.
+#[test]
+fn the_halt_s_drain_waits_for_line_clearing() {
+    use muir::ethernet_device::RX_CONS;
+    let p = eth_lc_program(ETH_BIG, 1536, &[], |p| eth_wait(p, RX_CONS, 1));
+    let mut m = machine(&p, REV16);
+    let s = muir::ethernet_device::Script::default();
+    s.arrive(3000 * 20, eth_frame_of(1514, 4));
+    m.attach_ethernet_peer(Box::new(s));
+    let mut e = Pipeline::new(m);
+    e.configure(20, muir::pipeline::PortTiming::KRIA, 65_536);
+    e.boot();
+    e.skip_sweep();
+    while e.machine().ethernet.read(RX_CONS) != 1 {
+        e.tick().unwrap();
+    }
+    let landed = e.clock();
+    for _ in 0..10 {
+        e.tick().unwrap();
+    }
+    assert!(!e.machine().ethernet.waiting(), "251 not moved yet");
+    e.halt_and_drain(10_000).unwrap();
+    assert!(e.is_halted(), "halted");
+    let t = e.port.clocks().read + 9 + 48;
+    assert!(e.clock() >= landed + t, "halted at {} for a delivery at {landed}, T {t}", e.clock());
+    assert!(e.machine().ethernet.waiting(), "251 moved before the halt");
+}
+
+/// **The engine's read waits for a lookup made in its clock or the clock
+/// before** (QUUX's Ethernet contract, §2.5 (ii); the fabric's transfer
+/// channel, whose fill is made only when no lookup is answered or asked
+/// for): the processor reads a cached line every third clock, each a hit,
+/// and a 42-byte Ethernet frame is delivered at each of six clocks across
+/// that rhythm. The entry's read goes at the first clock at or after the
+/// one it is wanted in with no lookup in it or the clock before, and T
+/// follows. **Fails** an engine that reads beside a lookup, or after one a
+/// clock too soon.
+#[test]
+fn line_clearing_waits_for_a_lookup_s_clocks() {
+    use muir::pipeline::Event;
+    let program = || {
+        eth_lc_program(ETH_A, 64, &[ELSEWHERE], |p| {
+            let va = p.k(PHYS | ELSEWHERE);
+            for _ in 0..300 {
+                p.op(ALU | SETA | a_src(va) | START_READ);
+            }
+        })
+    };
+    let reads =
+        |e: &Pipeline| eth_event_clocks(e, |ev| *ev == Event::Grant(ELSEWHERE as u32, false));
+    let quiet = eth_clocks(&program(), 20, &[(40_000, eth_frame_of(42, 1))], &[], 4);
+    let r = quiet.e.port.clocks().read;
+    let rs = reads(&quiet.e);
+    assert!(rs[2..250].windows(2).all(|w| w[1] - w[0] == 3), "a hit every third clock");
+    let mut waited = 0;
+    for phase in 0..6 {
+        let c = rs[100] + phase;
+        let run = eth_clocks(&program(), 20, &[(c - 5, eth_frame_of(42, 2))], &[], 4);
+        assert_eq!(run.landed + 5, c, "the delivery at its clock");
+        let g = reads(&run.e);
+        let go = (c..).find(|x| !g.contains(x) && !g.contains(&(x - 1))).unwrap();
+        assert_eq!(
+            run.moved - run.landed,
+            go - run.landed + r + 4 + 2,
+            "wanted at {c}, read at {go}"
+        );
+        waited += go - c;
+    }
+    // Wanted in a lookup's clock, two clocks late; in the clock after, one.
+    assert_eq!(waited, 2 * (2 + 1), "the waits of two rhythms");
 }

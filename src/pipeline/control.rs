@@ -215,6 +215,7 @@ impl Pipeline {
             && self.b.register_read.is_none()
             && self.b.cmd_prod.is_none()
             && self.b.starts.is_empty()
+            && !self.line_clearing_busy()
     }
 
     /// **`Engine::step`**: clocks until a microcycle is counted, or one
@@ -281,6 +282,7 @@ impl Pipeline {
             && self.b.register_read.is_none()
             && self.b.cmd_prod.is_none()
             && self.b.starts.is_empty()
+            && !self.line_clearing_busy()
     }
 
     /// The machine with the SPC stack's and the PDL buffer's writes the
@@ -405,6 +407,7 @@ impl Pipeline {
         let m = self.m.clone();
         self.port.load(&m, r)?;
         self.reset_pipeline();
+        self.lc = super::line_clearing::LineClearing::idle_at(self.m.ethernet.filled());
         self.npc = r.u16()?;
         self.npc_after = r.opt(crate::checkpoint::Reader::u16)?;
         self.b.pre_nop_next = r.bool()?;

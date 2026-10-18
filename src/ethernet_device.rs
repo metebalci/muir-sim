@@ -62,10 +62,18 @@
 //! frame longer than 1,514 bytes. A dropped Ethernet frame
 //! takes no buffer and writes nothing. A taken one is written into the
 //! buffer at slot 251, the bytes past its end in the last word 0 and no
-//! word past it; its length goes into the entry's word 2, the cache is made
-//! coherent ([`Coherence`]), and 251 advances. A buffer whose address is off
-//! a line or that runs past main memory is taken as too short: the device
-//! never writes outside main memory.
+//! word past it, and its length goes into the entry's word 2: the entry is
+//! filled, and the host's side reads RX_CONS moved. A buffer whose address
+//! is off a line or that runs past main memory is taken as too short: the
+//! device never writes outside main memory.
+//!
+//! **251 follows the entries filled, after line clearing** (§2.5 (ii)):
+//! before the machine sees 251 move past an entry, the sets of the cache
+//! lines the entry's buffer and the entry itself are in are cleared, so that
+//! the cache holds nothing stale. An engine that has a cache does it
+//! ([`EthernetDevice::engine_clears`]): `rtl`'s pipeline, which clears one
+//! set a clock and moves 251 after the last ([`EthernetDevice::move_251`]).
+//! Without one, `micro`, 251 moves with the entry filled.
 //!
 //! **Time** (§2.8). A transmit entry is sent 20 µs ([`SEND_NS`]) after it
 //! is due: after the latest of the producer write that posts it and the
@@ -186,29 +194,6 @@ impl Rules {
     };
 }
 
-/// **How a delivery makes the cache coherent** before 251 moves (§2.5).
-/// M-refill measures the two and chooses one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Coherence {
-    /// The whole-cache sweep, as for a file device completion: the default.
-    #[default]
-    Sweep,
-    /// Line clearing, as block-disk's: the sets of the buffer's lines it
-    /// wrote and of the entry's line. Behind the measurement switch, this
-    /// field.
-    LineClearing,
-}
-
-/// What the last advance asks of the cache, for the engine that has one.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Written {
-    /// A delivery under [`Coherence::Sweep`].
-    pub sweep: bool,
-    /// The physical word addresses of the lines written under
-    /// [`Coherence::LineClearing`], one a line.
-    pub lines: Vec<u32>,
-}
-
 /// **The host side of the link**: what sits behind the device. Times are
 /// the machine's own ([`crate::machine::Machine::ns`]: units of 0.5 ns on
 /// revision 16).
@@ -324,10 +309,10 @@ pub struct EthernetDevice {
     pub host: Host,
     /// The rules of §2.4.
     pub rules: Rules,
-    /// §2.5's mechanism.
-    pub coherence: Coherence,
-    /// What the last advance wrote, for the cache. Not in a checkpoint.
-    pub written: Written,
+    /// **An engine with a cache moves 251** (§2.5 (ii)): it clears each
+    /// filled entry's lines and then calls [`EthernetDevice::move_251`].
+    /// Without one, 251 moves with the entry filled. Not in a checkpoint.
+    pub engine_clears: bool,
     /// `--ethernet-trace`'s lines: each Ethernet frame sent and received,
     /// and why one is refused or dropped. Not in a checkpoint.
     pub trace: Option<Say>,
@@ -349,7 +334,10 @@ pub struct EthernetDevice {
     tx_prod: u16,
     tx_cons: u16,
     rx_prod: u16,
+    /// 251 as the machine reads it.
     rx_cons: u16,
+    /// The entries filled: the host's RX_CONS, which 251 follows.
+    rx_filled: u16,
     rx_taken: u16,
     /// 241's counters, each kept to its field's width.
     type_drops: u32,
@@ -372,8 +360,8 @@ impl Clone for EthernetDevice {
         EthernetDevice {
             host: self.host,
             rules: self.rules,
-            coherence: self.coherence,
-            written: self.written.clone(),
+            // A copy has no engine: the one it is given to says.
+            engine_clears: false,
             trace: self.trace.clone(),
             enabled: self.enabled,
             edges: self.enabled,
@@ -390,6 +378,7 @@ impl Clone for EthernetDevice {
             tx_cons: self.tx_cons,
             rx_prod: self.rx_prod,
             rx_cons: self.rx_cons,
+            rx_filled: self.rx_filled,
             rx_taken: self.rx_taken,
             type_drops: self.type_drops,
             ipv4_drops: self.ipv4_drops,
@@ -408,7 +397,7 @@ impl std::fmt::Debug for EthernetDevice {
         f.debug_struct("EthernetDevice")
             .field("enabled", &self.enabled)
             .field("tx", &(self.tx_prod, self.tx_cons))
-            .field("rx", &(self.rx_prod, self.rx_cons, self.rx_taken))
+            .field("rx", &(self.rx_prod, self.rx_filled, self.rx_cons, self.rx_taken))
             .field("head_due", &self.head_due)
             .finish_non_exhaustive()
     }
@@ -426,8 +415,7 @@ impl EthernetDevice {
         EthernetDevice {
             host: Host::default(),
             rules: Rules::OFFLOAD,
-            coherence: Coherence::default(),
-            written: Written::default(),
+            engine_clears: false,
             trace: None,
             enabled: false,
             edges: false,
@@ -444,6 +432,7 @@ impl EthernetDevice {
             tx_cons: 0,
             rx_prod: 0,
             rx_cons: 0,
+            rx_filled: 0,
             rx_taken: 0,
             type_drops: 0,
             ipv4_drops: 0,
@@ -524,7 +513,7 @@ impl EthernetDevice {
         !self.peer_waits
     }
 
-    /// Status `<8>`: a filled entry not taken back.
+    /// Status `<8>`: an entry 251 has passed not taken back.
     pub fn waiting(&self) -> bool {
         self.rx_cons != self.rx_taken
     }
@@ -535,8 +524,50 @@ impl EthernetDevice {
         self.interrupt_enable && self.waiting()
     }
 
-    /// A register's word, the device having been advanced to now.
+    /// A register's word as the host's side has it, the device having been
+    /// advanced to now: as the machine reads it ([`EthernetDevice::machine_read`])
+    /// but for 251, which is the entries filled, the host's RX_CONS.
     pub fn read(&self, word: u32) -> u32 {
+        match word {
+            RX_CONS if self.enabled => self.rx_filled.into(),
+            _ => self.machine_read(word),
+        }
+    }
+
+    /// The entries filled: the host's RX_CONS, which 251 follows.
+    pub fn filled(&self) -> u16 {
+        self.rx_filled
+    }
+
+    /// 251 as the machine reads it.
+    pub fn rx_cons(&self) -> u16 {
+        self.rx_cons
+    }
+
+    /// The physical address of the receive entry at slot 251, the next
+    /// whose lines an engine clears.
+    pub fn entry_at_251(&self) -> u32 {
+        self.rx_base + 8 * u32::from(self.rx_cons % self.rx_entries())
+    }
+
+    /// **251 moved past one more entry filled**, its lines cleared: an
+    /// engine's step ([`EthernetDevice::engine_clears`]). Status `<8>` and
+    /// word 100 `<8>` follow it.
+    pub fn move_251(&mut self) {
+        if self.enabled && self.rx_cons != self.rx_filled {
+            self.rx_cons = self.rx_cons.wrapping_add(1);
+        }
+    }
+
+    /// 251 at the entries filled at once: what an engine without a cache,
+    /// or one asked to, does.
+    pub fn catch_up_251(&mut self) {
+        self.rx_cons = self.rx_filled;
+    }
+
+    /// A register's word as the machine reads it, the device having been
+    /// advanced to now.
+    pub fn machine_read(&self, word: u32) -> u32 {
         let on = self.enabled;
         let mac = self.host.mac;
         match word {
@@ -646,7 +677,7 @@ impl EthernetDevice {
         self.set_enabled(false);
         self.interrupt_enable = false;
         (self.tx_prod, self.tx_cons) = (0, 0);
-        (self.rx_prod, self.rx_cons, self.rx_taken) = (0, 0, 0);
+        (self.rx_prod, self.rx_cons, self.rx_filled, self.rx_taken) = (0, 0, 0, 0);
         self.head_due = None;
     }
 
@@ -667,11 +698,8 @@ impl EthernetDevice {
 
     /// **The device advanced to `now`**: every transmit due and every
     /// Ethernet frame arrived by then, each at its own instant, in order;
-    /// whether main memory was written. [`EthernetDevice::written`] says
-    /// what the cache must do.
+    /// whether main memory was written.
     pub fn advance<W: MemoryWord>(&mut self, now: u64, main: &mut [W], time: TimeBase) -> bool {
-        self.written.sweep = false;
-        self.written.lines.clear();
         let mut wrote = false;
         loop {
             let tx = self.head_due.filter(|&d| d <= now);
@@ -771,13 +799,13 @@ impl EthernetDevice {
             dropped(self, why);
             return false;
         }
-        if self.rx_prod == self.rx_cons {
+        if self.rx_prod == self.rx_filled {
             self.rx_drops = (self.rx_drops + 1) & 0xff;
             dropped(self, "no buffer given");
             return false;
         }
-        let index = self.rx_cons;
-        let e = self.rx_base as usize + 8 * (self.rx_cons % self.rx_entries()) as usize;
+        let index = self.rx_filled;
+        let e = self.rx_base as usize + 8 * (self.rx_filled % self.rx_entries()) as usize;
         let (buf, room) = (main[e].low() & ADDRESS, main[e + 1].low());
         let n = f.len();
         let words = n.div_ceil(4);
@@ -806,15 +834,10 @@ impl EthernetDevice {
             main[buf + k] = W::tagged(u32::from_le_bytes(w), FIXNUM);
         }
         main[e + 2] = W::tagged(n as u32, FIXNUM);
-        match self.coherence {
-            Coherence::Sweep => self.written.sweep = true,
-            Coherence::LineClearing => {
-                let lines = &mut self.written.lines;
-                lines.extend((buf..buf + words).step_by(8).map(|a| a as u32));
-                lines.push(e as u32);
-            }
+        self.rx_filled = self.rx_filled.wrapping_add(1);
+        if !self.engine_clears {
+            self.rx_cons = self.rx_filled;
         }
-        self.rx_cons = self.rx_cons.wrapping_add(1);
         self.delivered_at = Some(at);
         self.say(at, time, || format!("received {}, into entry {index}", described(f)));
         true
@@ -827,7 +850,9 @@ impl EthernetDevice {
         for v in [self.tx_base, self.tx_log2, self.rx_base, self.rx_log2] {
             w.u32(v);
         }
-        for v in [self.tx_prod, self.tx_cons, self.rx_prod, self.rx_cons, self.rx_taken] {
+        // 251 as the entries filled: the lines an engine still owes are
+        // read again from main memory when the cache is restored.
+        for v in [self.tx_prod, self.tx_cons, self.rx_prod, self.rx_filled, self.rx_taken] {
             w.u16(v);
         }
         for v in [self.type_drops, self.ipv4_drops, self.rx_drops, self.tx_refusals] {
@@ -859,6 +884,7 @@ impl EthernetDevice {
         self.tx_cons = r.u16()?;
         self.rx_prod = r.u16()?;
         self.rx_cons = r.u16()?;
+        self.rx_filled = self.rx_cons;
         self.rx_taken = r.u16()?;
         self.type_drops = r.u32()? & 0xf;
         self.ipv4_drops = r.u32()? & 0x7f;

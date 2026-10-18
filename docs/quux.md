@@ -2473,33 +2473,59 @@ promiscuous bit
 rules' type filter, counted in `<7:4>`, and their IPv4 checks, counted in
 `<15:9>`; a frame either drops takes no buffer
 (`the_type_filter_and_the_ipv4_checks_count_and_take_no_buffer`). Then a
-buffer: none given (250 = 251), or one shorter than the Ethernet frame,
+buffer: none given (250 at the entries filled), or one shorter than the Ethernet frame,
 drops it, counted in `<23:16>`, and the buffer stays for the next
 (`a_full_receive_ring_drops_and_counts`); so does an Ethernet frame longer
 than 1,514 bytes, whatever its buffer's room
 (`a_received_frame_over_1514_bytes_is_dropped_and_counted`). A buffer off a
 line, or running past main memory, is taken as too short: nothing is
-written and 251 stays, so later Ethernet frames drop too
+written and the entry stays unfilled, so later Ethernet frames drop too
 (`a_buffer_off_a_line_or_past_memory_is_too_short`). A taken Ethernet frame is written
-into the buffer at slot 251 as the file device writes a buffer, byte k in
-`<8(k mod 4)+7:8(k mod 4)>` of word k/4, every word a fixnum, the bytes past
-its end in the last word 0 and no word past it; its length goes into the
-entry's word 2, the cache is made coherent, and 251 advances
-(`a_received_frame_is_written_as_fixnums_with_its_tail_zero`). The driver
+into the buffer of the next entry to fill as the file device writes a
+buffer, byte k in `<8(k mod 4)+7:8(k mod 4)>` of word k/4, every word a
+fixnum, the bytes past its end in the last word 0 and no word past it; its
+length goes into the entry's word 2, and the entry is filled: the host's
+side reads RX_CONS moved
+(`a_received_frame_is_written_as_fixnums_with_its_tail_zero`). 251 follows
+the entries filled once the cache is coherent, below. The driver
 keeps a buffer within one 1,024-word page: the device cannot see pages.
 
 **Coherence** follows revision 15's rules. On the pipeline a write of 244
 or 250 moves only once every earlier write is answered, as CMD_PROD's does
 (`a_transmit_entry_in_the_posted_writes_is_read_whole`,
 `a_receive_entry_in_the_posted_writes_is_taken_once_it_lands`). Before 251
-moves, the cache holds nothing stale: by default through the whole-cache
-sweep, as for a file device completion; with
-`EthernetDevice::coherence` set to `LineClearing`, a measurement switch,
-through clearing the sets of the buffer's lines it wrote and of the entry's
-line, as block-disk's words clear theirs, at once
-(`a_delivery_asks_for_the_sweep_or_for_its_lines`,
-`a_received_frame_is_seen_after_251_moves_under_both_mechanisms`). `micro`
-has no cache.
+moves past an entry, the cache holds nothing stale: by **line clearing**
+(contract §2.5 (ii)), as muir-fpga's fabric does it, clock for clock. An
+engine reads the entry at slot 251 out of main memory, through the port's
+one fill, installing nothing: its buffer, its room and its length. With n
+the length clamped to the room and to 1,514 bytes, it clears the set of
+each line from the buffer's first word to its ceil(n/4)th, one a clock,
+then the entry's line's, and only then moves 251 by one
+(`line_clearing_clears_the_sets_line_by_line_before_251_moves`). The
+engine takes an entry in the clock after it is filled; the port's transfer
+channel is its two clocks later; it drops its line, and reads the entry in
+R + 2 clocks, R the port's read latency in clocks, then its three words a
+clock each. So with nothing else on the port, 251 moves at the edge of
+clock T = R + 9 + L after the clock the entry was filled in, L the
+buffer's lines cleared (0 when n is 0): a read of 251 granted in that
+clock, which takes the register in the clock after, reads the new index. At the Kria's memory timing a 42-byte
+Ethernet frame in a buffer on a line and a 1,514-byte one give T = 46 and
+92 at 10 ns, 52 and 98 at 8.5 ns, and 31 and 77 at 18 ns
+(`line_clearing_moves_251_at_r_plus_9_plus_l`). Status `<8>` and the
+interrupt follow 251, and 252 may not pass it. Lookups never wait for the
+clears, and nothing is swept (`line_clearing_never_holds_a_lookup`). The
+engine's read of the entry waits for a fill of the processor's or a table
+read's in flight, a processor's lookup in its clock or the clock before, a
+table read asked for in its clock or looked up in the clock before, and
+the file device's sweep; after 16 clocks of waiting it is let in, and the
+lookups are held a clock as if busy. A clear waits for a clock no fill
+installs in (`line_clearing_waits_for_a_processor_s_fill_and_its_install`).
+Block-disk's transfer moves at START on muir and never holds the channel,
+so it never delays the engine there. The halt's drain waits for the
+engine. On `micro`, which has no cache, and under neutral time, 251 moves
+with the entry filled, and under neutral time the sets are cleared at once
+(`a_received_frame_is_seen_after_251_moves`,
+`the_machine_s_251_follows_the_entries_filled`).
 
 **The interrupt**, word 100 `<8>`, is up while 240 `<8>` is on and 251 ≠
 252: a level, cleared by writing 252 up to 251, by `<8>` off, by a disable
@@ -2544,8 +2570,10 @@ received, and why one is refused or dropped
 **A checkpoint** never refuses on the device's account: waiting transmit
 entries are in main memory and their indexes are registers, so a resume
 sends them, at the times an unbroken run would
-(`a_checkpoint_with_transmits_waiting_resumes_and_sends_them`). It
-carries 253-257 (`revision_16_s_checkpoint_carries_253_to_257`), and a
+(`a_checkpoint_with_transmits_waiting_resumes_and_sends_them`). It holds
+251 as the entries filled: the pipeline's halt waits for line clearing, so
+the two are one there, and a resume reads the cache's lines again from main
+memory. It carries 253-257 (`revision_16_s_checkpoint_carries_253_to_257`), and a
 resume under another `--ethernet-mac`, `--ip-address` or `--ip-gateway`,
 given or by default, is refused naming each flag that differs, as one
 under another `--rtc` is. A band's addresses are its tap's, so a

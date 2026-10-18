@@ -38,6 +38,15 @@
 //! - **The file device's sweep**: a completion clears every valid bit in
 //!   cache words / 512 clocks, and every lookup waits for it (A15b.6, MP2b
 //!   ruling Q10).
+//! - **Revision 16's line clearing** (QUUX's Ethernet contract, §2.5 (ii);
+//!   [`super::line_clearing`]): the Ethernet device's engine reads a receive
+//!   entry through the one fill, which installs nothing and keeps its line
+//!   for the engine ([`Reader::Engine`]); the fill is let go only in a clock
+//!   no other fill is in flight, no lookup of the processor's is made or
+//!   was made the clock before, no table read is asked or was looked up the
+//!   clock before, and no sweep runs. After 16 clocks of waiting it is let
+//!   in: the lookups are held a clock as if busy ([`Port::force`]). The
+//!   engine's clears of a set wait for a clock no fill installs in.
 //!
 //! A seeded memory model for the checks, [`LateModel`], answers each write
 //! 1 to 50 clocks late and lets a read pass a write accepted before it
@@ -310,6 +319,11 @@ pub enum Reader {
     Processor,
     /// A table read of a walk or a write-back, whose word the reader takes.
     Table,
+    /// The Ethernet device's line-clearing engine's read of a receive
+    /// entry, through block-disk's transfer channel (QUUX's Ethernet
+    /// contract, §2.5 (ii)): installed nowhere, its line kept for the
+    /// engine ([`Port::line_word`]).
+    Engine,
 }
 
 /// A fill: the line, the word asked for, and when it was issued.
@@ -350,6 +364,8 @@ pub struct PortMeters {
     pub sweep_clocks: u64,
     /// Writes accepted that were two data beats (MP4 ruling Q1, C1).
     pub two_beat_writes: u64,
+    /// The line-clearing engine's reads of a receive entry.
+    pub engine_reads: u64,
     /// Accepts a write's second beat delayed past the occupancy, and the
     /// clocks they waited for it.
     pub beat_delays: u64,
@@ -404,6 +420,18 @@ pub struct Port {
     /// The line the last fill installed: a test aid, for a sweep planted
     /// to miss its set.
     pub last_filled: Option<u32>,
+    /// The line-clearing engine's line: the last [`Reader::Engine`] fill's
+    /// line and words, until the engine starts on another entry.
+    line_buffer: Option<(u32, [Word; LINE_WORDS as usize])>,
+    /// The engine's read let in after its patience: every lookup is held
+    /// this clock as if busy.
+    pub force: bool,
+    /// The last clock the processor made a lookup in, a table read made
+    /// one in, and a table read asked for one in, busy or not: what the
+    /// engine's read waits on.
+    looked: Option<u64>,
+    table_looked: Option<u64>,
+    table_asked: Option<u64>,
 }
 
 impl Port {
@@ -432,6 +460,11 @@ impl Port {
             meters: PortMeters::default(),
             errors: 0,
             last_filled: None,
+            line_buffer: None,
+            force: false,
+            looked: None,
+            table_looked: None,
+            table_asked: None,
         }
     }
 
@@ -448,9 +481,12 @@ impl Port {
         self.queue.is_empty() && self.inflight.is_empty()
     }
 
-    /// Nothing at all in flight: drained, no fill, no sweep after `now`.
+    /// Nothing at all in flight: drained, no fill but the line-clearing
+    /// engine's, which its own busy covers, no sweep after `now`.
     pub fn idle(&self, now: u64) -> bool {
-        self.empty() && self.fill.is_none() && self.sweep_until <= now
+        self.empty()
+            && self.fill.is_none_or(|f| f.reader == Reader::Engine)
+            && self.sweep_until <= now
     }
 
     /// Entries queued, and lines in flight.
@@ -567,6 +603,12 @@ impl Port {
                 for (k, w) in words.iter_mut().enumerate() {
                     *w = load(m, base + k as u32);
                 }
+                if f.reader == Reader::Engine {
+                    self.line_buffer = Some((line, words));
+                    self.fill = None;
+                    self.meters.engine_reads += 1;
+                    return;
+                }
                 self.cache.install(line, words);
                 self.last_filled = Some(line);
                 self.filled = Some((now, words[(f.bus % LINE_WORDS) as usize]));
@@ -576,21 +618,30 @@ impl Port {
         }
     }
 
-    /// Whether a lookup may be made at `now`: no fill in flight, no sweep.
+    /// Whether a lookup may be made at `now`: no fill in flight, no sweep,
+    /// and the line-clearing engine's read not let in.
     pub fn may_look(&mut self, now: u64) -> bool {
         if self.sweep_until > now {
             self.meters.sweep_clocks += 1;
             return false;
         }
-        self.fill.is_none()
+        self.fill.is_none() && !self.force
     }
 
     /// **A read of the cacheable bus address `bus`** granted at `now`: a
     /// hit's word two clocks after the grant (A15b.6); a miss's fill, the
     /// read rule first; or busy, the cache serving another lookup.
     pub fn read(&mut self, now: u64, bus: u32, reader: Reader) -> Answer {
+        if reader == Reader::Table {
+            self.table_asked = Some(now);
+        }
         if !self.may_look(now) {
             return Answer::Busy;
+        }
+        match reader {
+            Reader::Processor => self.looked = Some(now),
+            Reader::Table => self.table_looked = Some(now),
+            Reader::Engine => {}
         }
         if let Some(w) = self.cache.read(bus) {
             self.cache.hits += 1;
@@ -602,6 +653,49 @@ impl Port {
         self.fill = Some(Fill { bus, reader, issued: None, asked: now + 1 });
         self.filled = None;
         Answer::Filling
+    }
+
+    /// **The line-clearing engine's read of the entry at `bus`** may go at
+    /// `now`, the clock's lookups made (QUUX's Ethernet contract, §2.5 (ii);
+    /// the fabric's transfer channel, `quux15_port.sv`'s `d_fill_go`): no
+    /// fill in flight, no lookup of the processor's now or the clock before,
+    /// no table read asked now (unless the read is let in) or looked up the
+    /// clock before, and no sweep.
+    pub fn engine_may_read(&self, now: u64) -> bool {
+        let near = |c: Option<u64>| c.is_some_and(|c| c + 1 >= now);
+        self.fill.is_none()
+            && !near(self.looked)
+            && !near(self.table_looked)
+            && (self.force || self.table_asked != Some(now))
+            && self.sweep_until <= now
+    }
+
+    /// The engine's read of `bus`'s line made at `now`: asked for in the
+    /// next clock, under the read rule, as a miss's fill is.
+    pub fn engine_read(&mut self, now: u64, bus: u32) {
+        debug_assert!(self.fill.is_none(), "one fill at a time");
+        self.fill = Some(Fill { bus, reader: Reader::Engine, issued: None, asked: now + 1 });
+    }
+
+    /// The word at `bus` from the engine's line, if it holds `bus`'s line.
+    pub fn line_word(&self, bus: u32) -> Option<Word> {
+        self.line_buffer
+            .as_ref()
+            .filter(|(l, _)| *l == line_of(bus))
+            .map(|(_, w)| w[(bus % LINE_WORDS) as usize])
+    }
+
+    /// The engine's line dropped: it starts on an entry.
+    pub fn drop_line_buffer(&mut self) {
+        self.line_buffer = None;
+    }
+
+    /// Whether a fill installs at the tick of `clock`: the engine's clear
+    /// of a set waits for a clock no install takes the valid bits in.
+    pub fn installs_at(&self, clock: u64) -> bool {
+        self.fill.is_some_and(|f| {
+            f.reader != Reader::Engine && f.issued.is_some_and(|at| at + self.clocks.read == clock)
+        })
     }
 
     /// The word the last fill read, once it has: when, and the word.
@@ -789,6 +883,8 @@ impl Port {
         self.fill = None;
         self.filled = None;
         self.sweep_until = 0;
+        self.line_buffer = None;
+        self.force = false;
         Ok(())
     }
 }

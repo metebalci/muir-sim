@@ -1721,11 +1721,9 @@ impl Machine {
 
     /// Runs the Ethernet device's transmits due and delivers what has
     /// arrived by the machine's clock: what each engine calls at the edge
-    /// between two microcycles, beside [`Machine::advance_file_device`]. A
-    /// delivery under the sweep invalidates QUUX's cache before the next
-    /// cycle, as a file device completion does; under line clearing the
-    /// engine with a cache clears [`crate::ethernet_device::Written`]'s
-    /// lines' sets.
+    /// between two microcycles, beside [`Machine::advance_file_device`]. An
+    /// engine with a cache clears a delivery's lines' sets before it moves
+    /// 251 ([`crate::ethernet_device::EthernetDevice::engine_clears`]).
     pub fn advance_ethernet(&mut self) {
         if !self.geometry.ethernet() {
             return;
@@ -1760,9 +1758,7 @@ impl Machine {
     #[inline(never)]
     fn advance_ethernet_now(&mut self) {
         let time = self.time_base();
-        if self.ethernet.advance(self.ns, &mut self.main, time) && self.ethernet.written.sweep {
-            self.dma_written = true;
-        }
+        self.ethernet.advance(self.ns, &mut self.main, time);
     }
 
     /// The Ethernet device's host side, from now on: a scripted peer of a
@@ -2724,7 +2720,7 @@ impl Machine {
                 // the machine's clock.
                 k @ 0o240..=0o257 if self.geometry.ethernet() => {
                     self.advance_ethernet();
-                    self.ethernet.read(k)
+                    self.ethernet.machine_read(k)
                 }
                 // The network (contract Q4): the Chaosnet interface's five
                 // registers (contract Q13).

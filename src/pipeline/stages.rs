@@ -312,8 +312,16 @@ fn spc_by_data(ir: u64) -> bool {
 impl Pipeline {
     // --- The clock ----------------------------------------------------------
 
-    /// **One clock**, in the order the module says.
+    /// **One clock**, in the order the module says, revision 16's
+    /// line-clearing engine's end of it last ([`super::line_clearing`]).
     pub(crate) fn clock_once(&mut self) -> Result<(), Halt> {
+        let r = self.clock_stages();
+        self.line_clearing_end();
+        r
+    }
+
+    /// The clock but the engine's end of it.
+    fn clock_stages(&mut self) -> Result<(), Halt> {
         self.clock += 1;
         self.meters.clocks += 1;
         let now = self.clock;
@@ -322,6 +330,7 @@ impl Pipeline {
         }
         self.console_edge();
         self.port.tick(&mut self.m, now);
+        self.line_clearing_start();
         let errors = self.port.take_errors();
         self.m.posted_write_errors = self.m.posted_write_errors.wrapping_add(errors);
         self.port_events(now);
@@ -445,7 +454,7 @@ impl Pipeline {
                 self.m.ns = self.device_time(mc);
                 let bus = crate::tlb::REGISTER_PAGE_BUS | self.b.held_word;
                 self.m.bus_write(bus, Word::from(v));
-                self.ethernet_coherence();
+                self.ethernet_at_once();
                 self.m.ns = keep;
             } else {
                 self.meters.cmd_prod_wait += 1;
@@ -462,28 +471,6 @@ impl Pipeline {
                 && matches!(off, crate::ethernet_device::TX_PROD | crate::ethernet_device::RX_PROD))
     }
 
-    /// The cache made coherent with what the Ethernet device last wrote,
-    /// before 251's move is seen (QUUX's Ethernet contract, §2.5): the
-    /// sweep, as a file device completion's, or the sets of the lines it
-    /// wrote, as block-disk's. Revision 16's alone.
-    pub(crate) fn ethernet_coherence(&mut self) {
-        if !self.m.geometry.ethernet() {
-            return;
-        }
-        let w = std::mem::take(&mut self.m.ethernet.written);
-        if w.sweep {
-            self.m.dma_written = false;
-            self.port.sweep(self.clock, None);
-            self.drop_prefetch();
-        }
-        if !w.lines.is_empty() {
-            for line in w.lines {
-                self.port.cache.clear_set(line);
-            }
-            self.drop_prefetch();
-        }
-    }
-
     /// The devices at the clock's instant, or the microcycle's under
     /// neutral time: the I/O board's clocks and the file device, whose
     /// completion sweeps the cache (A15b.6).
@@ -493,7 +480,7 @@ impl Pipeline {
         self.m.advance_file_device();
         if self.m.ethernet.at_edges() {
             self.m.advance_ethernet_at_edge();
-            self.ethernet_coherence();
+            self.ethernet_at_once();
         }
         if std::mem::take(&mut self.m.dma_written) {
             let missing = (self.mutation == Mutation::SweepMissesASet)
@@ -1021,7 +1008,7 @@ impl Pipeline {
                     // word right after the start (the register read ruling),
                     // released at once when that word has left EX already.
                     let word = self.m.register_read_15(bus);
-                    self.ethernet_coherence();
+                    self.ethernet_at_once();
                     self.b.register_read = Some(RegisterRead {
                         at_clock: now + 1,
                         seq,
@@ -1715,7 +1702,7 @@ impl Pipeline {
             self.block_disk_write(r.bus, word);
         } else {
             self.m.bus_write(r.bus, word);
-            self.ethernet_coherence();
+            self.ethernet_at_once();
         }
         self.m.ns = keep;
     }

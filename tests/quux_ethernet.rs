@@ -14,7 +14,7 @@
 
 mod support;
 
-use muir::ethernet_device::{self as eth, Coherence, Rules, Script};
+use muir::ethernet_device::{self as eth, Rules, Script};
 use muir::ethernet_offload::RxCounter;
 use muir::machine::{Geometry, Machine, Word};
 
@@ -597,44 +597,51 @@ fn a_received_frame_is_written_as_fixnums_with_its_tail_zero() {
 
 // --- coherence -----------------------------------------------------------------
 
-/// **A delivery asks the cache for the sweep by default, and for its lines
-/// under line clearing** (§2.5): the sweep is `Machine::dma_written`, as a
-/// file device completion's is; line clearing names the buffer's lines it
-/// wrote, ceil(n/4)/8 of them, and the entry's line, and sweeps nothing. A
-/// transmit asks for neither. **Fails** a mechanism that asks for the
-/// other's work, or misses a line.
+/// **251 follows the entries filled, and a delivery sweeps nothing**
+/// (§2.5 (ii)): on a machine with no engine to clear lines, as on `micro`,
+/// 251, status `<8>` and word 100 `<8>` move with the entry filled; with
+/// one (`EthernetDevice::engine_clears`, `rtl`'s pipeline) the entry is
+/// filled and the host's side reads RX_CONS moved, while the machine's 251,
+/// status `<8>` and word 100 `<8>` stay until the engine moves 251, an
+/// entry at a time and never past the entries filled, and 252 may not pass
+/// it. Neither asks for the sweep. **Fails** a device that moves 251
+/// under an engine, or leaves it without one.
 #[test]
-fn a_delivery_asks_for_the_sweep_or_for_its_lines() {
-    for (coherence, n) in
-        [(Coherence::Sweep, 61), (Coherence::LineClearing, 61), (Coherence::LineClearing, 1514)]
-    {
-        let (mut m, s) = enabled(0, 0);
-        m.ethernet.coherence = coherence;
+fn the_machine_s_251_follows_the_entries_filled() {
+    for engine in [false, true] {
+        let (mut m, s) = enabled(0, 1);
+        m.ethernet.engine_clears = engine;
         give(&mut m, 0, BUFFER_BYTES);
-        post(&mut m, 0, &arp(60, 0));
+        give(&mut m, 1, BUFFER_BYTES);
         m.dma_written = false;
-        at(&mut m, 2 * SEND);
-        assert!(!m.dma_written, "{coherence:?}: a transmit sweeps nothing");
-        assert!(m.ethernet.written.lines.is_empty(), "{coherence:?}: a transmit clears nothing");
-        s.arrive(m.ns, arp(n, 1));
-        at(&mut m, 3 * SEND);
-        let buf = rx_buffer(&m, 0, 0);
-        match coherence {
-            Coherence::Sweep => {
-                assert!(m.dma_written, "the sweep");
-                assert!(m.ethernet.written.lines.is_empty());
-            }
-            Coherence::LineClearing => {
-                assert!(!m.dma_written, "no sweep");
-                let words = (n as u32).div_ceil(4);
-                let mut want: Vec<u32> = (0..words.div_ceil(8)).map(|k| buf + 8 * k).collect();
-                want.push(RX_RING);
-                assert_eq!(
-                    m.ethernet.written.lines, want,
-                    "{n} bytes: the buffer's lines and the entry's"
-                );
-            }
+        s.arrive(m.ns, arp(1514, 1));
+        s.arrive(m.ns, arp(42, 2));
+        at(&mut m, SEND);
+        assert!(!m.dma_written, "engine {engine}: no sweep");
+        assert_eq!(rx_length(&m, 0, 1), FIXNUM | 1514, "engine {engine}: entry 0 filled");
+        assert_eq!(rx_length(&m, 1, 1), FIXNUM | 42, "engine {engine}: entry 1 filled");
+        assert_eq!(m.ethernet.read(eth::RX_CONS), 2, "engine {engine}: the host's RX_CONS");
+        let seen = |m: &mut Machine| {
+            (
+                get(m, eth::RX_CONS),
+                get(m, eth::STATUS) >> 8 & 1,
+                m.bus_read(INTERRUPTS) as u32 >> 8 & 1,
+            )
+        };
+        if !engine {
+            assert_eq!(seen(&mut m), (2, 1, 1), "251 with the entries filled");
+            continue;
         }
+        assert_eq!(seen(&mut m), (0, 0, 0), "251 behind");
+        put(&mut m, eth::RX_TAKEN, 1);
+        assert_eq!(get(&mut m, eth::STATUS) & 1 << 3, 1 << 3, "252 past 251 a fault");
+        assert_eq!(m.ethernet.entry_at_251(), RX_RING, "the entry to clear");
+        m.ethernet.move_251();
+        assert_eq!(seen(&mut m), (1, 1, 1), "one entry passed");
+        assert_eq!(m.ethernet.entry_at_251(), RX_RING + 8, "the next");
+        m.ethernet.move_251();
+        m.ethernet.move_251();
+        assert_eq!(seen(&mut m), (2, 1, 1), "never past the entries filled");
     }
 }
 

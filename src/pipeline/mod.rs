@@ -48,6 +48,7 @@
 
 mod control;
 mod exec;
+mod line_clearing;
 pub mod port;
 pub mod profile;
 mod stages;
@@ -408,6 +409,8 @@ pub struct Pipeline {
     pub outcomes: Option<Outcomes>,
     /// WB's and the port's state ([`stages::Back`]).
     pub(crate) b: stages::Back,
+    /// Revision 16's line-clearing engine ([`line_clearing`]).
+    lc: line_clearing::LineClearing,
 }
 
 /// **What each predicted site did** (A15b.8), by its control store address,
@@ -615,7 +618,11 @@ impl Pipeline {
             events: None,
             outcomes: None,
             b: stages::Back::default(),
+            lc: line_clearing::LineClearing::default(),
         };
+        p.lc = line_clearing::LineClearing::idle_at(p.m.ethernet.filled());
+        // 251 follows the entries filled by the engine's clears.
+        p.m.ethernet.engine_clears = true;
         p.m.period = if p.m.geometry.extended() { period } else { 0 };
         p.x.lvmo = p.m.geometry.lvmo_at_power_on();
         p.port.window_words = p.m.tv.buffer_words();
@@ -674,6 +681,7 @@ impl Pipeline {
             && self.ex.is_none()
             && self.wb.is_none()
             && self.port.idle(self.clock)
+            && !self.line_clearing_busy()
     }
 
     /// The stages' words, for a test: CS, RD, EX and WB's addresses, a
