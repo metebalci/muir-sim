@@ -565,8 +565,9 @@ pub enum Mutation {
 
 impl Pipeline {
     /// The pipeline running `m`: revision 15, or revision 14 as a
-    /// measurement aid. The Kria's period, memory timing and cache unless
-    /// [`Pipeline::configure`] says otherwise (MP2b ruling Q14).
+    /// measurement aid. Revision 15's default period, 10 ns, and the Kria's
+    /// memory timing and cache unless [`Pipeline::configure`] says otherwise
+    /// (MP2b ruling Q14).
     pub fn new(m: Machine) -> Pipeline {
         assert!(m.geometry.paged(), "the pipeline runs QUUX revisions 14 and 15");
         let period = if m.geometry.extended() { crate::clock::PERIOD_15 } else { PERIOD_14 };

@@ -1647,7 +1647,7 @@ impl Machine {
         self.time_base().ns_text(self.ns)
     }
 
-    /// Revision 15's clock period in nanoseconds, 8.5 at 17 units, for a
+    /// Revision 15's clock period in nanoseconds, 10 at 20 units, for a
     /// report's figures; `None` on a machine with no period of its own.
     pub fn period_ns(&self) -> Option<f64> {
         let t = self.time_base();

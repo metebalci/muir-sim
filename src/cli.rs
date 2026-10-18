@@ -1847,7 +1847,7 @@ const HELP: &[(Whose, &str)] = &[
         Whose::Quux,
         "  --microcycle-ns <ns>         QUUX revisions 15 and 16: the clock's period,
                                the microcycle, 5 to 63.5 in steps of 0.5, on
-                               both engines. [default: 8.5]",
+                               both engines. [default: 10]",
     ),
     (
         Whose::Quux,
@@ -3791,8 +3791,9 @@ fn time_engine<S: Stepper>(
         let now = m.ns;
         port.poll_cable(&mut m.ioboard.serial.cable, now);
     }
-    // Revision 15's hardware runs at its period, 8.5 ns at 17 units, on
-    // either engine; every other machine at the engine's own microcycle.
+    // Revision 15's hardware runs at its period, 10 ns at 20 units by
+    // default, on either engine; every other machine at the engine's own
+    // microcycle.
     let cycle_ns = s.engine().machine().period_ns().unwrap_or(s.engine().nominal_cycle_ns() as f64);
     report(name, ran, t.elapsed().as_secs_f64(), cycle_ns);
     hold.conclude(s.engine(), &stop, ran, halt);
@@ -7371,8 +7372,8 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         }
         Which::Rtl if geometry.extended() => {
             // Revision 15's `rtl` is its pipeline (contract G3 revision 15,
-            // §12.1): the Kria's period, memory timing and cache unless the
-            // flags say otherwise (MP2b ruling Q14).
+            // §12.1): the default period, 10 ns, and the Kria's memory timing
+            // and cache unless the flags say otherwise (MP2b ruling Q14).
             let mut m = machine(
                 &prom,
                 packs,

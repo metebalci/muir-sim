@@ -20,8 +20,8 @@
 //! `MUIR_BAND`'s and their PROM `MUIR_PROM`'s file, as `--prom` takes it;
 //! revision 15 has none built in. On them `rtl` is the pipeline
 //! (`muir::pipeline`), revision 14 as a measurement aid: its clock is
-//! `MUIR_MICROCYCLE_NS`, in ns, 5 to 63.5 in steps of 0.5, the Kria's 8.5 by
-//! default, on `micro` too; `MUIR_MEMORY_NS` is the port's
+//! `MUIR_MICROCYCLE_NS`, in ns, 5 to 63.5 in steps of 0.5, 10 by default,
+//! on `micro` too; `MUIR_MEMORY_NS` is the port's
 //! `<read>,<write>,<occupancy>` in ns or `kria`, `arty` or `de25`, `kria`
 //! by default, `MUIR_CACHE` its cache's words, and `MUIR_SYNC_TICKS` is
 //! refused.
@@ -1015,7 +1015,7 @@ fn main() {
     };
     let neutral = support::neutral::on();
     // Revision 15's clock, on both engines: `MUIR_MICROCYCLE_NS`, in ns, 5
-    // to 63.5 in steps of 0.5; the Kria's 8.5 by default.
+    // to 63.5 in steps of 0.5; 10 by default.
     let period = std::env::var("MUIR_MICROCYCLE_NS").ok().map(|v| {
         assert!(geometry.extended(), "MUIR_MICROCYCLE_NS={v} is QUUX revision 15's: quux-15");
         muir::clock::parse_microcycle_ns(&v).unwrap_or_else(|| {

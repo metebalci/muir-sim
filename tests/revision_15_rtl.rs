@@ -1144,8 +1144,8 @@ fn ml_same(m: Machine) -> Pipeline {
         );
     }
     assert_eq!(ut.len(), et.len(), "microcycles to the stop");
-    // Drained past the last write's response: the Kria's 215 ns is 26
-    // clocks at 8.5 ns, and 19 microcycles are the fewest that land it.
+    // Drained past the last write's response: the Kria's 215 ns is 22
+    // clocks at the default 10 ns, 26 at 8.5 ns; 32 microcycles cover both.
     for _ in 0..32 {
         e.step().unwrap();
         u.step().unwrap();
@@ -1234,15 +1234,16 @@ fn pipeline_at(p: &Prog, period: u64) -> Pipeline {
 }
 
 /// **Word 25 reads the period on `rtl` too** (A15b.1; MP2b ruling Q1): 17
-/// at 8.5 ns, the default, and 80 at 40 ns. **Fails** a word 25 of whole ns
-/// doubled, which cannot say 17, and one that is `micro`'s alone.
+/// at 8.5 ns, 20 at 10 ns, the default, and 80 at 40 ns. **Fails** a word
+/// 25 of whole ns doubled, which cannot say 17, and one that is `micro`'s
+/// alone.
 #[test]
 fn word_25_reads_the_period_on_rtl() {
     let mut p = Prog::default();
     p.read(REGISTER_PAGE | 0o25, 0o20).stop();
     assert_eq!(pipeline_at(&p, 17).machine().mmem[0o20], 17);
     assert_eq!(pipeline_at(&p, 80).machine().mmem[0o20], 80);
-    assert_eq!(pipeline(&p).machine().mmem[0o20], 17, "the Kria's 8.5 ns when nothing says");
+    assert_eq!(pipeline(&p).machine().mmem[0o20], 20, "10 ns when nothing says");
 }
 
 /// **A timer's rise is acted on at the first clock at or after it** (MP2b
@@ -3207,7 +3208,10 @@ fn a_halt_mid_burst_loses_no_write() {
 
 /// **A checkpoint keeps the period, the port's timing and the cache**
 /// (A15b.13; MP2b ruling Q16): a resume at another of any is refused, the
-/// refusal naming the flag that would match it; at the same, it loads.
+/// refusal naming the flag that would match it; at the same, it loads. The
+/// checkpoint is written at the default, 10 ns, 20 units, so the period's
+/// refusal names 10, and the timing's and the cache's are asked at 20, a
+/// period that matches.
 #[test]
 fn a_checkpoint_refuses_another_period_timing_or_cache() {
     let p = random_program(1, 0);
@@ -3232,10 +3236,10 @@ fn a_checkpoint_refuses_another_period_timing_or_cache() {
     let kria = muir::pipeline::PortTiming::KRIA;
     assert!(load(&|_| {}).is_ok());
     let why = load(&|f| f.configure(18, kria, 65_536)).unwrap_err();
-    assert!(why.contains("--microcycle-ns 8.5"), "{why}");
-    let why = load(&|f| f.configure(17, muir::pipeline::PortTiming::ARTY, 65_536)).unwrap_err();
+    assert!(why.contains("--microcycle-ns 10"), "{why}");
+    let why = load(&|f| f.configure(20, muir::pipeline::PortTiming::ARTY, 65_536)).unwrap_err();
     assert!(why.contains("--memory-timing 344,215,10"), "{why}");
-    let why = load(&|f| f.configure(17, kria, 16_384)).unwrap_err();
+    let why = load(&|f| f.configure(20, kria, 16_384)).unwrap_err();
     assert!(why.contains("--cache 65536"), "{why}");
 }
 

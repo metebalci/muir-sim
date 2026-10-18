@@ -1162,7 +1162,7 @@ reads it in units of 0.5 ns ([revision 15](quux.md)). The start says it and
 a checkpoint carries it. Refused below revision 15, where the microcycle is
 `--sync-cycle-ticks`'s, and `--sync-cycle-ticks` is refused on 15 and 16.
 
-Default: 8.5.
+Default: 10.
 
 ### `--sync-cycle-ticks <k>`
 

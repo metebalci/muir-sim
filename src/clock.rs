@@ -244,9 +244,10 @@ impl TimeBase {
 }
 
 /// **Revision 15's and 16's period when no flag says**, in units of 0.5 ns:
-/// 17, 8.5 ns, muir's default (contract G3 revision 15, §12.1; MP2b
-/// ruling Q14).
-pub const PERIOD_15: u64 = 17;
+/// 20, 10 ns, muir's default (contract G3 revision 15, §12.1; MP2b
+/// ruling Q14). The default is 10 ns, on both engines; `--microcycle-ns`
+/// sets any other period in its range.
+pub const PERIOD_15: u64 = 20;
 
 /// `--microcycle-ns`'s range in units of 0.5 ns: 5 to 63.5 ns (A15b.12),
 /// all the fabric's period field holds, seven bits of 0.5 ns.

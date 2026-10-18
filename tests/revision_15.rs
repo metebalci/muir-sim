@@ -214,17 +214,17 @@ fn expect(m: &Machine, rows: &[(u64, Word, &str)]) {
 // --- identity (A15b.1) --------------------------------------------------------
 
 /// **Feature word 0 says revision 15, and word 25 the microcycle in units
-/// of 0.5 ns** (A15b.1): `micro`'s period is the Kria's 8.5 ns when nothing
-/// says otherwise (MP2b ruling Q14), so 17; 63.5 ns, the longest, gives 127
+/// of 0.5 ns** (A15b.1): `micro`'s period is 10 ns when nothing says
+/// otherwise (MP2b ruling Q14), so 20; 63.5 ns, the longest, gives 127
 /// (Q15; A15b.12). On revision 14 word 25 reads 0, as every unassigned
 /// feature word does (the control). **Fails** a MACHINE-ID left at 14, a word 25 that is not the
-/// engine's period, and one in whole ns doubled, which cannot say 17.
+/// engine's period, and one in whole ns doubled, which cannot say 127.
 #[test]
 fn feature_words_0_and_25_say_revision_15_and_its_period() {
     let mut p = Prog::default();
     p.read(REGISTER_PAGE, 0o20).read(REGISTER_PAGE | 0o25, 0o21).stop();
     let m = run(&p);
-    expect(&m, &[(0o20, 0x5155_00f4, "MACHINE-ID"), (0o21, 17, "word 25 at 8.5 ns")]);
+    expect(&m, &[(0o20, 0x5155_00f4, "MACHINE-ID"), (0o21, 20, "word 25 at 10 ns")]);
     let mut u = Micro::new(machine(&p, REV15, &|_| {}));
     u.period = 127;
     u.boot();
@@ -1544,21 +1544,23 @@ fn machine_for(c: &muir::checkpoint::Checkpoint) -> Machine {
     m
 }
 
-/// The checkpoint at `path`, loaded on its engine: its microcycles and the
-/// time-neutral harness's whole digest of the state between two
-/// microcycles (`tests/support/neutral.rs`).
-fn digest_of(path: &std::path::Path) -> (u64, u64) {
+/// The checkpoint at `path`, written at `period`, loaded on its engine: its
+/// microcycles and the time-neutral harness's whole digest of the state
+/// between two microcycles (`tests/support/neutral.rs`).
+fn digest_of(path: &std::path::Path, period: u64) -> (u64, u64) {
     use support::neutral::digest;
     let c = muir::checkpoint::read(path).unwrap();
     let m = machine_for(&c);
     match c.engine.as_str() {
         "rtl" => {
             let mut e = muir::pipeline::Pipeline::new(m);
+            e.configure(period, muir::pipeline::PortTiming::KRIA, muir::pipeline::CACHE_WORDS);
             e.load(&mut c.reader()).unwrap();
             (e.machine().cycles, digest(e.machine(), e.pending(), e.oa_registers(), true))
         }
         "micro" => {
             let mut e = Micro::new(m);
+            e.period = period;
             e.load(&mut c.reader()).unwrap();
             // What its halt would send out, as the harness does.
             e.send_out_waiting_write();
@@ -1567,6 +1569,11 @@ fn digest_of(path: &std::path::Path) -> (u64, u64) {
         other => panic!("{other}"),
     }
 }
+
+/// `--microcycle-ns 8.5`, for the checks that need that period: 17 units,
+/// odd, so that the machine's instants can be odd units, which the
+/// default's 20 never are.
+const AT_8_5: [&str; 2] = ["--microcycle-ns", "8.5"];
 
 /// `quux` on revision 15 with `engine`, its other flags `args`; a fresh
 /// run with 2MW of main memory, which keeps the digests quick.
@@ -1585,8 +1592,9 @@ fn quux_15(engine: &str, args: &[&std::ffi::OsStr]) -> std::process::Command {
 /// and in flight and a read on its way, it writes a checkpoint of the
 /// state between two microcycles. `micro`, run to the same microcycle,
 /// writes one that digests the same; each resumed and run on, and
-/// checkpointed again, digests the same again. **Fails** a stop that writes
-/// the pipeline as it stands, which panicked.
+/// checkpointed again, digests the same again. The stops are 8.5 ns's,
+/// set. **Fails** a stop that writes the pipeline as it stands, which
+/// panicked.
 #[test]
 fn an_rtl_stop_on_revision_15_drains_before_its_checkpoint() {
     use support::{Run, scratch, text};
@@ -1606,9 +1614,10 @@ fn an_rtl_stop_on_revision_15_drains_before_its_checkpoint() {
                 r.as_os_str(),
             ],
         )
+        .args(AT_8_5)
         .run();
         assert!(out.status.success(), "rtl, stop {stop}:\n{}", text(&out));
-        let (cycles, rd) = digest_of(&r);
+        let (cycles, rd) = digest_of(&r, 17);
         assert!(cycles == stop || cycles == stop + 1, "stop {stop}: at {cycles}");
         let out = quux_15(
             "micro",
@@ -1621,9 +1630,10 @@ fn an_rtl_stop_on_revision_15_drains_before_its_checkpoint() {
                 u.as_os_str(),
             ],
         )
+        .args(AT_8_5)
         .run();
         assert!(out.status.success(), "micro, stop {stop}:\n{}", text(&out));
-        assert_eq!(digest_of(&u), (cycles, rd), "stop {stop}: micro's at the same microcycle");
+        assert_eq!(digest_of(&u, 17), (cycles, rd), "stop {stop}: micro's at the same microcycle");
         // Each resumed, run on and checkpointed again.
         let (r2, u2) =
             (dir.join(format!("rtl-{stop}-2.chk")), dir.join(format!("micro-{stop}-2.chk")));
@@ -1638,9 +1648,10 @@ fn an_rtl_stop_on_revision_15_drains_before_its_checkpoint() {
                 r2.as_os_str(),
             ],
         )
+        .args(AT_8_5)
         .run();
         assert!(out.status.success(), "rtl resumed, stop {stop}:\n{}", text(&out));
-        let (cycles2, rd2) = digest_of(&r2);
+        let (cycles2, rd2) = digest_of(&r2, 17);
         assert!(cycles2 >= cycles + 23, "stop {stop}: resumed and ran on to {cycles2}");
         let on = (cycles2 - cycles).to_string();
         let out = quux_15(
@@ -1654,18 +1665,21 @@ fn an_rtl_stop_on_revision_15_drains_before_its_checkpoint() {
                 u2.as_os_str(),
             ],
         )
+        .args(AT_8_5)
         .run();
         assert!(out.status.success(), "micro resumed, stop {stop}:\n{}", text(&out));
-        assert_eq!(digest_of(&u2), (cycles2, rd2), "stop {stop}: resumed, run on alike");
+        assert_eq!(digest_of(&u2, 17), (cycles2, rd2), "stop {stop}: resumed, run on alike");
     }
 }
 
-/// The machine's clock in a revision-15 `rtl` checkpoint: its microcycles,
-/// the clocks the pipeline ran and the clock itself in the machine's units.
-fn clock_of(path: &std::path::Path) -> (u64, u64, u64) {
+/// The machine's clock in a revision-15 `rtl` checkpoint written at
+/// `period`: its microcycles, the clocks the pipeline ran and the clock
+/// itself in the machine's units.
+fn clock_of(path: &std::path::Path, period: u64) -> (u64, u64, u64) {
     let c = muir::checkpoint::read(path).unwrap();
     assert_eq!(c.engine, "rtl");
     let mut e = muir::pipeline::Pipeline::new(machine_for(&c));
+    e.configure(period, muir::pipeline::PortTiming::KRIA, muir::pipeline::CACHE_WORDS);
     e.load(&mut c.reader()).unwrap();
     let m = e.machine();
     assert_eq!(m.time_base().per_ns, 2, "revision 15 counts units of 0.5 ns");
@@ -1704,7 +1718,7 @@ fn a_resume_on_revision_15_says_its_time_in_nanoseconds() {
             &os("--checkpoint"),
             chk.as_os_str(),
         ]);
-        clock_of(chk)
+        clock_of(chk, muir::clock::PERIOD_15)
     };
     let resumed = |from: &std::path::Path, stop: u64, chk: &std::path::Path| {
         let stop = os(&stop.to_string());
@@ -1716,7 +1730,7 @@ fn a_resume_on_revision_15_says_its_time_in_nanoseconds() {
             &os("--checkpoint"),
             chk.as_os_str(),
         ]);
-        (t, clock_of(chk))
+        (t, clock_of(chk, muir::clock::PERIOD_15))
     };
     let period = muir::clock::PERIOD_15;
     let a = dir.join("a.chk");
@@ -1751,7 +1765,7 @@ fn ns_text(units: u64) -> String {
 /// nanosecond** (MP2b ruling Q1): held and stepped one microcycle at a
 /// time, checkpointed and asked after each step, every `pc` line gives the
 /// checkpoint's units as nanoseconds, ".5" where they are odd, and some of
-/// them are. **Fails** a `pc` that drops the half.
+/// them are, at 8.5 ns, set. **Fails** a `pc` that drops the half.
 #[test]
 fn the_prompt_s_pc_on_revision_15_prints_an_odd_instant_s_half() {
     use std::io::Write;
@@ -1759,7 +1773,7 @@ fn the_prompt_s_pc_on_revision_15_prints_an_odd_instant_s_half() {
     let dir = scratch("revision-15-prompt-pc-half");
     let prom = memory_loop_prom(&dir);
     let mut c = quux_15("rtl", &[]);
-    c.args(["--stop-after", "1000000000", "--prom"]).arg(&prom);
+    c.args(AT_8_5).args(["--stop-after", "1000000000", "--prom"]).arg(&prom);
     c.stdin(std::process::Stdio::piped());
     let mut child = c.start();
     let mut stdin = child.stdin();
@@ -1778,7 +1792,7 @@ fn the_prompt_s_pc_on_revision_15_prints_an_odd_instant_s_half() {
     let pcs: Vec<&str> = t.lines().filter(|l| l.starts_with("PC ")).collect();
     let mut odd = 0;
     for h in &held {
-        let (cycles, _, units) = clock_of(h);
+        let (cycles, _, units) = clock_of(h, 17);
         odd += units as usize % 2;
         let says = format!("; {cycles} microcycles, {} ns;", ns_text(units));
         assert!(pcs.iter().any(|l| l.contains(&says)), "no `PC` line says `{says}`:\n{t}");
@@ -1788,8 +1802,8 @@ fn the_prompt_s_pc_on_revision_15_prints_an_odd_instant_s_half() {
 
 /// **A resume on revision 15 prints an odd instant with its half
 /// nanosecond** (MP2b ruling Q1): stopped and checkpointed at an odd unit,
-/// resumed, the line gives the units as nanoseconds and ".5". **Fails** a
-/// resume line that drops the half.
+/// resumed, the line gives the units as nanoseconds and ".5", at 8.5 ns,
+/// set. **Fails** a resume line that drops the half.
 #[test]
 fn a_resume_on_revision_15_prints_an_odd_instant_s_half() {
     use support::{Run, scratch, text};
@@ -1804,16 +1818,18 @@ fn a_resume_on_revision_15_prints_an_odd_instant_s_half() {
                 "rtl",
                 &[&os("--stop-after"), &os(&stop.to_string()), &os("--prom"), prom.as_os_str()],
             )
+            .args(AT_8_5)
             .arg("--checkpoint")
             .arg(&chk)
             .run();
             assert!(out.status.success(), "the run failed:\n{}", text(&out));
-            let (cycles, _, units) = clock_of(&chk);
+            let (cycles, _, units) = clock_of(&chk, 17);
             (units % 2 == 1).then_some((chk, cycles, units))
         })
         .expect("a stop at an odd unit");
-    let out =
-        quux_15("rtl", &[&os("--resume"), chk.as_os_str(), &os("--stop-after"), &os("1")]).run();
+    let out = quux_15("rtl", &[&os("--resume"), chk.as_os_str(), &os("--stop-after"), &os("1")])
+        .args(AT_8_5)
+        .run();
     let t = text(&out);
     assert!(out.status.success(), "the resume failed:\n{t}");
     let says = format!("resumed: {} at {cycles} microcycles, {}.5 ns,", chk.display(), units / 2);
@@ -1837,6 +1853,55 @@ fn pace_on_revision_15_says_its_period() {
         assert!(out.status.success(), "{engine}:\n{t}");
         let says = "pace: the machine's own speed, 8.5 ns a microcycle;";
         assert!(t.contains(says), "{engine}: no `{says}`:\n{t}");
+    }
+}
+
+/// **With no period flag, revisions 15 and 16 run at 10 ns**, muir's
+/// default (contract G3 revision 15, §12.1; MP2b ruling Q14), on both
+/// engines: the start's timing line and the `--pace` line say 10 ns, 20
+/// units of 0.5 ns, and the checkpoint the run writes records that period,
+/// so it resumes at `--microcycle-ns 10` and is refused at 8.5. **Fails**
+/// a default of 8.5 ns, and an engine run at another period than the
+/// default.
+#[test]
+fn with_no_period_flag_revisions_15_and_16_run_at_10_ns() {
+    use support::{Run, scratch, text};
+    let dir = scratch("revision-15-default-period");
+    let prom = memory_loop_prom(&dir);
+    for revision in ["15", "16"] {
+        for engine in ["micro", "rtl"] {
+            let what = format!("revision {revision}, {engine}");
+            let chk = dir.join(format!("{revision}-{engine}.chk"));
+            let out = quux_15(engine, &[])
+                .env("MUIR_QUUX_REVISION", revision)
+                .args(["--pace", "--stop-after", "10", "--prom"])
+                .arg(&prom)
+                .arg("--checkpoint")
+                .arg(&chk)
+                .run();
+            let t = text(&out);
+            assert!(out.status.success(), "{what}:\n{t}");
+            for says in [
+                "timing: revision 15's clock, 10 ns a microcycle (20 units of 0.5 ns)",
+                "pace: the machine's own speed, 10 ns a microcycle;",
+            ] {
+                assert!(t.contains(says), "{what}: no `{says}`:\n{t}");
+            }
+            let resume = |ns: &str| {
+                let mut c = support::quux();
+                c.env("MUIR_QUUX_REVISION", revision)
+                    .arg(format!("--{engine}"))
+                    .args(["--microcycle-ns", ns, "--stop-after", "1", "--resume"])
+                    .arg(&chk);
+                c.run()
+            };
+            let out = resume("10");
+            assert!(out.status.success(), "{what}: resumed at 10 ns:\n{}", text(&out));
+            let out = resume("8.5");
+            let t = text(&out);
+            assert!(!out.status.success(), "{what}: resumed at 8.5 ns:\n{t}");
+            assert!(t.contains("a period of 10 ns"), "{what}: the refusal:\n{t}");
+        }
     }
 }
 
@@ -1932,7 +1997,7 @@ fn the_prompt_s_pc_on_revision_15_says_nanoseconds() {
     let out = child.wait();
     let t = text(&out);
     assert!(out.status.success(), "rtl:\n{t}");
-    let (cycles, _, units) = clock_of(&held);
+    let (cycles, _, units) = clock_of(&held, muir::clock::PERIOD_15);
     let says = format!("; {cycles} microcycles, {} ns;", ns_text(units));
     assert!(
         t.lines().any(|l| l.starts_with("PC ") && l.contains(&says)),
@@ -1994,7 +2059,7 @@ fn a_capture_on_revision_15_is_timed_in_nanoseconds() {
     assert!(out.status.success(), "the run failed:\n{t}");
     let delays = gif_delays(&std::fs::read(&gif).unwrap());
     assert_eq!(delays.len(), 1, "one frame of a screen that never changes:\n{t}");
-    let ns = clock_of(&chk).2 / 2;
+    let ns = clock_of(&chk, muir::clock::PERIOD_15).2 / 2;
     assert!(ns > 40_000_000, "the run is long enough to tell: {ns} ns");
     // The frame is taken in the run's first moments, so it is up a little
     // less than the whole run: within a hundredth of a second.
@@ -2028,7 +2093,8 @@ fn the_prompt_s_checkpoint_on_revision_15_s_rtl_drains_and_goes_on() {
     let out = child.wait();
     let t = text(&out);
     assert!(out.status.success(), "rtl:\n{t}");
-    let ((c1, d1), (c2, d2)) = (digest_of(&held), digest_of(&end));
+    let ((c1, d1), (c2, d2)) =
+        (digest_of(&held, muir::clock::PERIOD_15), digest_of(&end, muir::clock::PERIOD_15));
     assert!(c2 > c1, "the run went on after the checkpoint: {c1}, {c2}");
     for (cycles, d, name) in [(c1, d1, "held"), (c2, d2, "end")] {
         let u = dir.join(format!("micro-{name}.chk"));
@@ -2039,6 +2105,10 @@ fn the_prompt_s_checkpoint_on_revision_15_s_rtl_drains_and_goes_on() {
             .arg(&u)
             .run();
         assert!(out.status.success(), "micro:\n{}", text(&out));
-        assert_eq!(digest_of(&u), (cycles, d), "{name}: micro's at the same microcycle");
+        assert_eq!(
+            digest_of(&u, muir::clock::PERIOD_15),
+            (cycles, d),
+            "{name}: micro's at the same microcycle"
+        );
     }
 }

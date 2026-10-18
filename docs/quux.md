@@ -1974,8 +1974,8 @@ Under neutral time the device sees the write at its start's instant
 (`write_i_mem_writes_64_bits_and_no_tag`).
 
 **The feature page** says revision 15 in word 0, `0x515500f4`, and in word
-25 the microcycle, the clock's period, in units of 0.5 ns: 17 at the
-default 8.5 ns, and what `--microcycle-ns` sets on either engine
+25 the microcycle, the clock's period, in units of 0.5 ns: 20 at the
+default 10 ns, and what `--microcycle-ns` sets on either engine
 (`feature_words_0_and_25_say_revision_15_and_its_period`,
 `word_25_reads_the_period_on_rtl`). Register-page word 225 counts the
 posted writes answered with an error; a write clears it, and so does
@@ -2054,7 +2054,7 @@ end as on `micro` microcycle for microcycle
 `d_and_the_fused_return_end_as_on_micro`).
 
 **Time** is in units of 0.5 ns on revision 15, `Machine::ns` counting them.
-The period is `--microcycle-ns`, 5 to 63.5 ns in steps of 0.5, 8.5 by
+The period is `--microcycle-ns`, 5 to 63.5 ns in steps of 0.5, 10 by
 default; the Kria KR260's revision 15 fit closes at 19 ns; `--sync-cycle-ticks` is refused. A device's
 duration is turned to clocks once, rounded up, and a timer keeps true time
 over a second at every period

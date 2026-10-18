@@ -196,11 +196,12 @@ fn micro_under_neutral_time_charges_no_memory_time() {
 /// **The pipeline's line names its clock's period in ns** on both revisions
 /// it runs: revision 14's, a measurement aid whose period counts whole ns,
 /// at 9 ns (`muir::pipeline::PERIOD_14`), and revision 15's, in units of
-/// 0.5 ns, at 8.5. The line's time in all is clocks times that period. A
-/// line that reads revision 14's period as half-ns units says 4.5.
+/// 0.5 ns, at 8.5, set, so that the half shows. The line's time in all is
+/// clocks times that period. A line that reads revision 14's period as
+/// half-ns units says 4.5.
 #[test]
 fn the_pipeline_s_line_names_its_period_in_ns() {
-    use muir::pipeline::Pipeline;
+    use muir::pipeline::{CACHE_WORDS, Pipeline, PortTiming};
     for (geometry, text, ns_tenths) in
         [(Geometry::QUUX_14, "clocks of 9 ns", 90), (Geometry::QUUX_15, "clocks of 8.5 ns", 85)]
     {
@@ -210,6 +211,9 @@ fn the_pipeline_s_line_names_its_period_in_ns() {
         m.load_prom(&words);
         support::prom_program_in_ram(&mut m);
         let mut e = Pipeline::new(m);
+        if geometry.extended() {
+            e.configure(17, PortTiming::KRIA, CACHE_WORDS);
+        }
         e.boot();
         e.skip_sweep();
         let start = Span::of_pipeline(&e);
