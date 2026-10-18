@@ -1433,6 +1433,50 @@ fn a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_later() {
     assert_eq!(grant_to_md(&ev), [1 + 55, 2], "de25 at 11 ns");
 }
 
+/// **A fill is never shorter than the port can do**: the 64-bit port reads
+/// a line in 5 beats, and the fill lands the clock after the last, so 6
+/// clocks at the least, on every board's period and every memory timing.
+/// A timing under that is held to 6: 100 ns at the Kria's 20 ns, 120 at
+/// the DE25-Nano's 25 and 247 at the Arty's 50 ns, each 5 clocks
+/// unfloored. One over it keeps its own: the presets at the boards'
+/// periods, 18, 24 and 6 clocks, 300 ns at 50 ns, 6, and 400, 8. Read off
+/// the run, a miss's grant to its `MD`, and off the port's clocks.
+/// **Fails** a fill of ⌈r/P⌉ clocks with no floor.
+#[test]
+fn a_fill_is_never_shorter_than_the_port_s_beats_and_its_landing() {
+    use muir::pipeline::PortTiming;
+    let mut p = Prog::default();
+    p.read(PHYS | 0o100, 0o20).read(PHYS | 0o101, 0o21).stop();
+    let read = |t: PortTiming, ns: u64| PortTiming { read_ns: ns, ..t };
+    let (kria, de25, arty) = (PortTiming::KRIA, PortTiming::DE25, PortTiming::ARTY);
+    let mut wrong = Vec::new();
+    for (board, period, timing, fill) in [
+        ("kria", 40, read(kria, 100), 6),
+        ("de25", 50, read(de25, 120), 6),
+        ("arty", 100, read(arty, 247), 6),
+        ("kria", 40, kria, 18),
+        ("de25", 50, de25, 24),
+        ("arty", 100, arty, 6),
+        ("arty", 100, read(arty, 300), 6),
+        ("arty", 100, read(arty, 400), 8),
+    ] {
+        let (e, ev) = events(&p, period, timing);
+        let got = (e.port.clocks().read, grant_to_md(&ev));
+        if got != (fill, vec![1 + fill, 2]) {
+            wrong.push(format!(
+                "{board} at {} ns, a fill of {} ns: the port's {} clocks and grant to MD {:?}, \
+                 not {fill} and [{}, 2]",
+                period / 2,
+                timing.read_ns,
+                got.0,
+                got.1,
+                1 + fill
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// **The `de25` preset is the DE25-Nano's measured port** (MP2b ruling
 /// Q5): a fill 600 ns, a write 485, the occupancy 40; at the board's
 /// 22.5 ns, 27, 22 and 2 clocks. **Fails** the model's figures carried

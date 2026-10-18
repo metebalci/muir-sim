@@ -29,7 +29,8 @@
 //!   waits for the fill. Its size is the run's (`--cache`); a hit lands two
 //!   clocks after the grant at every size (A15b.6, MP2b ruling Q8).
 //! - **Timing**, in clocks of the period: a line fill [`PortTiming`]'s
-//!   `read_ns`, the whole fill; a write's response `write_ns` after its
+//!   `read_ns`, the whole fill, and never under [`FILL_FLOOR`], the line's
+//!   beats and its landing clock; a write's response `write_ns` after its
 //!   accept; accepts `occupancy_ns` apart, each counted from the last
 //!   (MP2b rulings Q2, Q5-Q7), or two clocks after a write of two data
 //!   beats when the occupancy is one clock ([`beats`]; MP4 ruling Q1).
@@ -65,6 +66,20 @@ pub const IN_FLIGHT: usize = 16;
 
 /// Words a line (G1 §4.1; MP2b ruling Q7): 40 bytes in packed storage.
 pub const LINE_WORDS: u32 = 8;
+
+/// **The data beats of a line's fill**: its 40 bytes on the 64-bit master,
+/// 8 bytes a beat (muir-fpga `rtl/plumbing/quux15_axi_master.sv:10-13`),
+/// the port every board's core has.
+pub const LINE_BEATS: u64 = LINE_WORDS as u64 * 5 / 8;
+
+/// **The shortest fill the port can do**, in clocks, at every period and
+/// every memory timing: the line's [`LINE_BEATS`], the first a clock after
+/// the address at the soonest, and the clock the fill lands in after the
+/// last (muir-fpga `rtl/plumbing/quux15_axi_master.sv:45-51`; the core's
+/// testbench refuses a trace's fill under it, `tb/quux15_core_tb.cpp:1008-1016`).
+/// A fill of fewer clocks is held to it. The frame buffer's window reads a line in 4 beats, but the
+/// port has one fill time for both, so the floor is main memory's line's.
+pub const FILL_FLOOR: u64 = LINE_BEATS + 1;
 
 /// **The data beats of a write to the bus address `bus`** (MP4 ruling Q1,
 /// C1): main memory's word `w` is packed in five bytes from byte `5w`, and
@@ -144,10 +159,15 @@ impl PortTiming {
     }
 
     /// The three in clocks of the period `time` gives, each rounded up on
-    /// its own (MP2b ruling Q2): a fill, a write's response, an occupancy.
+    /// its own (MP2b ruling Q2): a fill, never under [`FILL_FLOOR`], a
+    /// write's response, an occupancy.
     pub fn clocks(self, time: TimeBase) -> Clocks {
         let c = |ns: u64| time.clocks(time.ns(ns)).max(1);
-        Clocks { read: c(self.read_ns), write: c(self.write_ns), occupancy: c(self.occupancy_ns) }
+        Clocks {
+            read: c(self.read_ns).max(FILL_FLOOR),
+            write: c(self.write_ns),
+            occupancy: c(self.occupancy_ns),
+        }
     }
 }
 

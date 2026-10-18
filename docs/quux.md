@@ -2201,7 +2201,13 @@ after the grant and a miss when its fill lands; a write behind its line's
 fill waits for it (`a_hit_lands_two_clocks_after_its_grant_and_a_miss_its_fill_later`,
 `a_write_behind_a_fill_lands_after_it`). `--memory-timing` takes
 `<read>,<write>,<occupancy>` in ns or `kria`, `arty` or `de25`, `kria` by
-default. Block-disk's START lands every posted write first, so a transfer
+default, each turned to clocks of the period rounded up. A fill is never
+shorter than the port can do, at any period and any timing: a line of
+main memory is 5 beats on the 64-bit port, the first a clock after the
+address at the soonest, and the fill lands the clock after the last, so a
+fill under 6 clocks is held to 6; 247 ns at 50 ns, 5 clocks, is 6, and
+`arty`'s 290 ns at 50 ns, 6, is its own
+(`a_fill_is_never_shorter_than_the_port_s_beats_and_its_landing`). Block-disk's START lands every posted write first, so a transfer
 reads every word written before it and a read's words are not overwritten
 by an older write (`block_disk_s_start_lands_the_posted_writes`); the
 transfer clears the cache's sets of the words it writes and no others

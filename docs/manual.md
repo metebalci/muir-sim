@@ -1145,7 +1145,9 @@ fill and a write, in ns, or `arty` or `de25` for the two boards' own
 figures. On revisions 15 and 16 the interval between two accepted writes
 follows, `<read>,<write>,<occupancy>`, or a name, `kria`, `arty` or `de25`;
 the two-number form is refused there, and the three-number form and `kria`
-are refused below revision 15. The start says it and a checkpoint carries
+are refused below revision 15. On revisions 15 and 16 a line fill is
+never under 6 clocks of the period, the port's 5 beats and the clock it
+lands in, whatever the figure. The start says it and a checkpoint carries
 it. Refused on `micro`.
 
 Default: 380,290, the slower board's, on revisions 13 and 14; `kria`,
