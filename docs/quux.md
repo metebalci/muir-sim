@@ -40,7 +40,7 @@ differences, what it needed (muir-sys's sources as handed over with System
 | No speed bits | nothing | the mode register write at boot need not set them | nothing | nothing |
 | The video controller, the display | nothing | 2001: the run light in the frame buffer window (`uc-cadr.lisp`), no TV vertical flag (`uc-interrupt.lisp`) | System 2001 sizes the main screen from the feature page | the terminal, screenshots and captures show whichever screen is fitted |
 | The real-time clock | nothing | nothing | System 2001 sets the time from it at boot when word 15 `<0>` of the feature page says it is there (`sys/io1/time.lisp`) | `--rtc` |
-| The file device | nothing | 2001 waits at `RESET-MACHINE` for it to be quiet, word 161 `<1>`, after reset devices, and halts at `FILE-DEVICE-NOT-QUIET` if it is not (`uc-cold-disk.lisp`) | System 2001's `SYS:` is on it, HOST's `/sys` and `/site` (`site/sys.translations`) | `--file-root` |
+| The file device | nothing | 2001 waits at `RESET-MACHINE` for it to be quiet, word 161 `<1>`, after reset devices, and halts at `FILE-DEVICE-NOT-QUIET` if it is not (`uc-cold-disk.lisp`) | System 2001's `SYS:` is on it, at `/sys` and `/site` (`site/sys.translations`) | `--file-root` |
 | The fused return: the MACRO-DISPATCH register and the MACRO DISPATCH MEMORY, destinations 5 to 7 | nothing | 2001 fills the MACRO DISPATCH MEMORY and writes the register in `RESET-MACHINE` (`RESET-MACHINE-MACRO-DISPATCH-FILL`, `uc-cold-disk.lisp`) | nothing | the profile harness's `MUIR_H8A` fills and enables it |
 
 ## The map
@@ -1043,8 +1043,9 @@ its refusals and the start's report; `a_resume_has_the_checkpoint_s_rtc` in
 
 **QUUX reads and writes files on its host through a file device** (contract
 Q9; G1 §4.4, G2 §4.3): folders of the host served to the machine under one
-pathname host, `HOST`, with commands and responses in two rings in main
-memory and the bytes moved by DMA. The registers carry control and the
+pathname host (`FILES` from System 2002, `HOST` in Systems 2000 and 2001),
+with commands and responses in two rings in main memory and the bytes moved
+by DMA. The registers carry control and the
 rings' indexes; nothing polls memory for an index. `src/file_device.rs` is
 muir's device.
 
@@ -1188,9 +1189,10 @@ leaves it, or loops, is ACC.
 | 65 | | bad buffer: off a line, over 65,536 bytes, or past main memory |
 | 66 | | bad argument: flags out of range, a DIRECTORY buffer under 272 bytes, a LOG line over 1,024 bytes, a completion longer than B |
 
-**Mounts** (`--file-root`). `--file-root <folder>[,ro]` is HOST's `/`, a
+**Mounts** (`--file-root`). `--file-root <folder>[,ro]` is the root `/`, a
 folder holding `sys/`, `site/` and `home/<user>/`, so that one path serves
-`HOST:/sys/...`, `HOST:/site/...` and `HOST:/home/lispm/...`. `--file-root
+`/sys/...`, `/site/...` and `/home/lispm/...` under the band's pathname host,
+`FILES` from System 2002 and `HOST` in Systems 2000 and 2001. `--file-root
 <name>=<folder>[,ro]`, once for each name, is the top-level directory
 `<name>`, over the default folder's entry of that name. A value is a named
 mount when the text before its first `=` is a valid component. DIRECTORY of

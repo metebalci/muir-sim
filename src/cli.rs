@@ -1464,7 +1464,7 @@ const HELP: &[(Whose, &str)] = &[
         Whose::Quux,
         "  --file-root [<name>=]<folder>[,ro]
                                QUUX: a host folder its file device serves.
-                               A folder alone is HOST's /, holding sys/,
+                               A folder alone is the root /, holding sys/,
                                site/ and home/<user>/; <name>=<folder> is
                                the top-level directory <name>, over the
                                default folder's entry of that name. ro

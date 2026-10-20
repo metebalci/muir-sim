@@ -662,7 +662,8 @@ Default: off.
 `quux` only.
 
 **QUUX:** a host folder its [file device](quux.md#the-file-device) serves
-under the pathname host `HOST`. A folder alone is HOST's `/`, holding
+under the band's pathname host: `FILES` from System 2002, `HOST` in Systems
+2000 and 2001. A folder alone is the root `/`, holding
 `sys/`, `site/` and `home/<user>/`; `<name>=<folder>` is the top-level
 directory `<name>`, over the default folder's entry of that name. A value is
 a named mount when the text before its first `=` is a name's component.

@@ -595,7 +595,7 @@ fn the_rtc_is_quux_s() {
 }
 
 /// **`--file-root` is QUUX's** (contract Q9): the start lists the file
-/// device's folders --- HOST's `/` from a folder alone, a named mount from
+/// device's folders --- the root `/` from a folder alone, a named mount from
 /// `<name>=<folder>`, each read-write or `,ro` --- and its time; with none
 /// `/` is empty. A name mounted twice, a second default folder, a folder
 /// that is not there, a missing value and the flag on `cadr` are refused.

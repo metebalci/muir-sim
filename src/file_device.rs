@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! **QUUX's file device** (contract Q9, revision 9): folders of the host
-//! served to the machine under one pathname host, `HOST`, through two rings
-//! in main memory. The processor writes commands into the command ring and
+//! served to the machine as one root `/`, through two rings in main memory.
+//! The processor writes commands into the command ring and
 //! the device answers each, in order, with an entry in the response ring;
 //! the bytes move by DMA between main memory and the host's files. The
 //! registers are words 160-171 of the register page, and its interrupt is
@@ -41,7 +41,7 @@
 //! bytes without `.` and `..`, at most 1,024 bytes; case is exact. Bytes
 //! move as they are: the device never translates.
 //!
-//! **Mounts** ([`Mounts`], `--file-root`): a default folder is HOST's `/`,
+//! **Mounts** ([`Mounts`], `--file-root`): a default folder is the root `/`,
 //! and named folders are the top-level directories of their names,
 //! overriding the default folder's entry of that name; each may be
 //! read-only. With no default folder `/` holds the mounts alone and is
@@ -194,10 +194,10 @@ pub struct Mount {
     pub ro: bool,
 }
 
-/// HOST's folders: `--file-root`.
+/// The file device's folders: `--file-root`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mounts {
-    /// HOST's `/`, if a folder is.
+    /// The root `/`, if a folder is.
     pub default: Option<Mount>,
     /// The top-level directories mounted by name.
     pub named: BTreeMap<String, Mount>,
@@ -232,7 +232,7 @@ impl Mounts {
             }
             None => {
                 if self.default.is_some() {
-                    return Err("a second default folder: there is one default, HOST's /".into());
+                    return Err("a second default folder: there is one default, the root /".into());
                 }
                 self.default = Some(mount);
             }

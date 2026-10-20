@@ -1359,7 +1359,7 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
 
     let mut m = if on_quux {
         // QUUX's own PROM at 36000, the pack on block-disk, the video controller, and
-        // the file device serving the root as HOST's `/` and its `sys` and
+        // the file device serving the root as `/` and its `sys` and
         // `site` as `/sys` and `/site`, where the band's `SYS:` is.
         // `MUIR_MAIN_MEMORY_SIZE=<n>MW`: main memory in whole megawords, as
         // `--main-memory-size` takes it, within QUUX's range; 2MW if not
