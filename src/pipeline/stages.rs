@@ -358,7 +358,11 @@ impl Pipeline {
             self.begin_drain_from(true);
         }
         if ex.halt {
-            self.begin_drain();
+            // `HALT-CONS` under `ERRSTOP` stops the machine after its own
+            // word, as `micro` does: the word that has just entered EX is
+            // squashed with RD and CS and fetched again later. Run, it would
+            // take `ERR` down again with its own `IR<11:10>`.
+            self.begin_drain_from(true);
         }
         let ending = self.draining || self.stepping;
         if ending && self.ex.is_none() && self.rd.is_none() && self.cs.is_none() {
@@ -394,12 +398,13 @@ impl Pipeline {
                 self.b.pdl_pending = Some((adr, word));
                 self.b.last_pdl = None;
             }
-            // A boundary's halt keeps RUN: the run goes on at the next
-            // clock, once the harness has read the state.
-            if !(self.boundary_halt || self.action_halt) {
-                self.m.clock_control.run = false;
-                self.srun = false;
-            }
+            // RUN is left as it stands. A console's halt has cleared it
+            // already. A boundary's halt keeps it, and the run goes on at the
+            // next clock, once the harness has read the state. `HALT-CONS`
+            // under `ERRSTOP` keeps it too, as the CADR's does: `MACHRUN`
+            // is down for `-ERRHALT` with `SRUN` still up, so `FLAG-1` says
+            // the machine stopped itself, and [`Pipeline::console_edge`]
+            // holds it halted while `ERR` stays up under `ERRSTOP`.
         }
         if let Some(h) = self.pending_halt.take() {
             return Err(h);

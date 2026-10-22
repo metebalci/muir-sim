@@ -2289,6 +2289,15 @@ stages and writes queued, in flight or a read on its way, it digests as
 `micro`'s at the same microcycle, and each resumed and run on digests alike
 again (`an_rtl_stop_on_revision_15_drains_before_its_checkpoint`,
 `the_prompt_s_checkpoint_on_revision_15_s_rtl_drains_and_goes_on`).
+`HALT-CONS` under `ERRSTOP` halts the pipeline after its own word, as
+`micro` halts: the word in EX not yet run is squashed with RD's and CS's,
+and the pipeline drains. RUN stays set and `ERR` up, so `FLAG-1` reads as
+`micro`'s, and the run is held at the prompt with `micro`'s message, at
+`micro`'s PC and microcycle; the run's count stands while the prompt
+answers (`rtl_on_revision_16_reports_a_halt_cons_halt_as_micro_does` in
+`tests/halt.rs`). A halted pipeline's PC is the fetch after the next word
+to run, as committed words chose it, which is `micro`'s PC; the spy
+readout's `IR` is the next word to run and its PC that word's address.
 
 **The time-neutral harness** compares the pipeline with `micro` on a run
 (`tests/support/neutral.rs`, `examples/profile.rs` under
