@@ -2296,8 +2296,12 @@ and the pipeline drains. RUN stays set and `ERR` up, so `FLAG-1` reads as
 `micro`'s PC and microcycle; the run's count stands while the prompt
 answers (`rtl_on_revision_16_reports_a_halt_cons_halt_as_micro_does` in
 `tests/halt.rs`). A halted pipeline's PC is the fetch after the next word
-to run, as committed words chose it, which is `micro`'s PC; the spy
-readout's `IR` is the next word to run and its PC that word's address.
+to run, as committed words chose it, which is `micro`'s PC, and the spy
+readout gives it (A15b.13): `IR` the next word to run, `PC` the next
+fetch's address, both `micro`'s after a console's halt, a microcode single
+step and `HALT-CONS` (`the_pipeline_s_readout_at_a_drained_halt_is_micro_s`).
+Halted before the boot's nopped word has run, the readout's `IR` is the
+PROM's first word where `micro`'s is the nopped one.
 
 **The time-neutral harness** compares the pipeline with `micro` on a run
 (`tests/support/neutral.rs`, `examples/profile.rs` under

@@ -308,7 +308,8 @@ impl Pipeline {
     /// to run. Running, that is the oldest word not committed: a step ends
     /// when WB counts a word, by when the word after it has run in EX.
     /// Halted, drained, it is the fetch after the next word to run, as the
-    /// committed words chose it, so that a halt is said at `micro`'s PC.
+    /// committed words chose it, so that a halt is said, and read by a
+    /// console, at `micro`'s PC (A15b.13: the next fetch's address).
     pub(crate) fn pc_15(&self) -> u16 {
         if self.halted {
             return self.npc_after.unwrap_or((self.npc + 1) & 0o37777);
@@ -329,7 +330,8 @@ impl Pipeline {
     }
 
     /// The readout (A15b.13), of committed state: `IR` the next word to
-    /// run, `PC` its address.
+    /// run, and `PC`, halted, the next fetch's address, [`Pipeline::pc_15`],
+    /// which is `micro`'s. Running, `PC` is `pc_15` too.
     pub(crate) fn spy_15(&self, eadr: u8) -> u16 {
         let next = self.m.fetch(self.next_to_run()).raw();
         let half = |v: u64, k: u8| (v >> (16 * k as u32)) as u16;
@@ -337,7 +339,7 @@ impl Pipeline {
             spy::IR_LOW | spy::IR_MED | spy::IR_HIGH => half(next, eadr),
             spy::IR_EXT if self.m.geometry.extended() => half(next, eadr),
             spy::OPC => self.x.opc[7] & 0x3fff,
-            spy::PC => self.next_to_run() & 0x3fff,
+            spy::PC => self.pc_15() & 0x3fff,
             spy::FLAG_1 => spy::Flag1 {
                 promdisable: self.m.mode.prom_disable,
                 err: self.x.halted,

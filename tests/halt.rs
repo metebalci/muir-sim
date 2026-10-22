@@ -310,3 +310,124 @@ fn rtl_on_revision_16_reports_a_halt_cons_halt_as_micro_does() {
     assert_eq!(rtl.status.code(), micro.status.code(), "the same exit status");
     assert!(micro.status.success(), "a quit ends the run well");
 }
+
+// --- The pipeline's readout at a drained halt (A15b.13) ----------------------
+
+/// A revision-16 program in the PROM, from 36000: straight words, a jump
+/// whose delay slot runs, a conditional jump taken and one not, and a jump
+/// back to the start under N, so that the fetch after the next word to run
+/// is now the next address and now a jump's target. With `halt`,
+/// `HALT-CONS` on the word at 36003 instead.
+fn looping_16(halt: bool) -> Machine {
+    use muir::isa::asm::{ALU, ALWAYS, INVERT, N, SETO, bit, m_dest, m_src, target};
+    const AT: u64 = 0o36000;
+    let jcond = |to: u64, invert: u64| JUMP | target(AT + to) | bit(0) | m_src(1) | invert;
+    let words = [
+        ALU | SETO | m_dest(1),
+        filler().raw(),
+        filler().raw(),
+        filler().raw() | if halt { HALT_CONS } else { 0 },
+        JUMP | target(AT + 7) | ALWAYS,
+        filler().raw(),
+        filler().raw(),
+        jcond(10, 0),
+        filler().raw(),
+        filler().raw(),
+        jcond(1, INVERT),
+        filler().raw(),
+        JUMP | target(AT) | ALWAYS | N,
+        filler().raw(),
+    ];
+    let mut prom = vec![Insn::extended(filler().raw()); 1024];
+    for (k, w) in words.iter().enumerate() {
+        prom[k] = Insn::extended(*w);
+    }
+    let mut m = Machine::with_geometry(muir::machine::Geometry::QUUX_16, 1);
+    m.load_prom(&prom);
+    m
+}
+
+/// What a console reads of where the machine stands: `PC`, then `IR` by
+/// its four halves, `SPY-IR-EXT` the last.
+fn readout(e: &impl Engine) -> [u16; 5] {
+    [spy::PC, spy::IR_LOW, spy::IR_MED, spy::IR_HIGH, spy::IR_EXT].map(|r| e.spy_read(r))
+}
+
+/// `micro` on [`looping_16`] run to `cycles` microcycles: the state a
+/// halt there leaves, `micro` halting between two microcycles.
+fn micro_at(cycles: u64, halt: bool) -> Micro {
+    let mut u = Micro::new(looping_16(halt));
+    u.boot();
+    if halt {
+        u.machine_mut().mode.errstop = true;
+    }
+    while u.machine().cycles < cycles {
+        u.step().unwrap();
+    }
+    u
+}
+
+/// Clocks `e` until it is halted and drained.
+fn drain(e: &mut muir::pipeline::Pipeline, what: &str) {
+    for _ in 0..10_000 {
+        if e.is_halted() {
+            return;
+        }
+        e.tick().unwrap();
+    }
+    panic!("{what}: the pipeline never halted");
+}
+
+/// **At a drained halt the pipeline's readout is `micro`'s** (A15b.13):
+/// `IR` the next word to run and `PC` the next fetch's address, after a
+/// console's halt at every clock of the loop, after each microcode single
+/// step from there, and after `HALT-CONS` under `ERRSTOP`. **Fails** a
+/// readout whose PC is the next word's own address, or whose `IR` is the
+/// word at the next fetch.
+#[test]
+fn the_pipeline_s_readout_at_a_drained_halt_is_micro_s() {
+    use muir::pipeline::Pipeline;
+    let mut halts = 0;
+    for clock in 1..60 {
+        let mut e = Pipeline::new(looping_16(false));
+        e.boot();
+        while e.clock() < clock {
+            e.tick().unwrap();
+        }
+        e.spy_write(spy::CLK, 0);
+        drain(&mut e, "the console's halt");
+        if e.machine().cycles == 0 {
+            // Halted before the boot's nopped word has run: `micro`'s `IR`
+            // is that word, the pipeline's the PROM's first.
+            continue;
+        }
+        let u = micro_at(e.machine().cycles, false);
+        let at = format!("halted at clock {clock}, {} microcycles", e.machine().cycles);
+        assert_eq!(readout(&e), readout(&u), "{at}: PC and IR against micro's");
+        halts += 1;
+        // Single steps from the halt: one microcycle each, halted again.
+        if clock % 7 == 0 {
+            for k in 0..12 {
+                let cycles = e.machine().cycles;
+                e.spy_write(spy::CLK, 2);
+                e.tick().unwrap();
+                e.spy_write(spy::CLK, 0);
+                drain(&mut e, "the single step");
+                assert_eq!(e.machine().cycles, cycles + 1, "{at}, step {k}: one microcycle");
+                let u = micro_at(e.machine().cycles, false);
+                assert_eq!(readout(&e), readout(&u), "{at}, step {k}: PC and IR against micro's");
+                halts += 1;
+            }
+        }
+    }
+    // `HALT-CONS`: the pipeline halts itself and drains.
+    let mut e = Pipeline::new(looping_16(true));
+    e.boot();
+    e.machine_mut().mode.errstop = true;
+    drain(&mut e, "HALT-CONS");
+    let u = micro_at(e.machine().cycles, true);
+    assert!(spy::Flag1::of(u.spy_read(spy::FLAG_1)).err, "micro stopped at the same microcycle");
+    assert_eq!(readout(&e), readout(&u), "HALT-CONS: PC and IR against micro's");
+    assert_eq!(e.pc(), u.pc(), "and the PC the prompt says");
+    eprintln!("{} halts read", halts + 1);
+}
