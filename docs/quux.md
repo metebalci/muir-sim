@@ -910,7 +910,7 @@ port](#the-memory-port-and-the-device-registers)).
 | 100-107 | the page's own words | 100: interrupt status, read only (below). 101: error status: `<0>` NXM is the only bit QUUX sets (`<3>` and `<5>`, the CADR's Unibus bits, read 0); a write of any value clears it. 102: mode, `<0>` error stop, read and written, which the host can set too. 103: the real-time clock, read only (below). 104: `RESET-DEVICES`, written, reads 0 (below). 105-107 reserved |
 | 110-117 | the interval timers | 110-115 ([the clocks](#the-clocks)); 116-117 reserved |
 | 120-137 | the keyboard and the mouse | 120-123 (below); 121 gives the key word in `<23:0>`, and `<31:24>` read 0. 124-137 reserved |
-| 140-157 | the network, the Chaosnet interface | 140: the CSR, read and written. 141: my address when read, the write buffer when written. 142: the read buffer, read only; a read advances it. 143: the bit count, read only. 145: START, read only; a read starts a transmission. Writes of 142, 143 and 145 are ignored. 144, 146, 147 and 150-157 reserved |
+| 140-157 | the network, the Chaosnet interface, to revision 15 | on revision 16 all reserved, and never reused. 140: the CSR, read and written. 141: my address when read, the write buffer when written. 142: the read buffer, read only; a read advances it. 143: the bit count, read only. 145: START, read only; a read starts a transmission. Writes of 142, 143 and 145 are ignored. 144, 146, 147 and 150-157 reserved |
 | 160-177 | the file device | 160-171 (below); 172-177 reserved |
 | 200-207 | block-disk | 200: status when read, command when written. 201: the last memory address when read, the command list pointer when written. 202: the disk address, read and written. 203: START, written; reads 0. The bits are [block-disk's](#block-disk), the done interrupt's enable command `<11>`. 204-207 reserved |
 | 210-217 | the video controller | 210: mode, `<2>` black-on-white reads back, the other bits read 0 and a write of them is dropped. 211-217 reserved |
@@ -939,7 +939,7 @@ Unibus NXM bit, `766044` `<3>`.
 | `<3>` | block-disk | not active and command `<11>` | a command write with `<11>` clear, START, `RESET-DEVICES` |
 | `<4>` | the keyboard | a key word waiting and 120 `<8>` | reading 121 until the FIFO is empty; `<8>` off |
 | `<5>` | the mouse | 123 `<0>` and 123 `<8>` | reading 122; `<8>` off |
-| `<6>` | the network | the Chaosnet interface's request, as the CADR's CSR gives it | as on the CADR, through 140-145; `RESET-DEVICES` |
+| `<6>` | the network, to revision 15 | the Chaosnet interface's request, as the CADR's CSR gives it; never on revision 16 | as on the CADR, through 140-145; `RESET-DEVICES` |
 | `<7>` | the file device | 170 ≠ 171 and 160 `<8>` | writing 171 up to 170; `<8>` off; a disable; `RESET-DEVICES` |
 | `<8>` | the Ethernet device, revision 16 | 251 ≠ 252 and 240 `<8>` | writing 252 up to 251; `<8>` off; a disable; `RESET-DEVICES` |
 | `<31:9>` | reserved | never | --- |
@@ -1323,6 +1323,15 @@ behind the same device is a later contract. `tests/quux_network.rs` holds
 each decoded word to its Unibus register, the reserved words and the ignored
 writes, and a STATUS request sent and answered through the page.
 
+**Revision 16 has no Chaosnet interface** (QUUX's Ethernet contract, §8
+R4): 140-157 are reserved, as 240-257 are on revision 15, and are never
+reused; nothing sets word 100 `<6>`; the I/O board has no interface to
+plug, and its checkpoint carries none. `quux` refuses the five Chaosnet
+flags on it by name, and its start has no chaosnet line. Revisions 13 to
+15 keep theirs as released. `tests/quux_network.rs` holds 13-15's words
+and `<6>` to what they were and 16's to reserved, and
+`tests/ethernet_socket.rs` the flags.
+
 ## The fused return
 
 **QUUX can run the next macroinstruction's handler straight from a
@@ -1544,7 +1553,7 @@ and the band reaches its listener on it with 2001 in `A-VERSION`
 ## The checkpoint
 
 **A checkpoint of QUUX is a 40-bit machine's, version 55**, revision
-15's version 56 and revision 16's version 57, which say the width: every word 5 bytes, `<7:0>` first and the tag last, so that main
+15's version 56 and revision 16's version 58, which say the width: every word 5 bytes, `<7:0>` first and the tag last, so that main
 memory in it is packed storage byte for byte (contract G2 appendix A1.13);
 the dispatch memory of 4,096 entries, the map's 8,192 and 4,096 entries,
 the overflow flag, and the rest. A checkpoint of the CADR is version 54,
@@ -1561,8 +1570,10 @@ revision 12 and saying it resumes only on an earlier muir-sim
 `tests/quux_revision.rs`); a CADR checkpoint keeps version 54's bytes and
 resumes (`a_cadr_checkpoint_keeps_version_54_s_bytes` in
 `tests/checkpoint.rs`). Versions 54 to 57 are 49, 50, 51 and 53 with the
-Chaosnet interface's pending state after it, which every machine has
-(`docs/chaosnet.md`); 49, 50, 51 and 53 are refused.
+Chaosnet interface's pending state after it, which every machine then had
+(`docs/chaosnet.md`); 49, 50, 51 and 53 are refused. Version 58 is
+revision 16's without the interface, and 57, its version with it, is
+refused.
 
 ## The `.mcr` at 40 bits
 
@@ -2400,14 +2411,17 @@ muir has QUUX revision 16 beside revisions 13 to 15 (QUUX's Ethernet
 contract, §2 and §10): `Geometry::QUUX_16` in the library, which `quux` runs
 when `MUIR_QUUX_REVISION` is `16`. It is revision 15 with the Ethernet
 device, `muir::ethernet_device`; everything this section does not mention
-is revision 15's, its Chaosnet interface at 140-157 included. MACHINE-ID
+is revision 15's, but for the Chaosnet interface, which it does not have:
+its 140-157 are reserved and word 100 `<6>` is never set
+([the network](#the-network)). MACHINE-ID
 says 16, feature word 15 reads 7, its `<2>` the device, and word 100 `<8>`
 is its interrupt. It loads revision 15's `.mcr` files, whose section 6
 says 15, the microinstruction's revision, and refuses any other, so one
 microcode runs on 15 and 16
 (`revision_16_loads_a_revision_15_mcr_and_refuses_others`); no boot PROM
-for it is built in. A checkpoint of it is version 57,
-the device's state and 253-257 after revision 15's, and revisions 15 and 16 refuse
+for it is built in. A checkpoint of it is version 58,
+the device's state and 253-257 after revision 15's, with no Chaosnet
+interface on its I/O board, and revisions 15 and 16 refuse
 each other's. What holds it is `tests/quux_ethernet.rs` and, for the
 posted writes and the cache, the last tests of `tests/revision_15_rtl.rs`.
 

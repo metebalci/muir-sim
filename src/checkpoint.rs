@@ -62,9 +62,11 @@ pub const VERSION_40: u32 = 55;
 pub const VERSION_15: u32 = 56;
 
 /// QUUX revision 16's: revision 15's, with the Ethernet device's state
-/// after it, 253-257 among it (QUUX's Ethernet contract, §2.9). Revision
-/// 15 keeps [`VERSION_15`]. 52 was revision 16's before 253-257 were in it.
-pub const VERSION_16: u32 = 57;
+/// after it, 253-257 among it (QUUX's Ethernet contract, §2.9), and no
+/// Chaosnet interface on the I/O board (§8 R4). Revision 15 keeps
+/// [`VERSION_15`]. 52 was revision 16's before 253-257 were in it, and 57
+/// before it lost the interface; both are refused.
+pub const VERSION_16: u32 = 58;
 
 /// The version a checkpoint of a machine of `geometry` is written at.
 pub fn version_for(geometry: &crate::machine::Geometry) -> u32 {

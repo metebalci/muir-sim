@@ -5798,6 +5798,18 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 packs.push(p);
             }
             (None, "--disk-multiplexor") => use_multiplexor = true,
+            // The Chaosnet's flags, refused by name on a machine with no
+            // Chaosnet interface (QUUX's Ethernet contract, §8 R4) rather
+            // than taken for nothing. The CADR has the interface and keeps
+            // the flags.
+            (
+                None,
+                flag @ ("--chaos-address"
+                | "--chaos-trace"
+                | "--chaos-udp"
+                | "--chaos-udp-peer"
+                | "--chaos-udp-default-peer"),
+            ) if !geometry.chaos() => usage(&format!("{flag}: QUUX has no Chaosnet interface")),
             (None, "--chaos-address") => {
                 // One address: this machine's sixteen switches, in octal
                 // or subnet:host. The file and time host's is not muir's
@@ -7058,9 +7070,14 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         // **The switches, then the cable.**  They are two things on the
         // board and two lines here: a machine has its address set whether
         // or not anything is plugged into it, and one with no cable talks
-        // to nobody however its switches read.
-        writeln!(s, "chaosnet: {:o}", chaos.address).unwrap();
+        // to nobody however its switches read. A machine with no Chaosnet
+        // interface has neither, and prints neither line (QUUX's Ethernet
+        // contract, §8 R4), as one with no Ethernet prints no ethernet line.
+        if geometry.chaos() {
+            writeln!(s, "chaosnet: {:o}", chaos.address).unwrap();
+        }
         match &chaos.udp {
+            _ if !geometry.chaos() => {}
             None => {
                 writeln!(s, "chaosnet over udp: disabled; --chaos-udp is the cable").unwrap();
             }

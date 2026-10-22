@@ -231,6 +231,10 @@ Default: `--rtl`.
 
 ### `--chaos-address <address>`
 
+`cadr`. QUUX has no Chaosnet interface
+([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+flag by name.
+
 This machine's Chaosnet address: the sixteen address switches on the I/O
 board, the bits in octal, `3050`, or subnet:host with each in octal, `6:50`
 --- the same number, subnet in the high byte.
@@ -255,12 +259,20 @@ names the band's address: `--chaos-address 3050` for the System 100 pack.
 
 ### `--chaos-trace`
 
+`cadr`. QUUX has no Chaosnet interface
+([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+flag by name.
+
 Every Chaosnet packet and frame on the cable, to stderr. What to reach for
 when a lashup goes quiet: it shows whether the machine is still talking.
 
 Default: off.
 
 ### `--chaos-udp [<endpoint>]`
+
+`cadr`. QUUX has no Chaosnet interface
+([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+flag by name.
 
 Where the Chaosnet cable is on the network: **Chaosnet over UDP**, the
 encapsulation `cbridge`, `usim`, `klh10`, `ozd` and the live Chaosnet hosts
@@ -289,6 +301,10 @@ is given; off with neither flag.
 
 ### `--chaos-udp-default-peer <host>[:<port>]`
 
+`cadr`. QUUX has no Chaosnet interface
+([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+flag by name.
+
 Where a frame goes whose destination no `--chaos-udp-peer` named: the route
 of last resort, and what lets a `cbridge` beside muir carry the traffic on
 to the wider Chaosnet. Naming that bridge as a peer does not do it ---
@@ -312,6 +328,10 @@ It needs the cable, `--chaos-udp`. Default: off, and a frame no peer entry
 names is dropped.
 
 ### `--chaos-udp-peer <address>@<host>:<port>`
+
+`cadr`. QUUX has no Chaosnet interface
+([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+flag by name.
 
 A Chaosnet host reached over UDP and where it lives: `3060@127.0.0.1:42042`,
 the address in octal or subnet:host and the host a name or an address,

@@ -1660,6 +1660,29 @@ fn the_chudp_flags_need_the_link() {
     );
 }
 
+/// **The CADR takes the Chaosnet's five flags**: `--chaos-address`,
+/// `--chaos-trace`, `--chaos-udp`, `--chaos-udp-peer` and
+/// `--chaos-udp-default-peer` each run, and the start names the Chaosnet.
+/// QUUX refuses them; the CADR keeps them. **Fails** any of the five
+/// refused, or the start's chaosnet line gone.
+#[test]
+fn the_cadr_takes_the_chaos_flags() {
+    let link = ["--chaos-udp", "127.0.0.1:0"];
+    let runs: [&[&str]; 5] = [
+        &["--chaos-address", "3050"],
+        &["--chaos-trace"],
+        &link,
+        &["--chaos-udp", "127.0.0.1:0", "--chaos-udp-peer", "3060@127.0.0.1:9"],
+        &["--chaos-udp", "127.0.0.1:0", "--chaos-udp-default-peer", "127.0.0.1:9"],
+    ];
+    for args in runs {
+        let out = cadr().args(args).args(["--micro", "--stop-after", "1"]).run();
+        let t = text(&out);
+        assert!(out.status.success(), "{args:?}:\n{t}");
+        assert!(t.lines().any(|l| l.starts_with("chaosnet: ")), "{args:?}:\n{t}");
+    }
+}
+
 /// **The default peer is an endpoint and no Chaosnet address.** It is
 /// not a host at an address, which is what `--chaos-udp-peer` names; it
 /// is where a frame goes whose destination no peer entry names, and the

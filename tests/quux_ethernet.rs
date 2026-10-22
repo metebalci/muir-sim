@@ -193,7 +193,8 @@ fn counters(m: &mut Machine) -> [u32; 4] {
 /// all ones to a read-only word changes nothing; on 15 every one reads 0
 /// and a write of any of them changes nothing. Feature word 0 says 16 and
 /// feature word 15 reads 7 there, 3 on 15; every other word of the page
-/// reads alike on both. **Fails** a device on 15, or one missing on 16.
+/// but 140-157, the Chaosnet interface's on 15 alone (§8 R4), reads alike
+/// on both. **Fails** a device on 15, or one missing on 16.
 #[test]
 fn the_page_has_240_to_257_on_revision_16_and_reserves_them_on_15() {
     use Class::*;
@@ -244,7 +245,9 @@ fn the_page_has_240_to_257_on_revision_16_and_reserves_them_on_15() {
     assert_eq!(get(&mut b, 0) >> 4 & 0o7777, 15);
     assert_eq!(get(&mut a, 0o15), 7, "feature word 15: the clock, the file device, Ethernet");
     assert_eq!(get(&mut b, 0o15), 3, "revision 15's feature word 15 unchanged");
-    for w in (1..0o400).filter(|&w| !matches!(w, 0o15 | 0o103 | 0o240..=0o257)) {
+    // 140-157, the Chaosnet interface's on 15, are reserved on 16 (§8 R4),
+    // `tests/quux_network.rs`.
+    for w in (1..0o400).filter(|&w| !matches!(w, 0o15 | 0o103 | 0o140..=0o157 | 0o240..=0o257)) {
         assert_eq!(get(&mut a, w), get(&mut b, w), "word {w:o} alike on 15 and 16");
     }
 }
@@ -1197,6 +1200,23 @@ fn revision_15_s_checkpoint_has_no_ethernet_device() {
     assert_eq!(g, Geometry::QUUX_15);
 }
 
+/// **Revision 16's body has no Chaosnet interface** (QUUX's Ethernet
+/// contract, §8 R4): it is byte for byte the same whatever the run's
+/// Chaosnet address and after [`Machine::plug_chaos`], and it loads back
+/// into a revision-16 machine. **Fails** an interface's state in 16's
+/// checkpoint.
+#[test]
+fn revision_16_s_checkpoint_has_no_chaosnet_interface() {
+    let s = state(&rev16());
+    let mut m = rev16();
+    m.chaos.address = 0o3050;
+    m.plug_chaos(0);
+    assert!(state(&m) == s, "the run's Chaosnet is not in revision 16's body");
+    let mut back = rev16();
+    back.load(&mut muir::checkpoint::Reader::for_word_bits(&s, 40)).unwrap();
+    assert!(state(&back) == s, "the state back as it was");
+}
+
 // --- the switch -------------------------------------------------------------------
 
 /// A revision-15 `.mcr` whose section 6 says `revision`: a boot PROM, a
@@ -1266,8 +1286,9 @@ fn revision_16_loads_a_revision_15_mcr_and_refuses_others() {
 
 /// **`MUIR_QUUX_REVISION=16` runs revision 16 on both engines**, from a
 /// boot PROM whose section 6 says 15 (QUUX's Ethernet contract, §10): the start
-/// names it, the checkpoint records it at its own version, and revisions
-/// 15 and 16 refuse each other's checkpoints, naming the revision.
+/// names it, the checkpoint records it at its own version, 58, and revisions
+/// 15 and 16 refuse each other's checkpoints, naming the revision; a
+/// revision-16 file of version 57, from before R4, is refused.
 #[test]
 fn the_switch_runs_revision_16_and_15_and_16_refuse_each_other_s_checkpoints() {
     use support::{Run, quux, scratch, text};
@@ -1304,4 +1325,21 @@ fn the_switch_runs_revision_16_and_15_and_16_refuse_each_other_s_checkpoints() {
         .arg(&chk)
         .run();
     assert!(out.status.success(), "16 resumes 16: {}", text(&out));
+    // A revision-16 checkpoint from before R4, at version 57, with the
+    // Chaosnet interface in its body, is refused by its version (§8 R4:
+    // "Revision 16's checkpoint version moves").
+    let mut file = std::fs::read(&chk).unwrap();
+    let at = b"muir checkpoint\n".len();
+    assert_eq!(&file[at..at + 4], 58u32.to_le_bytes(), "revision 16 writes version 58");
+    file[at..at + 4].copy_from_slice(&57u32.to_le_bytes());
+    let old = dir.join("16-before-r4.chk");
+    std::fs::write(&old, &file).unwrap();
+    let out = quux()
+        .env("MUIR_QUUX_REVISION", "16")
+        .args(["--rtl", "--main-memory-size", "2MW", "--stop-after", "10", "--resume"])
+        .arg(&old)
+        .run();
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(2), "16 resumed a version-57 file:\n{t}");
+    assert!(t.contains("format version 57"), "{t}");
 }

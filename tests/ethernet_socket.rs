@@ -938,6 +938,62 @@ fn the_flags_are_refused_on_the_cadr_and_below_revision_16() {
     }
 }
 
+/// The Chaosnet's five flags, each with a value `quux` takes below 16.
+const CHAOS_FLAGS: [(&str, &[&str]); 5] = [
+    ("--chaos-address", &["--chaos-address", "3050"]),
+    ("--chaos-trace", &["--chaos-trace"]),
+    ("--chaos-udp", &["--chaos-udp", "127.0.0.1:0"]),
+    ("--chaos-udp-peer", &["--chaos-udp", "127.0.0.1:0", "--chaos-udp-peer", "3060@127.0.0.1:9"]),
+    (
+        "--chaos-udp-default-peer",
+        &["--chaos-udp", "127.0.0.1:0", "--chaos-udp-default-peer", "127.0.0.1:9"],
+    ),
+];
+
+/// **Revision 16 refuses the Chaosnet's flags, by name, and 13-15 take
+/// them** (QUUX's Ethernet contract, §8 R4: revision 16 loses the
+/// Chaosnet interface): on 16 each of `--chaos-address`, `--chaos-trace`,
+/// `--chaos-udp`, `--chaos-udp-peer` and `--chaos-udp-default-peer` is a
+/// usage error naming it and saying QUUX has no Chaosnet interface; on
+/// 13, 14 and 15 the same arguments run, and the start names the
+/// Chaosnet. 16's start has no chaosnet line. **Fails** a flag taken, or
+/// ignored, on 16, or one refused below it.
+#[test]
+fn the_chaos_flags_are_refused_on_revision_16_and_taken_below() {
+    let dir = scratch("chaos-flags");
+    let prom = prom_16(&dir);
+    let run = |revision: &str, args: &[&str]| {
+        let mut c = quux();
+        c.env("MUIR_QUUX_REVISION", revision).args([
+            "--micro",
+            "--main-memory-size",
+            "2MW",
+            "--stop-after",
+            "1",
+        ]);
+        if revision != "13" && revision != "14" {
+            c.arg("--prom").arg(&prom);
+        }
+        c.args(args).run()
+    };
+    for (flag, args) in CHAOS_FLAGS {
+        // The flag alone, with its value: 16 refuses it where it stands,
+        // before any check of the flags it goes with.
+        let alone = &args[args.iter().position(|a| *a == flag).unwrap()..];
+        refused(&run("16", alone), &format!("{flag}: QUUX has no Chaosnet interface"));
+        for revision in ["13", "14", "15"] {
+            let out = run(revision, args);
+            let t = text(&out);
+            assert!(out.status.success(), "{revision} {args:?}:\n{t}");
+            assert!(t.contains("chaosnet: "), "{revision}: {t}");
+        }
+    }
+    let out = run("16", &[]);
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(!t.lines().any(|l| l.starts_with("chaosnet")), "{t}");
+}
+
 /// **The flags' values are checked before the run**: a MAC address that
 /// is not six pairs, or is a group address; a socket with no path; a socket
 /// muir cannot connect to, named with the error. **Fails** a bad value

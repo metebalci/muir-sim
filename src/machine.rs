@@ -301,7 +301,9 @@ impl Geometry {
     /// 15 with the Ethernet device, register-page words 240-257, word 100
     /// `<8>` and feature word 15 `<2>` ([`crate::ethernet_device`]), and a
     /// checkpoint version of its own. All of it keyed on
-    /// [`Geometry::ethernet`]. Its Chaosnet interface is revision 15's.
+    /// [`Geometry::ethernet`]. It has no Chaosnet interface (QUUX's
+    /// Ethernet contract, §8 R4): 140-157 are reserved, word 100 `<6>` is
+    /// never set, [`Geometry::chaos`].
     pub const QUUX_16: Geometry =
         Geometry { machine_id: Some((0x5155 << 16) | (16 << 4) | 4), ..Geometry::QUUX_15 };
 
@@ -321,6 +323,15 @@ impl Geometry {
     /// ([`Geometry::QUUX_16`]).
     pub fn ethernet(self) -> bool {
         self.revision().is_some_and(|r| r >= 16)
+    }
+
+    /// Whether the machine has a Chaosnet interface: the CADR's, on its
+    /// Unibus, and QUUX's to revision 15, at words 140-147 of the register
+    /// page with word 100 `<6>` (contract Q4). Revision 16 lost it (QUUX's
+    /// Ethernet contract, §8 R4): its 140-157 are reserved and never
+    /// reused, and nothing sets `<6>`.
+    pub fn chaos(self) -> bool {
+        !self.ethernet()
     }
 
     /// The level-1 entry a CADR's map store writes: `VMA<31:27>`
@@ -1562,11 +1573,14 @@ impl Machine {
             chaos: crate::chaos::Config::default(),
             // The I/O board has its Chaosnet interface whether or not a
             // cable is plugged in: the switches at the configured address,
-            // nothing on the cable until [`Machine::plug_chaos`].
+            // nothing on the cable until [`Machine::plug_chaos`]. Revision
+            // 16 has none ([`Geometry::chaos`]).
             quux_input: crate::quux_input::QuuxInput::new(),
             ioboard: {
                 let mut b = ioboard::IoBoard::default();
-                b.plug_chaos(crate::chaos::Config::default().address, None, 0, false);
+                if geometry.chaos() {
+                    b.plug_chaos(crate::chaos::Config::default().address, None, 0, false);
+                }
                 b
             },
             tv: Tv::default(),
@@ -1660,6 +1674,8 @@ impl Machine {
     /// revision 15 its times double into units of 0.5 ns, its turn timer
     /// acts at the first clock at or after each edge, and the delays it
     /// starts end ⌈2d/P⌉ clocks after their start (MP2b ruling Q19).
+    /// Revision 16 has no interface, so the rule is retired there (QUUX's
+    /// Ethernet contract, §8 R4) and this is [`Machine::ns`] alone.
     pub fn chaos_time(&mut self) -> u64 {
         let time = self.time_base();
         if let Some(c) = self.ioboard.chaos.as_mut() {
@@ -1689,7 +1705,8 @@ impl Machine {
     /// under its interrupt enable (contract Q11); `<3>` block-disk's done
     /// under its enable, command `<11>`; `<4>` the keyboard and `<5>` the
     /// mouse ([`crate::quux_input`]); `<6>` the network, the Chaosnet
-    /// interface's request (contract Q4); `<7>` the file device, a response
+    /// interface's request (contract Q4), to revision 15, and never set on
+    /// 16, which has no interface ([`Geometry::chaos`]); `<7>` the file device, a response
     /// waiting under its interrupt enable (contract Q9); `<8>` on revision
     /// 16 the Ethernet device, an Ethernet frame waiting under its interrupt
     /// enable (QUUX's Ethernet contract, §2.6). Every bit is a
@@ -1699,7 +1716,9 @@ impl Machine {
         (if self.geometry.tick { self.timers.interrupt_sources(self.ns) } else { 0 })
             | (self.block_disk.as_ref().is_some_and(|d| d.interrupt_at(self.ns)) as u32) << 3
             | if self.geometry.machine_id.is_some() { self.quux_input.interrupts() } else { 0 }
-            | (self.ioboard.chaos.as_ref().is_some_and(|c| c.interrupt_request().is_some()) as u32)
+            | ((self.geometry.chaos()
+                && self.ioboard.chaos.as_ref().is_some_and(|c| c.interrupt_request().is_some()))
+                as u32)
                 << 6
             | ((self.geometry.file_device && self.file_device.interrupt_at(self.ns)) as u32)
                 << crate::file_device::INTERRUPT_BIT
@@ -2267,10 +2286,12 @@ impl Machine {
             || (self.geometry.unibus && self.unibus_interrupt().is_some())
             || (self.geometry.tick && self.timers.pending(now.max(self.ns)))
             || (self.geometry.machine_id.is_some() && self.quux_input.interrupts() != 0)
-            // The network's request, word 100's <5> (contract Q4), reaches
+            // The network's request, word 100's <6> (contract Q4), reaches
             // the processor as every bit of the register page's does, not
-            // only through the Unibus interrupt that 766040 enables.
+            // only through the Unibus interrupt that 766040 enables; never
+            // on revision 16, which has no interface (§8 R4).
             || (self.geometry.machine_id.is_some()
+                && self.geometry.chaos()
                 && self.ioboard.chaos.as_ref().is_some_and(|c| c.interrupt_request().is_some()))
             // The file device's, word 100's <6> (contract Q9), from its due
             // times.
@@ -2344,7 +2365,15 @@ impl Machine {
     /// [`Machine::attach_chaos_node`] is how a caller in this process ---
     /// the test harness, with its Chaosnet server --- puts one there
     /// instead.
+    ///
+    /// **Revision 16 has no interface to plug** (QUUX's Ethernet contract,
+    /// §8 R4): its I/O board is left with none, also when the machine was
+    /// built as another and given 16's geometry since.
     pub fn plug_chaos(&mut self, powered_at: u64) {
+        if !self.geometry.chaos() {
+            self.ioboard.chaos = None;
+            return;
+        }
         let mut ether = crate::chaos::ether::Ether::new();
         if let Some(node) = self.chaos.udp_node() {
             ether.attach(node);
@@ -2723,8 +2752,9 @@ impl Machine {
                     self.ethernet.machine_read(k)
                 }
                 // The network (contract Q4): the Chaosnet interface's five
-                // registers (contract Q13).
-                k @ 0o140..=0o147 => match network_register(k, false) {
+                // registers (contract Q13), to revision 15. On 16 they are
+                // reserved, as the rest of the page's are (§8 R4).
+                k @ 0o140..=0o147 if self.geometry.chaos() => match network_register(k, false) {
                     Some(r) => {
                         let now = self.chaos_time();
                         self.ioboard.read(r, now) as u32
@@ -2878,8 +2908,9 @@ impl Machine {
                     self.ethernet.write(k, value, self.ns, time, &self.main);
                 }
                 // The network: the CSR and the write buffer; writes of its
-                // other words are ignored (contract Q13).
-                k @ 0o140..=0o147 => {
+                // other words are ignored (contract Q13). To revision 15;
+                // reserved on 16 (§8 R4).
+                k @ 0o140..=0o147 if self.geometry.chaos() => {
                     if let Some(r) = network_register(k, true) {
                         let now = self.chaos_time();
                         self.ioboard.write(r, value as u16, now);
