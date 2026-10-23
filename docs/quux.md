@@ -2438,6 +2438,20 @@ interface on its I/O board, and revisions 15 and 16 refuse
 each other's. What holds it is `tests/quux_ethernet.rs` and, for the
 posted writes and the cache, the last tests of `tests/revision_15_rtl.rs`.
 
+**System 2002** runs on it (`tests/system_2002.rs`, which skips without
+muir-sys's hand-over, the pre-release `handover-2002-2999694` that
+`tools/fetch-handover-2002.sh` fetches into the gitignored
+`ref/band-2002-2999694`): microcode 2002 in the current `MCR1` and the band
+in the current `LOD1` of a GPT disk in a dynamic VHD, PROM 2002 given with
+`--prom`. Run as `quux` with `MUIR_QUUX_REVISION=16`, the disk, the sources
+as the file device's root and `--ethernet-socket`, both of the hand-over's
+disks, the band's and the high band's, boot on both engines to the band's
+TELNET server: a connection to port 23 at the default address is answered
+with the herald, System 2002 on microcode 2002 on "QUUX on muir-sim" with
+the associated machine `FILES`, and "Telnet server here". PROM 2002 is the
+hand-over's `promh.mcr` and the sources' `sys/ubin/promh.mcr`, byte for byte
+(`prom_2002_is_the_hand_over_s`).
+
 **The registers**, words 240-257:
 
 | Word | | |

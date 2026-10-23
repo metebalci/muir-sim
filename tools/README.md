@@ -1,7 +1,7 @@
 # `tools/`
 
 Scripts that make the committed fixtures in `data/`, from MIT's files in
-`mit/` or, for QUUX's disks, with standard tools, four that fetch what is not committed, one that checks the
+`mit/` or, for QUUX's disks, with standard tools, five that fetch what is not committed, one that checks the
 first lot still make what is committed, one that checks QUUX's Ethernet
 checksum vectors, `quux-taps`, which installs the
 taps QUUX's Ethernet link runs over, and `ethernet-frame-mover`, which
@@ -21,6 +21,7 @@ Ubuntu, `gcc` on Fedora --- and only when a netlist has to be made again.
 | `fetch-system-for-quux.sh` | `vendor/system-2001/`, `vendor/run/release-2001-disk.vhd` and `vendor/run/release-2001-root/`: QUUX's current release, System 2001, from the `release-2001` release of metebalci/muir-sys, pinned by tag and every file's SHA-256, its disk checked to be laid out as System 2001's release disk (853,359 blocks, a 128MW `PAGE`, the band in the current `LOD1`) and its sources' `sys/ubin/promh.mcr` to be the release's PROM, with the machine's host folder made from copies of its `sys/` and `site/` and an empty `home/lispm/` |
 | `fetch-dev-system-for-quux.sh` | `vendor/dev-system-for-quux/`, `vendor/run/dev-system-for-quux-disk.vhd` and `vendor/run/dev-system-for-quux-root/`: QUUX's system in development, muir-sys's rolling release `dev-system-for-quux`, checked against its own `SHA256SUMS` and replaced whole when the build changes. Never for tests |
 | `fetch-system-100-for-cadr.sh` | `vendor/`: MIT's System 100 release --- the CADR's reference --- and a directory for muir to serve it from. Nothing in `vendor/` is committed |
+| `fetch-handover-2002.sh` | `ref/band-2002-2999694/`: muir-sys's hand-over of System 2002 on QUUX revision 16, the pre-release `handover-2002-2999694`, pinned by tag and every file's SHA-256; both its disks, the band's and the high band's, decompressed and checked to be laid out as QUUX's release disk (853,359 blocks, a 128MW `PAGE`, microcode 2002 in the current `MCR1` and the band in the current `LOD1`), and the sources' `sys/ubin/` files copied beside them, their `promh.mcr` held to the pre-release's PROM 2002. Until System 2002 is released; `tests/system_2002.rs` reads it |
 | `fetch-system-for-cadr.sh` | `vendor/system-1003/` and `vendor/run/release-1003-pack.img`: the CADR's current muir-sys release, System 1003, from the `release-1003` release of metebalci/muir-sys, pinned by tag and every file's SHA-256 |
 | `cadr-netlist.sh`, `busint-netlist.sh`, `cadrm-netlist.sh`, `cadrio-netlist.sh`, `cadrdc-netlist.sh`, `simpletv-netlist.sh`, `lispmtv-netlist.sh`, `dm-netlist.sh` | `data/<BOARD>.netlist`, one board each: MIT's drawings read with `soap4`, then reconciled with MIT's wire list by `examples/reconcile.rs` |
 | `check-netlists.sh` | nothing. It runs all eight of those and says whether each committed netlist is still what its script makes, putting the committed files back afterwards. CI runs it on every push |

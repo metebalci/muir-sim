@@ -20,6 +20,11 @@
 # if a test that wants its release said it skipped: such a test says
 # "skipped:" with the release's directory or fetch script in the line.
 #
+# `handover-2002` does the same with muir-sys's hand-over of System 2002,
+# unreleased, on QUUX revision 16: a pre-release whose tag never moves,
+# which its fetch script pins by every file's digest. It goes when
+# release-2002 exists.
+#
 # The compiler version comes from rust-toolchain.toml, so it is pinned here
 # the same way it is pinned on a desk. `--locked` refuses to update
 # Cargo.lock, so a dependency added without regenerating it fails the build
@@ -159,6 +164,44 @@ jobs:
           set -o pipefail
           cargo test --locked -- --nocapture 2>&1 | tee test.out
           if grep -nE 'skipped: .*(system-2001|fetch-system-for-quux)' test.out; then exit 1; fi
+
+  handover-2002:
+    runs-on: ubuntu-latest
+    # A safety net, not a budget: the job takes far less. Without it a
+    # test that hangs runs until GitHub's six-hour limit.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-handover-2002-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache the hand-over of System 2002
+        uses: actions/cache@v4
+        with:
+          path: ref/band-2002-2999694
+          key: handover-2002-${{ hashFiles('tools/fetch-handover-2002.sh') }}
+
+      - name: Fetch the hand-over of System 2002
+        run: tools/fetch-handover-2002.sh
+
+      # System 2002 on revision 16, both disks booted on both engines to
+      # the listener on the screen and to the TELNET server on the
+      # Ethernet device; PROM 2002 held to the hand-over's. A test that
+      # found no hand-over says "skipped:", which fails the job.
+      - name: Tests, with the hand-over of System 2002
+        run: |
+          set -o pipefail
+          cargo test --locked --test system_2002 -- --nocapture 2>&1 | tee test.out
+          if grep -nE 'skipped: .*(band-2002-2999694|fetch-handover-2002)' test.out; then exit 1; fi
 
   system-for-cadr:
     runs-on: ubuntu-latest
