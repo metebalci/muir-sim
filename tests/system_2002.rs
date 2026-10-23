@@ -10,21 +10,21 @@
 //! same disk with the high band, whose working storage lies across 2^31 ---
 //! each with microcode 2002 in its current `MCR1`, "MCR1 UCADR 2002", and
 //! the band in its current `LOD1`, "LOD1 System 2002"; PROM 2002, which
-//! `quux --prom` takes, revision 16 having no boot PROM built in; and the
+//! is `quux`'s built-in PROM, `data/quux-promh.mcr`, byte for byte; and the
 //! sources the band was built from, which unpack to
 //! `release-2002-2999694/`, with the microcode's and the PROM's files in
 //! their `sys/ubin/`. Without it the tests skip and say so.
 //!
-//! Each disk is run as the hand-over says to run it: `quux` with
-//! `MUIR_QUUX_REVISION=16`, PROM 2002 given with `--prom`, the disk, and
+//! Each disk is run on `quux`'s built-in PROM, the high band's on `micro`
+//! with the hand-over's PROM given with `--prom` instead: the disk, and
 //! the sources as the file device's root, the band's `FILES`; and
 //! `--ethernet-socket`, behind which the test is the host. On both
-//! engines --- `micro`, and `rtl`, which on revision 16 is its four-stage
-//! pipeline --- the band boots to its listener: its TELNET server answers
-//! a connection to port 23 at the machine's default address and sends the
-//! herald, System 2002 on microcode 2002 on QUUX, and "Telnet server
-//! here". The pre-release's PROM has its published digest and is the
-//! sources' `sys/ubin/promh.mcr`, byte for byte.
+//! engines --- `micro`, and `rtl`, QUUX's four-stage pipeline --- the band
+//! boots to its listener: its TELNET server answers a connection to port
+//! 23 at the machine's default address and sends the herald, System 2002
+//! on microcode 2002 on QUUX, and "Telnet server here". The pre-release's
+//! PROM has its published digest and is the sources' `sys/ubin/promh.mcr`
+//! and `data/quux-promh.mcr`, byte for byte.
 
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -210,11 +210,12 @@ const LIMIT: &str = "1000000000";
 /// What the TELNET server said, once it said "Telnet server here".
 const HERE: &str = "Telnet server here";
 
-/// Boots the hand-over's disk `which` on `engine` as the hand-over says to
-/// run it, and connects to its TELNET server: what the session sent, up
-/// to and with "Telnet server here".
-fn boots(which: &str, engine: &str) -> Option<String> {
-    let prom = handover(&format!("{TAG}-promh.mcr"))?;
+/// Boots the hand-over's disk `which` on `engine`, on the built-in PROM
+/// or with the hand-over's given with `--prom`, and connects to its
+/// TELNET server: what the session sent, up to and with "Telnet server
+/// here".
+fn boots(which: &str, engine: &str, prom: bool) -> Option<String> {
+    let prom = if prom { Some(handover(&format!("{TAG}-promh.mcr"))?) } else { None };
     let name = format!("system-2002-{which}-{engine}");
     let (dir, pack, root) = band(which, &name)?;
     let sock = dir.join("ether.sock");
@@ -222,14 +223,15 @@ fn boots(which: &str, engine: &str) -> Option<String> {
     let listener = UnixListener::bind(&sock).unwrap();
     listener.set_nonblocking(true).unwrap();
     let t = Instant::now();
-    let child = support::quux()
-        .env("MUIR_QUUX_REVISION", "16")
-        .arg(format!("--{engine}"))
+    let mut c = support::quux();
+    c.arg(format!("--{engine}"))
         .args(["--terminal", "127.0.0.1:0", "--stop-after", LIMIT, "--tv-capture-no-time"])
         .arg("--tv-capture")
-        .arg(&gif)
-        .arg("--prom")
-        .arg(&prom)
+        .arg(&gif);
+    if let Some(prom) = &prom {
+        c.arg("--prom").arg(prom);
+    }
+    let child = c
         .arg("--disk-pack")
         .arg(&pack)
         .arg("--file-root")
@@ -308,8 +310,8 @@ fn boots(which: &str, engine: &str) -> Option<String> {
 
 /// The herald the session sends, its spacing as one space: System 2002,
 /// microcode 2002, QUUX on muir-sim, the band's `FILES`.
-fn heralds_system_2002(which: &str, engine: &str) {
-    let Some(session) = boots(which, engine) else { return };
+fn heralds_system_2002(which: &str, engine: &str, prom: bool) {
+    let Some(session) = boots(which, engine, prom) else { return };
     let said = session.split_whitespace().collect::<Vec<_>>().join(" ");
     for line in [
         "Experimental System 2002",
@@ -324,34 +326,38 @@ fn heralds_system_2002(which: &str, engine: &str) {
 
 #[test]
 fn system_2002_boots_to_its_telnet_server_on_micro() {
-    heralds_system_2002("disk", "micro");
+    heralds_system_2002("disk", "micro", false);
 }
 
 #[test]
 fn system_2002_boots_to_its_telnet_server_on_rtl() {
-    heralds_system_2002("disk", "rtl");
+    heralds_system_2002("disk", "rtl", false);
 }
 
+/// The hand-over's PROM given with `--prom`, as an operator gives one.
 #[test]
-fn the_high_band_boots_to_its_telnet_server_on_micro() {
-    heralds_system_2002("high", "micro");
+fn the_high_band_boots_to_its_telnet_server_on_micro_with_prom_given() {
+    heralds_system_2002("high", "micro", true);
 }
 
 #[test]
 fn the_high_band_boots_to_its_telnet_server_on_rtl() {
-    heralds_system_2002("high", "rtl");
+    heralds_system_2002("high", "rtl", false);
 }
 
 /// **PROM 2002 is the hand-over's**: the pre-release's `promh.mcr` has the
 /// digest its `SHA256SUMS` gives, and the sources' `sys/ubin/promh.mcr`,
 /// which the fetch script copies out of them, is the same file byte for
-/// byte; and it reads as a revision-16 boot PROM.
+/// byte, and so is `quux`'s built-in PROM, `data/quux-promh.mcr`; and it
+/// reads as QUUX's boot PROM.
 #[test]
 fn prom_2002_is_the_hand_over_s() {
     let Some(prom) = handover(&format!("{TAG}-promh.mcr")) else { return };
     let Some(ubin) = handover("promh.mcr") else { return };
     assert_eq!(sha256(&prom), PROM_2002_SHA256, "{TAG}-promh.mcr");
     assert_eq!(sha256(&ubin), PROM_2002_SHA256, "the sources' sys/ubin/promh.mcr");
-    muir::prom::parse_quux_mcr(&std::fs::read(&prom).unwrap(), muir::machine::Geometry::QUUX_16)
-        .expect("PROM 2002 reads on revision 16");
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/quux-promh.mcr");
+    assert!(std::fs::read(&data).unwrap() == std::fs::read(&prom).unwrap(), "data/quux-promh.mcr");
+    muir::prom::parse_quux_mcr(&std::fs::read(&prom).unwrap(), muir::machine::Geometry::QUUX)
+        .expect("PROM 2002 reads on QUUX");
 }

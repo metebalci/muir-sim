@@ -25,7 +25,6 @@ use muir::isa::asm::{
 use muir::machine::{Geometry, Machine, Word, macro_dispatch};
 use muir::micro::Micro;
 use muir::pipeline::Pipeline;
-use muir::rtl::Rtl;
 use muir::tv::Board;
 
 mod support;
@@ -33,7 +32,7 @@ mod support;
 /// Revision 13, for its own map, physical space and cache.
 const REV13: Geometry = Geometry::QUUX;
 /// Revision 16, which keeps revision 13's 40-bit datapath.
-const REV16: Geometry = Geometry::QUUX_16;
+const REV16: Geometry = Geometry::QUUX;
 
 /// A memory's constants: 0, 1, 2, and words the programs take as A.
 const ZERO: u64 = 0o40;
@@ -59,14 +58,11 @@ const fn fd(code: u64) -> u64 {
 /// Destination 1, LOCATION-COUNTER, and 2, INTERRUPT-CONTROL.
 const LC: u64 = fd(1);
 const INTCTL: u64 = fd(2);
-/// Destination 23, `VMA` with the map write a microcycle later.
-const WRITE_MAP: u64 = fd(0o23);
 
 /// Functional sources: 0 the dispatch constant, 2 the PDL pointer, 6 OPC,
 /// 11 `MAP(MD)`, 13 the location counter, 16 MACHINE-ID, 17 unassigned.
 const SRC_DC: u64 = src(0);
 const SRC_PDLP: u64 = src(2);
-const SRC_MAP: u64 = src(0o11);
 const SRC_LC: u64 = src(0o13);
 const SRC_ID: u64 = src(0o16);
 const SRC_17: u64 = src(0o17);
@@ -96,10 +92,6 @@ fn jcond(code: u64) -> u64 {
 fn disp(addr: u64, len: u64, r: u64) -> u64 {
     DISPATCH | addr << 12 | len << 5 | rot6(r)
 }
-/// The map bits of a DISPATCH, `IR<9:8>`: 1 takes the level-2 entry's
-/// `<22>`, 2 its `<23>` (A1.7).
-const MAP_22: u64 = 1 << 8;
-const MAP_23: u64 = 2 << 8;
 
 /// A program under construction: its words from control store 0, with
 /// A-memory constants the setup gives.
@@ -215,23 +207,6 @@ fn run_with(
     after_boot(u.machine_mut());
     finish(&mut u, "micro");
     let mut r = Pipeline::new(machine(p, setup));
-    r.boot();
-    after_boot(r.machine_mut());
-    finish(&mut r, "rtl");
-    [("micro", u.machine().clone()), ("rtl", r.machine().clone())]
-}
-
-/// [`run_with`] on revision 13, `micro` and the single-edge `rtl`.
-fn run_with_13(
-    p: &Prog,
-    setup: &dyn Fn(&mut Machine),
-    after_boot: &dyn Fn(&mut Machine),
-) -> [(&'static str, Machine); 2] {
-    let mut u = Micro::new(machine_on(REV13, p, setup));
-    u.boot();
-    after_boot(u.machine_mut());
-    finish(&mut u, "micro");
-    let mut r = Rtl::new(machine_on(REV13, p, setup));
     r.boot();
     after_boot(r.machine_mut());
     finish(&mut r, "rtl");
@@ -686,11 +661,6 @@ fn landed(p: &Prog, setup: &dyn Fn(&mut Machine), what: &str) {
     expect(&run_with(p, setup, &|_| {}), &[(0o10, 1, what)]);
 }
 
-/// [`landed`] on revision 13.
-fn landed_13(p: &Prog, setup: &dyn Fn(&mut Machine), what: &str) {
-    expect(&run_with_13(p, setup, &|_| {}), &[(0o10, 1, what)]);
-}
-
 /// **A DISPATCH on the 6-bit type into entries above 2,047** (G2 §2.4):
 /// the address `IR<23:12>`, the type the byte at 32, rotate 8, length 6.
 #[test]
@@ -718,31 +688,6 @@ fn a_dispatch_on_the_type_reaches_entries_above_2047() {
         p.op(disp(0o7774, 2, 2) | m_src(1));
     });
     landed(&p, &|_| {}, "the cdr code's entry at 7776");
-}
-
-/// **A 7-bit (type, map bit) dispatch reaching an entry above 2,047** on
-/// revision 13, through its map (G2 §2.4, A1.7): the transporter's field, the type and the bit below
-/// it, the byte at 31, rotate 9, length 7, with the map bit of `MD`'s
-/// page in place of its bit 0: `IR<9>` takes the level-2 entry's `<23>`,
-/// `IR<8>` its `<22>`.
-#[test]
-fn a_type_and_map_bit_dispatch_reaches_entries_above_2047() {
-    // MD: type 25, a pointer to word 3 of virtual page 5, whose level-2
-    // entry has <23> set and <22> clear.
-    let pointer = 5 << 10 | 3;
-    let md = w(0o25, pointer);
-    let setup = |m: &mut Machine| {
-        m.md = md;
-        m.l2_map[5] = 1 << 27 | 1 << 23 | 7;
-    };
-    let p = dispatch_program(0o7400 + (0o25 << 1 | 1), &|p| {
-        p.op(disp(0o7400, 7, 9) | MAP_23 | SRC_MD);
-    });
-    landed_13(&p, &setup, "(type, <23>) at 7453");
-    let p = dispatch_program(0o7400 + (0o25 << 1), &|p| {
-        p.op(disp(0o7400, 7, 9) | MAP_22 | SRC_MD);
-    });
-    landed_13(&p, &setup, "(type, <22>) at 7452");
 }
 
 /// **A DISPATCH in LC byte mode on both halfwords** (A1.2): the field at
@@ -822,111 +767,6 @@ fn numeric_sources_and_constants_are_zero_extended() {
 
 // --- the map -----------------------------------------------------------------
 
-/// A 28-bit virtual address whose every level-1 and level-2 bit matters:
-/// `VA<27:15>` 12345 (octal), `VA<14:10>` 26, `VA<9:0>` 1234.
-const VA: u32 = 0o12345 << 15 | 0o26 << 10 | 0o1234;
-const L1_INDEX: usize = 0o12345;
-const BLOCK: u32 = 0o123;
-const L2_INDEX: usize = (0o123 << 5) | 0o26;
-/// The physical page it maps to, and so the word.
-const PAGE: u32 = 0o1357;
-const PHYS: usize = (0o1357 << 10) | 0o1234;
-
-/// The map for [`VA`]: level 1 at `VA<27:15>` names block 123, whose entry
-/// at `VA<14:10>` is page 1357, readable and writable.
-fn map_va(m: &mut Machine) {
-    m.l1_map[L1_INDEX] = BLOCK;
-    m.l2_map[L2_INDEX] = 1 << 27 | 1 << 26 | PAGE;
-    m.main[PHYS] = w(0o005, 0x600d);
-    m.main[PHYS & !0o1400] = w(0o005, 0xbad);
-}
-
-/// **The map at 28 bits with 1024-word pages** (G2 §2.6, A1.7): `VA<27:15>`
-/// indexes level 1, `{L1, VA<14:10>}` level 2, and the word is
-/// `{L2<17:0>, VA<9:0>}`; `VA<9:8>`, the offset's high bits at 1024-word
-/// pages, and `<39:32>` are not in the map. An address with `<31:28>` not
-/// zero reads block 177, whose entries are 0: a page fault.
-#[test]
-fn the_map_translates_28_bits_at_1024_word_pages() {
-    let mut p = Prog::default();
-    p.a(0o50, VA as Word).a(0o51, w(0o245, VA as u64)).a(0o52, (1 << 28 | VA) as Word);
-    p.a(0o53, (VA & !0o1400) as Word);
-    for (k, a) in [0o50u64, 0o51, 0o53].into_iter().enumerate() {
-        p.op(ALU | SETA | a_src(a) | START_READ);
-        p.op(filler().raw()).op(filler().raw());
-        p.op(ALU | SETM | SRC_MD | m_dest(2 + k as u64));
-    }
-    // <31:28> set: the read is refused, and condition 4, page fault, holds.
-    p.op(ALU | SETA | a_src(0o52) | START_READ);
-    p.taken(jcond(4), 5);
-    p.stop();
-    expect(
-        &run_with_13(&p, &map_va, &|_| {}),
-        &[
-            (2, w(0o005, 0x600d), "VA"),
-            (3, w(0o005, 0x600d), "VA with <39:32> set"),
-            (4, w(0o005, 0xbad), "VA with <9:8> clear"),
-            (5, 1, "<31:28> set: a page fault"),
-        ],
-    );
-}
-
-/// **`MAP(MD)` and a map write, round trip** (A1.7): the write's word in
-/// `VMA`, `<38:32>` level 1 with `<29>`, `<27:0>` level 2 with `<28>`; its
-/// address in `MD`. Level 1 177 and level-2 entry 7777 read back through
-/// `MAP(MD)`: `<38:32>` level 1, `<27:0>` level 2. A write whose address
-/// has `<31:28>` set leaves both levels alone, and a write with both
-/// enables writes level 1 only. `MAP(MD)` of an address with `<31:28>` set
-/// reads block 177.
-#[test]
-fn map_md_and_the_map_write_round_trip() {
-    // MD<27:15> 7777, MD<14:10> 37.
-    let addr: Word = 0o7777 << 15 | 0o37 << 10;
-    let l2: Word = 1 << 27 | 1 << 26 | 0o7654321;
-    let mut p = Prog::default();
-    p.a(0o50, addr).a(0o51, 0o177 << 32 | 1 << 29).a(0o52, 1 << 28 | l2);
-    p.a(0o53, addr | 1 << 28).a(0o54, 0o55 << 32 | 1 << 29 | 1 << 28 | 0o1111);
-    p.a(0o55, 0o1234 << 15).a(0o56, 0o22 << 32 | 1 << 29 | 1 << 28 | 0o3333);
-    p.a(0o57, 1 << 28 | 0o4444);
-    // MD <- the address; level 1 <- 177; level 2 at {177, 37} <- l2.
-    p.op(ALU | SETA | a_src(0o50) | MD);
-    p.op(ALU | SETA | a_src(0o51) | WRITE_MAP);
-    p.op(filler().raw());
-    p.op(ALU | SETA | a_src(0o52) | WRITE_MAP);
-    p.op(filler().raw()).op(filler().raw());
-    p.op(ALU | SETM | SRC_MAP | m_dest(2));
-    // An address with <31:28> set: MAP(MD) reads block 177, and a write
-    // there, both enables, leaves both levels.
-    p.op(ALU | SETA | a_src(0o53) | MD);
-    p.op(filler().raw());
-    p.op(ALU | SETM | SRC_MAP | m_dest(3));
-    p.op(ALU | SETA | a_src(0o54) | WRITE_MAP);
-    p.op(filler().raw()).op(filler().raw());
-    p.op(ALU | SETA | a_src(0o57) | WRITE_MAP);
-    p.op(filler().raw()).op(filler().raw());
-    // Both enables at 1234 << 15: level 1 only.
-    p.op(ALU | SETA | a_src(0o55) | MD);
-    p.op(ALU | SETA | a_src(0o56) | WRITE_MAP);
-    p.op(filler().raw()).op(filler().raw());
-    p.stop();
-    let ms = run_with_13(&p, &|_| {}, &|_| {});
-    // The last memory cycle was the PROM's jump's none: the fault bits
-    // are the latch's, the same on both engines, and not the point here.
-    for (engine, m) in &ms {
-        let map = |slot: usize| m.mmem[slot] & !(3 << 30);
-        assert_eq!(map(2), 0o177 << 32 | l2, "{engine}: MAP(MD) after the writes");
-        assert_eq!(map(3), 0o177 << 32 | l2, "{engine}: MAP(MD) of <31:28> set: block 177");
-        // The writes at an address with <31:28> set would have put 55 in
-        // level 1 at 7777 and 4444 in level 2 at {177, 37}.
-        assert_eq!(m.l1_map[0o7777], 0o177, "{engine}: level 1 written, and not at <31:28>");
-        assert_eq!(m.l2_map[0o7777], l2 as u32, "{engine}: level 2 written, and not at <31:28>");
-        assert_eq!(m.l1_map[0o1234], 0o22, "{engine}: both enables: level 1");
-        assert_eq!(m.l2_map[0o22 << 5], 0, "{engine}: and not level 2 at the new block");
-        assert_eq!(m.l2_map[0], 0o1 << 27 | 1 << 26, "{engine}: nor at block 0");
-    }
-    assert_eq!(ms[0].1.mmem[2], ms[1].1.mmem[2], "the engines' MAP(MD)");
-}
-
 // --- H8a's fused return at 40 bits -------------------------------------------
 
 /// **The fused return in the ring of 40** (G2 §2.7, A1.2): the MACRO
@@ -997,29 +837,6 @@ const PHYSICAL: Word = muir::tlb::PHYSICAL_WINDOW as Word;
 
 // --- the physical space at 28 bits (G1 §3.2, G2 §3-§4) --------------------------
 
-/// Physical addresses the space tests reach, each through a virtual page of
-/// its own: the register page, `1777777400`; the CADR's last page,
-/// `17777400`; the frame buffer window, `1760000000`; main memory above 22
-/// bits, `20000000`; the first word past main memory; and `17773000`, which
-/// the CADR's decode of its Unibus window takes for the diagnostic
-/// registers.
-const REGISTER_PAGE: u32 = 0o1777777400;
-const OLD_REGISTER_PAGE: u32 = 0o17777400;
-const WINDOW: u32 = 0o1760000000;
-const HIGH: u32 = 0o20000000;
-/// Main memory for the space tests: 4MW and a page, so that [`HIGH`]
-/// and the old Unibus window are in it.
-const MAIN_13: usize = 0o20002000;
-const SPY: u32 = 0o17773000;
-
-/// The virtual address that reaches physical `phys` through virtual page
-/// `vpage` (below 32, so in level-1 block 0), and its map entry: readable,
-/// writable, the page `phys<27:10>`.
-fn through(m: &mut Machine, vpage: u32, phys: u32) -> Word {
-    m.l2_map[vpage as usize] = 1 << 27 | 1 << 26 | phys >> 10;
-    ((vpage << 10) | (phys & 0o1777)) as Word
-}
-
 impl Prog {
     /// M `slot` <- the word at the virtual address in A `a`.
     fn read_to(&mut self, a: u64, slot: u64) -> &mut Self {
@@ -1032,73 +849,6 @@ impl Prog {
         self.op(ALU | SETA | a_src(word) | MD);
         self.op(ALU | SETA | a_src(a) | START_WRITE);
         self.op(filler().raw()).op(filler().raw())
-    }
-}
-
-/// **Revision 13's physical space is 28 bits** (G1 §3.2, G2 §4.1, A1.10): the
-/// register page at `1777777400`, whose feature words say revision 13 and
-/// its sizes, the video controller's buffer at `1760000000`; main memory,
-/// not a register, at the CADR's last page, `17777400`, when there is that
-/// much of it (`tests/revision_13_memory.rs` has it nothing when there is
-/// not); main memory whole above 22 bits, up to its end, and nothing past
-/// it, which fails with word 101's NXM bit; and main memory, not the
-/// diagnostic registers, at `17773000`.
-#[test]
-fn the_physical_space_is_28_bits() {
-    let va = |m: &mut Machine| {
-        [
-            through(m, 1, REGISTER_PAGE),
-            through(m, 2, OLD_REGISTER_PAGE),
-            through(m, 4, HIGH),
-            through(m, 5, MAIN_13 as u32),
-            through(m, 6, SPY),
-        ]
-    };
-    let mut p = Prog::default();
-    let mut probe = Machine::new();
-    let [reg, old, high, past, spy] = va(&mut probe);
-    for (k, off) in [0u64, 1, 2, 6, 0o13].into_iter().enumerate() {
-        p.a(0o60 + k as u64, reg + off);
-        p.read_to(0o60 + k as u64, 0o10 + k as u64);
-    }
-    // The CADR's last page: main memory, and word 101 has no NXM.
-    p.a(0o65, old).a(0o66, reg + 0o101);
-    p.read_to(0o65, 0o15).read_to(0o66, 0o16);
-    // Main memory above 22 bits, a whole word; past its end nothing.
-    p.a(0o67, high + 5).a(0o70, w(0o025, 0x1357_9bdf)).a(0o71, past);
-    p.write_from(0o70, 0o67).read_to(0o67, 0o20).read_to(0o71, 0o21).read_to(0o66, 0o22);
-    // A write of word 101 clears it.
-    p.write_from(ZERO, 0o66).read_to(0o66, 0o17);
-    // The old Unibus window's diagnostic registers are main memory here.
-    p.a(0o72, spy + 5);
-    p.read_to(0o72, 0o23);
-    p.stop();
-    let setup = |m: &mut Machine| {
-        m.main = vec![0; MAIN_13];
-        va(m);
-        m.main[SPY as usize + 5] = w(0o031, 0xab_cdef);
-        m.main[OLD_REGISTER_PAGE as usize] = w(0o031, 0o400);
-    };
-    let ms = run_with_13(&p, &setup, &|_| {});
-    expect(
-        &ms,
-        &[
-            (0o10, (0x5155 << 16) | (13 << 4) | 4, "word 0, MACHINE-ID"),
-            (0o11, 7, "word 1, the level-1 entry's bits"),
-            (0o12, 4096, "word 2, the level-2 entries"),
-            (0o13, 4096, "word 6, the dispatch memory's entries"),
-            (0o14, WINDOW as Word, "word 13, the video controller's buffer"),
-            (0o15, w(0o031, 0o400), "17777400: main memory"),
-            (0o16, 0, "word 101: no NXM"),
-            (0o17, 0, "word 101 cleared by its write"),
-            (0o20, w(0o025, 0x1357_9bdf), "main memory at 20000005"),
-            (0o21, 0, "past main memory: nothing"),
-            (0o22, 1, "word 101: NXM"),
-            (0o23, w(0o031, 0xab_cdef), "main memory at 17773005"),
-        ],
-    );
-    for (engine, m) in &ms {
-        assert_eq!(m.main[HIGH as usize + 5], w(0o025, 0x1357_9bdf), "{engine}: main memory");
     }
 }
 
@@ -1162,37 +912,6 @@ fn a_store_to_a_word_spanning_two_beats_is_whole() {
             "{engine}: the line packed in the checkpoint"
         );
     }
-}
-
-/// **On revision 13's `rtl` main memory above 22 bits and the frame buffer
-/// window go through the cache** (G2 §3; G1 §3.2): a second read of either word
-/// hits, where an address the port does not decode as memory would not be
-/// cached at all.
-#[test]
-fn on_rtl_high_memory_and_the_window_are_cached() {
-    let va = |m: &mut Machine| [through(m, 3, WINDOW), through(m, 4, HIGH)];
-    let mut p = Prog::default();
-    let mut probe = Machine::new();
-    let [window, high] = va(&mut probe);
-    p.a(0o60, window + 3).a(0o61, high + 3);
-    for slot in [0o10, 0o11] {
-        p.read_to(0o60, slot);
-    }
-    for slot in [0o12, 0o13] {
-        p.read_to(0o61, slot);
-    }
-    p.stop();
-    let setup = |m: &mut Machine| {
-        m.main = vec![0; MAIN_13];
-        va(m);
-    };
-    let mut r = Rtl::new(machine_on(REV13, &p, &setup));
-    r.boot();
-    let before = r.cache().unwrap().hits;
-    finish(&mut r, "rtl");
-    let c = r.cache().unwrap();
-    assert!(c.hits - before >= 2, "the second reads hit: {} hits, {} misses", c.hits, c.misses);
-    assert!(c.holds(WINDOW + 3) && c.holds(HIGH + 3), "both lines held");
 }
 
 // --- full HD and the board name ---------------------------------------------

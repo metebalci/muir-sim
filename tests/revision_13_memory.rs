@@ -5,20 +5,16 @@
 //! appendix A1.10-A1.13), through the machine's register page and its
 //! parts, on revision 16: packed storage, block-disk's packed and 4-byte
 //! transfers, the file device's tags and 28-bit addresses, and the
-//! checkpoint at 40 bits; and revision 13's own: the `.mcr` at 40 bits in
-//! MIT's sections, and its memory port's 8-word lines with the prefetch's
-//! page reach.
+//! checkpoint at 40 bits.
 
 use std::path::PathBuf;
 
 use muir::block_disk::BlockDisk;
-use muir::busint::Responder;
 use muir::checkpoint::Writer;
 use muir::disk_image::Disk;
 use muir::engine::Engine;
 use muir::file_device::{Mounts, op};
 use muir::machine::{Geometry, Machine, Word};
-use muir::memory_port::{MemoryPort, Reach};
 use muir::micro::Micro;
 
 mod support;
@@ -64,14 +60,6 @@ fn rev16(words: usize) -> Machine {
     m
 }
 
-/// Revision 13 with `words` of main memory.
-fn rev13(words: usize) -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
-    m.main = vec![0; words];
-    m
-}
-
 /// G1 §4.1's packed storage of `words`, by hand: each word five bytes,
 /// `<7:0>` first and the tag `<39:32>` last.
 fn packed(words: &[Word]) -> Vec<u8> {
@@ -106,7 +94,7 @@ fn the_cadr_s_device_addresses_are_nothing_on_revision_13() {
         assert_eq!(m.bus_read(phys), 0, "{phys:o}");
         assert_eq!(m.bus_read(PAGE + 0o101), 1, "{phys:o}: NXM");
     }
-    let id = Geometry::QUUX_16.machine_id.unwrap();
+    let id = Geometry::QUUX.machine_id.unwrap();
     assert_eq!(m.bus_read(PAGE), id.into(), "the page's MACHINE-ID");
 }
 
@@ -385,7 +373,7 @@ fn a_40_bit_checkpoint_is_packed_and_round_trips() {
     let mut back = Micro::new(rev16(0o100000));
     back.load(&mut c.reader()).unwrap();
     assert_eq!(back.machine().main, e.machine().main, "main memory back");
-    assert_eq!(back.machine().geometry, Geometry::QUUX_16);
+    assert_eq!(back.machine().geometry, Geometry::QUUX);
 }
 
 /// **A 32-bit checkpoint, the CADR's, is refused on QUUX** (G2 §2.8), and
@@ -407,167 +395,7 @@ fn a_32_bit_checkpoint_is_refused_on_revision_13() {
     assert!(err.to_string().contains("32-bit words, the CADR's"), "{err}");
 }
 
-/// **`rtl` resumes revision 13 on revision 13's memory port** (G2 §3), the
-/// single-edge engine: a
-/// program reading main memory a line of 8 apart, every read a miss and a
-/// fill of 5 beats, saved at its microcycle 200 and loaded into a fresh
-/// engine, runs on to the same end as the run never saved: the same
-/// nanoseconds, and the checkpoint at the end byte for byte. A port the
-/// restore rebuilt with 4-word lines' layout would fill in 2 beats and end
-/// sooner.
-#[test]
-fn rtl_resumes_revision_13_on_its_own_memory_port() {
-    use muir::checkpoint::Reader;
-    use muir::isa::Insn;
-    use muir::isa::asm::{
-        ADD, ALU, ALWAYS, JUMP, SETM, SRC_MD, START_READ, a_dest, a_src, filler, m_dest, m_src,
-        target,
-    };
-    use muir::rtl::Rtl;
-    let prom = [
-        Insn::new(ALU | SETM | m_src(1) | START_READ),
-        filler(),
-        filler(),
-        Insn::new(ALU | ADD | SRC_MD | a_src(3) | a_dest(3)),
-        Insn::new(ALU | ADD | m_src(1) | a_src(5) | m_dest(1)),
-        Insn::new(JUMP | target(0) | ALWAYS),
-    ];
-    let make = || {
-        let mut m = rev13(1 << 16);
-        let mut words = vec![filler(); 1024];
-        words[..prom.len()].copy_from_slice(&prom);
-        m.load_prom(&words);
-        support::prom_program_in_ram(&mut m);
-        // Virtual pages 0-31, of 1024 words, onto the same physical pages.
-        for p in 0..32u32 {
-            m.l2_map[p as usize] = 1 << 27 | 1 << 26 | p;
-        }
-        m.amem[5] = 8;
-        let mut e = Rtl::new(m);
-        e.boot();
-        e
-    };
-    let end = |e: &Rtl| {
-        let mut w = Writer::new();
-        e.save(&mut w);
-        (e.ns(), w.finish())
-    };
-    let mut straight = make();
-    straight.run(200);
-    let mut w = Writer::new();
-    straight.save(&mut w);
-    let body = w.finish();
-    let mut resumed = make();
-    resumed.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
-    straight.run(2000);
-    resumed.run(2000);
-    let (a, b) = (end(&straight), end(&resumed));
-    assert!(straight.cache().unwrap().misses > 100, "the reads missed");
-    assert_eq!(b.0, a.0, "the resumed run's nanoseconds");
-    assert!(b.1 == a.1, "the resumed run ends as the straight one, byte for byte");
-}
-
-// --- the .mcr -------------------------------------------------------------------
-
-/// A 32-bit word as MIT's `.mcr` puts it out: the high half, then the low,
-/// each little-endian.
-fn out32(b: &mut Vec<u8>, v: u32) {
-    b.extend_from_slice(&((v >> 16) as u16).to_le_bytes());
-    b.extend_from_slice(&(v as u16).to_le_bytes());
-}
-
-/// **The `.mcr` at 40 bits** (A1.4, A1.12): a D-MEM section of `10000`
-/// entries, and section 5, A memory at 40 bits, two 32-bit words a
-/// location, `<31:0>` then `<39:32>` in `<7:0>`; in partition order as in
-/// MIT's.
-#[test]
-fn the_mcr_reads_4096_dmem_entries_and_a_40_bit_a_memory() {
-    let mut b = Vec::new();
-    for v in [1, 0, 1] {
-        out32(&mut b, v);
-    }
-    for half in [0u16, 0o1234, 0o5670, 0o1357] {
-        b.extend_from_slice(&half.to_le_bytes());
-    }
-    for v in [2, 0, 0o10000] {
-        out32(&mut b, v);
-    }
-    for k in 0..0o10000u32 {
-        out32(&mut b, if k == 0o7777 { 0o7654 } else { 0 });
-    }
-    for v in [3, 4, 0o200, 0o6000] {
-        out32(&mut b, v);
-    }
-    for v in [5, 0o40, 2] {
-        out32(&mut b, v);
-    }
-    for (lo, hi) in [(0o1234567_u32, 0o025_u32), (0xffff_ffff, 0o377)] {
-        out32(&mut b, lo);
-        out32(&mut b, hi);
-    }
-    b.resize(b.len().next_multiple_of(1024), 0);
-    let check = |m: muir::mcr::Mcr, what: &str| {
-        assert_eq!(m.dmem.len(), 0o10000, "{what}: D-MEM entries");
-        assert_eq!(m.dmem[0o7777], 0o7654, "{what}: entry 7777");
-        assert!(m.amem_wide, "{what}: section 5");
-        assert_eq!(m.amem_start, 0o40);
-        assert_eq!(m.amem, [w(0o025, 0o1234567), w(0o377, 0xffff_ffff)], "{what}: A memory");
-        assert_eq!(m.version(), Some(0o1234567), "{what}: A-VERSION's field");
-    };
-    check(muir::mcr::parse(&b).unwrap(), "MIT's order");
-    let partition = muir::mcr::swap_halves(&b).unwrap();
-    check(muir::mcr::parse_partition_order(&partition).unwrap(), "partition order");
-}
-
-// --- the cache and the prefetch -----------------------------------------------
-
-/// Answers a read of `phys` on `p` at `now`, for the fetch of virtual
-/// `vaddr` if it is one; when it was answered.
-fn read(p: &mut MemoryPort, now: u64, phys: u32, fetch: Option<u32>, main: &[Word]) -> u64 {
-    p.request_at(false, phys);
-    if let Some(v) = fetch {
-        p.mark_fetch(v);
-    }
-    p.mclk_edge(now, Responder::Memory(0));
-    let at = p.ack_at().unwrap();
-    p.poll(at, Responder::Memory(0)).unwrap();
-    p.read_answered(main);
-    p.finish();
-    at
-}
-
-/// **Revision 13's port** (G2 §3, M7): 8-word lines, a fill of 5 beats
-/// taking three ticks more than today's 2-beat line, and the prefetch with
-/// the page's reach over 1024-word pages and 28-bit virtual addresses;
-/// line reach selectable.
-#[test]
-fn revision_13s_port_has_8_word_lines_and_page_reach() {
-    let main = vec![0 as Word; 0o100000];
-    let mut p = MemoryPort::new();
-    assert_eq!(p.cache().config.line_words, 8);
-    assert_eq!(p.prefetch(), Some(Reach::Page), "revision 13's reach");
-    let t = p.memory_timing();
-    let at = read(&mut p, 1000, 0o400, None, &main);
-    assert_eq!(at, 1000 + t.read_ns + 30, "a miss: the fill of 5 beats");
-    assert_eq!(read(&mut p, 5000, 0o407, None, &main), 5000 + 20, "the line's last word hits");
-    assert_eq!(p.cache().misses, 1);
-    // The next line held: a fetch of 0o377, the end of a 256-word page but
-    // not of a 1024-word one, takes 0o400 from it.
-    read(&mut p, 9000, 0o370, None, &main);
-    read(&mut p, 13000, 0o377, Some(0x0abc_d377), &main);
-    let got = p.prefetched().expect("the next line's word");
-    assert_eq!((got.phys, got.vaddr), (0o400, 0x0abc_d378), "28 bits of virtual address");
-    // The end of a 1024-word page stops it.
-    read(&mut p, 17000, 0o2000, None, &main);
-    read(&mut p, 21000, 0o1777, Some(0o1777), &main);
-    assert_eq!(p.prefetched(), None, "not past the page");
-    // Line reach, for the fabric to take back.
-    p.set_prefetch(Some(Reach::Line));
-    read(&mut p, 25000, 0o377, Some(0o377), &main);
-    assert_eq!(p.prefetched(), None, "line reach: not into the next line");
-}
-
-/// **The prompt's `mem` takes 28-bit physical addresses on revision 13**
+/// **The prompt's `mem` takes 28-bit physical addresses on QUUX**
 /// (G1 §3.2), and 22-bit ones on a 32-bit machine as ever.
 #[test]
 fn the_prompts_mem_takes_28_bit_addresses() {

@@ -27,7 +27,7 @@ use support::{Run, cadr, scratch, text};
 /// The executable for `exe`, `cadr` or `quux` on revision 16.
 fn executable(exe: &str) -> std::process::Command {
     match exe {
-        "quux" => support::quux_on_16(),
+        "quux" => support::quux(),
         _ => support::executable(exe),
     }
 }
@@ -102,7 +102,7 @@ fn halted_copy(from: &Path, to: &Path) -> Stands {
             e.save(&mut w);
             at
         }
-        "rtl" if m.geometry.paged() => {
+        "rtl" if m.geometry.quux() => {
             let mut e = Pipeline::new(m);
             e.load(&mut c.reader()).unwrap();
             let at = e.halt();
@@ -135,7 +135,7 @@ fn stands_in(path: &Path) -> Stands {
             e.load(&mut r).unwrap();
             stands(&e)
         }
-        "rtl" if m.geometry.paged() => {
+        "rtl" if m.geometry.quux() => {
             let mut e = Pipeline::new(m);
             e.load(&mut r).unwrap();
             stands(&e)

@@ -237,7 +237,7 @@ fn the_bus_interfaces_answers_land_on_the_grid_under_fpga() {
                 TimingModel::Cadr => {
                     assert!(!off_grid.is_empty(), "{what}: never off the grid on the board")
                 }
-                TimingModel::Fpga | TimingModel::Sync { .. } => {
+                TimingModel::Fpga => {
                     let first = &off_grid[..off_grid.len().min(8)];
                     assert!(off_grid.is_empty(), "{what}: off the grid under fpga at {first:?}")
                 }

@@ -7,7 +7,7 @@
 # whose files are replaced with each new build of muir-sys's `main`; its tag
 # never moves, and its README names the build. It is for trying the newest
 # system, never for tests or CI, whose bytes must not move:
-# `fetch-system-for-quux.sh` fetches the pinned release for those.
+# `fetch-handover-2002.sh` fetches a pinned hand-over for those.
 #
 # The release's files, and where this puts them:
 #
@@ -31,7 +31,7 @@
 # must match its line, so the disk, the sources, the PROM and the README
 # all come from one build; a replacement under way shows as a mismatch. On
 # a failure this waits 60 seconds and tries once more. The number and the
-# format are checked as in `fetch-system-for-quux.sh`: the sources must
+# format are checked before anything is unpacked: the sources must
 # unpack to `dev-system-for-quux/`, and the disk must be a dynamic VHD
 # holding a GPT. Only then is the old build replaced, by renaming the
 # staging directory into place, and the old disk is removed before that and
@@ -93,7 +93,14 @@ bytes_at() {
 }
 
 # Whether file $1 is a dynamic VHD whose disk holds a GPT, saying why not
-# on stderr; `fetch-system-for-quux.sh` has where each offset is from.
+# on stderr. Microsoft's VHD specification (October 2006), every field
+# big-endian: the footer is the file's last 512 bytes, cookie `conectix` at
+# 0, the dynamic header's offset at 16, the disk type at 60 (3, dynamic);
+# the dynamic header has cookie `cxsparse` at 0, the block table's offset at
+# 16 and the block size at 32; a table entry is the sector where a block's
+# sector bitmap begins, the block's data after the bitmap, or FFFFFFFF for a
+# block not allocated, which reads as zeros. The GPT's header is the disk's
+# sector 1 (UEFI 2.10, 5.3.1), in block 0.
 vhd_holds_gpt() {
     name=${1#"$muir"/}
     size=$(wc -c < "$1")

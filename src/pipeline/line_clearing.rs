@@ -98,9 +98,9 @@ impl LineClearing {
 }
 
 impl Pipeline {
-    /// Whether the engine runs: revision 16, not under neutral time.
+    /// Whether the engine runs: not under neutral time.
     fn line_clearing_runs(&self) -> bool {
-        self.m.geometry.ethernet() && !self.neutral
+        !self.neutral
     }
 
     /// **The engine's work in the clock under way that comes before the
@@ -221,7 +221,7 @@ impl Pipeline {
     /// have advanced the device. The engine does it clock by clock
     /// otherwise.
     pub(crate) fn ethernet_at_once(&mut self) {
-        if !(self.m.geometry.ethernet() && self.neutral) {
+        if !self.neutral {
             return;
         }
         while self.m.ethernet.enabled() && self.m.ethernet.rx_cons() != self.m.ethernet.filled() {

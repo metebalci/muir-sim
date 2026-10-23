@@ -238,7 +238,7 @@ use Class::*;
 /// [`quux`]'s machine. Word 103, the real-time clock, reads the host's
 /// time, and [`POWER_ON_103`] stands for it.
 fn table() -> [(Class, u32); 256] {
-    let id = Geometry::QUUX_16.machine_id.unwrap();
+    let id = Geometry::QUUX.machine_id.unwrap();
     let mut t = [(Reserved, 0); 256];
     // The feature page, 0-77: 0-17 the machine's, 20-24 the board name,
     // the rest 0. No level-1 map: word 1 is 0, and word 2 the TLB's

@@ -139,7 +139,7 @@ fn any_other_command_stops_by_error() {
 fn on_quux_the_registers_are_the_block_disk_s() {
     const REGS: u32 = muir::tlb::REGISTER_PAGE_BUS + 0o200;
     assert_eq!(block_disk::REGS & 0o377, REGS & 0o377, "word 200 of the page");
-    let mut m = Machine::with_geometry(MachineGeometry::QUUX_16, 32);
+    let mut m = Machine::with_geometry(MachineGeometry::QUUX, 32);
     let mut d = BlockDisk::new(block_disk::BLOCK_NS);
     d.attach(pack());
     m.block_disk = Some(d);

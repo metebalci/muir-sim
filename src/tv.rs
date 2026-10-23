@@ -127,10 +127,9 @@ pub const VIDEO_WORDS_PER_LINE: usize = 40;
 pub const VIDEO_WORDS: u32 = (VIDEO_HEIGHT * VIDEO_WORDS_PER_LINE) as u32;
 
 /// The most the video controller's buffer can be: QUUX's frame buffer
-/// window, `1760000000`-`1777775777` ([`crate::machine::WINDOW_13`]),
-/// 4,193,280 words. The address map fixes it, and nothing states it to
-/// software.
-pub const VIDEO_MAX_WORDS: u32 = 0o1777776000 - crate::machine::WINDOW_13;
+/// window, `1760000000`-`1777775777` (contract G1 §4.2), 4,193,280 words.
+/// The address map fixes it, and nothing states it to software.
+pub const VIDEO_MAX_WORDS: u32 = 0o1777776000 - 0o1760000000;
 
 /// The largest video controller screen: QUUX supports up to 1920 by 1080
 /// (a revisable limit). Its 64,800 words also stay below the color TV's strap.

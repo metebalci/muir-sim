@@ -409,7 +409,7 @@ fn on_chip_a_popj_that_writes_its_own_dispatch_word_uses_the_new_word() {
 
 /// `m` as QUUX revision 16: the same program and memories.
 fn as_quux_16(m: &Machine) -> Machine {
-    let mut q = Machine::with_geometry(muir::machine::Geometry::QUUX_16, m.memory_boards());
+    let mut q = Machine::with_geometry(muir::machine::Geometry::QUUX, m.memory_boards());
     q.prom = m.prom.clone();
     q.amem = m.amem;
     q.mmem = m.mmem;
@@ -417,17 +417,6 @@ fn as_quux_16(m: &Machine) -> Machine {
     q.main.copy_from_slice(&m.main);
     support::prom_program_in_ram(&mut q);
     q
-}
-
-/// `m` as QUUX revision 13: the same program and memories on `quux`, its
-/// virtual page 0, of 1024 words, mapped onto physical page 0, so that
-/// [`VADDR`] is [`PHYS_13`].
-fn as_quux(m: &Machine) -> Machine {
-    let mut m = m.clone();
-    m.geometry = muir::machine::Geometry::QUUX;
-    support::prom_program_in_ram(&mut m);
-    m.l2_map[0] = (1 << 27) | (1 << 26);
-    m
 }
 
 /// **On the CADR, `rtl` and `micro` take the word the board does**: the
@@ -530,30 +519,12 @@ const NEW_L2: u32 = 0o7654321;
 /// The store: `VMA<25>`, level 2 only, and the new word.
 const MAP_STORE: u32 = (1 << 25) | NEW_L2;
 
-/// QUUX's map, revision 13's (contract G2 appendix A1.7): `MD` for the map
-/// writes, `VA<27:15>` 100, whose level-1 entry is 0, and `VA<14:10>` 3, so
-/// that level 2 is addressed at 3 in block 0; the level-2 words, `<22>`,
-/// the map bit a dispatch's `IR<8>` takes, clear before and set after; and
-/// the store, `VMA<28>`, level 2 only, and the new word.
-const MAP_MD_13: u32 = (0o100 << 15) | (3 << 10) | 2;
-const OLD_L2_13: u32 = OLD_L2;
-const NEW_L2_13: u32 = NEW_L2 | 1 << 22;
-const MAP_STORE_13: u32 = (1 << 28) | NEW_L2_13;
-
 /// `MD` set to [`MAP_MD`], `VMA-WRITE-MAP` of [`MAP_STORE`], and `then`
 /// straight after it; level 2's word 3 holds [`OLD_L2`] to begin with.
 fn map_write_then(then: Vec<Insn>) -> Machine {
     assert_eq!(OLD_L2 & (1 << 18), 0);
     assert_ne!(NEW_L2 & (1 << 18), 0);
     map_write_with(MAP_MD, MAP_STORE, OLD_L2, then)
-}
-
-/// [`map_write_then`] on QUUX, with [`MAP_MD_13`], [`MAP_STORE_13`] and
-/// [`OLD_L2_13`].
-fn quux_map_write_then(then: Vec<Insn>) -> Machine {
-    assert_eq!(OLD_L2_13 & (1 << 22), 0);
-    assert_ne!(NEW_L2_13 & (1 << 22), 0);
-    as_quux(&map_write_with(MAP_MD_13, MAP_STORE_13, OLD_L2_13, then))
 }
 
 /// `MD` set to `md`, `VMA-WRITE-MAP` of `store`, and `then` straight after
@@ -627,23 +598,6 @@ fn on_the_cadr_rtl_and_micro_read_the_map_word_chip_does_after_a_map_write() {
     }
 }
 
-/// **QUUX defines it as the old word**: the instruction right after the
-/// store reads the level-2 word from before the write, on `rtl` and on
-/// `micro`, and the one after that reads the new one, `MAP(MD)<27:0>`
-/// (contract G2 appendix A1.7).
-#[test]
-fn on_quux_rtl_and_micro_read_the_old_map_word_after_a_map_write() {
-    let m = quux_map_write_then(vec![
-        Insn::new(ALU | SETM | SRC_MAP | a_src(3) | m_dest(10)),
-        Insn::new(ALU | SETM | SRC_MAP | a_src(3) | m_dest(11)),
-    ]);
-    for (name, (e, _)) in [("rtl", rtl(&m, &[], 240)), ("micro", micro(&m, &[], 240))] {
-        assert_eq!(e.l2[3], NEW_L2_13, "{name}: the map is written");
-        assert_eq!(e.mmem[10] & 0o1777777777, OLD_L2_13, "{name}: the next instruction");
-        assert_eq!(e.mmem[11] & 0o1777777777, NEW_L2_13, "{name}: the one after");
-    }
-}
-
 /// A dispatch on map bit 18 in the instruction right after the store:
 /// dispatch words 1300 and 1301 go to [`OLD_DPC`] and [`NEW_DPC`], and
 /// `IR<8>` makes `DADR<0>` `VMO18` (the 74S64s at DSPCTL 2F24, 2F05 and
@@ -679,22 +633,6 @@ fn on_the_cadr_rtl_and_micro_dispatch_on_the_map_bit_chip_does() {
     assert_eq!((t.rtl.mmem[5], t.micro.mmem[5]), (t.chip.mmem[5], t.chip.mmem[5]));
 }
 
-/// **QUUX defines it as the old word's map bit**, `<22>` on revision 13
-/// (contract G2 appendix A1.4), on `rtl` and `micro`.
-#[test]
-fn on_quux_rtl_and_micro_dispatch_on_the_old_map_bit() {
-    const E: u64 = 0o1300;
-    let mut m = quux_map_write_then(vec![
-        Insn::new(DISPATCH | (1 << 8) | a_src(3) | m_src(3) | d_addr(E)),
-        filler(),
-    ]);
-    m.dmem[E as usize] = OLD_DPC;
-    m.dmem[E as usize + 1] = NEW_DPC;
-    let (r, _) = rtl(&m, &[], 240);
-    let (u, _) = micro(&m, &[], 240);
-    assert_eq!((r.mmem[5], u.mmem[5]), (AT_OLD_DPC, AT_OLD_DPC));
-}
-
 // --- Q4: writes pending across a held microcycle ----------------------------
 
 /// Virtual word `(1 << 8) | 5`: level-2 entry 1, physical page 100. On
@@ -702,7 +640,6 @@ fn on_quux_rtl_and_micro_dispatch_on_the_old_map_bit() {
 /// [`PHYS_13`].
 const VADDR: u32 = (1 << 8) | 5;
 const PHYS: u32 = (0o100 << 8) | 5;
-const PHYS_13: u32 = VADDR;
 /// The word the read brings into `MD`: level-1 index 100 and level-2 low
 /// bits 7 for a map write, low three bits 5 for a dispatch.
 const READ_WORD: u32 = (0o100 << 13) | (7 << 8) | 5;
@@ -980,77 +917,6 @@ fn micro_writes_a_dispatch_word_at_the_address_the_dispatch_reads() {
 // once the word is in `MD` ([`muir::machine::Geometry::hangs`]). `micro`,
 // where a read lands at once, has always run it so; on QUUX `rtl` agrees
 // with it.
-
-/// The QUUX run of [`dispatch_write_on_md`]'s program on `rtl`, under
-/// `timing`, and on `micro`.
-fn quux_dispatch_write_on_md(gap: usize, timing: TimingModel) -> (End, Vec<Row>, End) {
-    const E: u64 = 0o1300;
-    let mut then = vec![filler(); gap];
-    then.push(Insn::new(DISPATCH | DMEM_WRITE | SRC_MD | d_len(3) | a_src(2) | d_addr(E)));
-    let m = as_quux(&read_then(&[(DISPATCH_WORD, 2)], then));
-    let main = [(PHYS_13, READ_WORD)];
-    let (r, rows) = rtl_timed(&m, &main, HELD_CYCLES, timing, None);
-    let (u, _) = micro(&m, &main, HELD_CYCLES);
-    (r, rows, u)
-}
-
-/// **On QUUX a dispatch write addressed by `MD` waits for the word read**
-/// and writes where `micro` does, at every gap: 1302 at gap 0, which
-/// nothing holds, and 1305, [`READ_WORD`]'s, where the CADR's board hangs
-/// and writes at the old `MD`
-/// ([`a_dispatch_write_addressed_by_md_in_a_hang_lands_at_the_md_before_it_on_the_board`]).
-#[test]
-fn on_quux_a_dispatch_write_addressed_by_md_waits_for_the_word_read() {
-    for (gap, want) in [(0, 0o1302), (1, 0o1305), (2, 0o1305), (3, 0o1305)] {
-        for timing in [
-            TimingModel::Sync { cycle_ticks: 4, ilong_ticks: 0 },
-            TimingModel::Sync { cycle_ticks: 3, ilong_ticks: 0 },
-        ] {
-            let (r, _, u) = quux_dispatch_write_on_md(gap, timing);
-            let written: Vec<_> = (0..2048).filter(|&k| r.dmem[k] != 0).collect();
-            assert_eq!(written, vec![want], "gap {gap}, {timing:?}: rtl");
-            assert_eq!(r.dmem, u.dmem, "gap {gap}, {timing:?}: rtl and micro");
-        }
-    }
-}
-
-/// **On QUUX the wait is whole microcycles**: under `sync`, every
-/// microcycle of the run, the held one included, is a whole number of
-/// four-tick microcycles, and the held one is longer than one.
-#[test]
-fn on_quux_the_wait_for_md_is_whole_microcycles() {
-    let sync = TimingModel::Sync { cycle_ticks: 4, ilong_ticks: 0 };
-    let (_, rows, _) = quux_dispatch_write_on_md(1, sync);
-    let x = Insn::new(DISPATCH | DMEM_WRITE | SRC_MD | d_len(3) | a_src(2) | d_addr(0o1300)).raw();
-    let r = row_of(&rows, x);
-    assert!(r.to - r.from > 40, "held: {}..{}", r.from, r.to);
-    for w in &rows {
-        assert_eq!((w.to - w.from) % 40, 0, "{}..{}", w.from, w.to);
-    }
-}
-
-/// **On QUUX a map write pending into the wait lands at the word read**:
-/// the store's pulse is in the microcycle that runs, once the word is in
-/// `MD`, where the CADR's hung microcycle fires it at the old `MD`, level-2
-/// index 3 ([`a_map_write_pending_into_a_hang_lands_at_the_md_before_the_hang_on_the_board`]).
-/// The store rewrites `VMA` under the read in flight, and the read brings
-/// back 0 as on the board, so the word read addresses level-2 index 0, and
-/// the old `MD`, [`MAP_MD_13`], index 3 (contract G2 appendix A1.7).
-/// (`micro` lands a read at once, before the store, and is not compared.)
-#[test]
-fn on_quux_a_map_write_pending_into_the_wait_lands_at_the_word_read() {
-    let m = as_quux(&read_then_with(
-        MAP_MD_13,
-        &[(MAP_STORE_13, 2)],
-        vec![
-            Insn::new(ALU | SETM | m_src(2) | a_src(3) | WRITE_MAP),
-            Insn::new(ALU | SETM | SRC_MD | a_src(3) | m_dest(13)),
-        ],
-    ));
-    let (r, _) = rtl(&m, &[(PHYS_13, READ_WORD)], HELD_CYCLES);
-    assert_eq!(r.mmem[13], 0, "rtl: what the read brought back");
-    assert_eq!((r.l2[0], r.l2[3]), (NEW_L2_13, 0), "rtl: at the word read, not the old MD");
-}
 
 // --- Q5: a read finishing inside the microcycle that waits for it, and edges
 //     that an acknowledgement lands on ---------------------------------------
@@ -1348,109 +1214,6 @@ fn a_popj_dispatch_write_whose_read_finishes_inside_its_hung_microcycle_takes_th
         assert_eq!((r.from, r.to), (s, t), "{what}: rtl's microcycle");
         assert_eq!((rtl.mmem[5], rtl.spcptr), (AT_NEW_DPC, 0), "{what}: rtl");
     }
-}
-
-/// A [`hung_popj`] program on QUUX whose read brings back a word with the
-/// same low three bits as [`MD_BEFORE`], so that the dispatch writes and
-/// reads one word, `DADR` being the same before the read lands and after;
-/// that word holds [`H_OLD_DPC`] with `R` clear. The old word goes there
-/// and leaves the stack pointer at 1; the new one, `DR` set, returns to
-/// [`RET_PC`] and pops it to 0.
-fn quux_hung_popj_one_word(pre: usize, n: usize, i: usize, xl: bool) -> (Machine, [(u32, u32); 1]) {
-    let low = MD_BEFORE & 7;
-    let mut m = as_quux(&hung_popj(pre, n, i, xl, false));
-    m.dmem[E as usize] = 0;
-    m.dmem[E as usize + 1] = 0;
-    m.dmem[(E as u32 + low) as usize] = H_OLD_DPC;
-    (m, [(PHYS_13, low)])
-}
-
-/// **On QUUX a `POPJ` in a dispatch write takes the old word, waiting for
-/// `MD` or not**: the same shapes on `quux`, the dispatch writing
-/// and reading one word ([`quux_hung_popj_one_word`]). Among them are
-/// microcycles that wait for the word read where the CADR's would hang;
-/// QUUX runs them once, whole, after the wait.
-#[test]
-fn on_quux_a_popj_dispatch_write_takes_the_old_word_waiting_or_not() {
-    let mut stretched = 0;
-    for pre in 0..6 {
-        for n in 3..8 {
-            for i in 0..=n.min(3) {
-                for xl in [false, true] {
-                    let (m, main) = quux_hung_popj_one_word(pre, n, i, xl);
-                    let (e, rows) = rtl_timed(
-                        &m,
-                        &main,
-                        X_CYCLES,
-                        TimingModel::Sync { cycle_ticks: 4, ilong_ticks: 0 },
-                        None,
-                    );
-                    let r = row_of(&rows, hung_popj_insn(xl).raw());
-                    stretched += (r.to - r.from > 40) as usize;
-                    let what = format!("({pre}, {n}, {i}, {xl})");
-                    assert_eq!((e.mmem[5], e.spcptr), (AT_OLD_DPC, 1), "{what}: rtl");
-                    let (u, _) = micro(&m, &main, X_CYCLES);
-                    assert_eq!((u.mmem[5], u.spcptr), (AT_OLD_DPC, 1), "{what}: micro");
-                }
-            }
-        }
-    }
-    assert!(stretched > 0, "some dispatch microcycle waited for MD");
-}
-
-/// **A checkpoint inside the wait for `MD` keeps the old word on QUUX**:
-/// the program of [`on_quux_a_popj_dispatch_write_takes_the_old_word_waiting_or_not`]
-/// ([`quux_hung_popj_one_word`]) whose dispatch waits longest, run in steps
-/// of 10 ns (a step ends inside the wait at its bound) and saved and loaded
-/// into a fresh engine after each, ends as the straight run does.
-#[test]
-fn on_quux_a_checkpoint_inside_the_wait_keeps_the_old_word() {
-    use muir::checkpoint::{Reader, Writer};
-    use muir::rtl::Rtl;
-    let mut longest = None;
-    for pre in 0..6 {
-        for n in 3..8 {
-            for i in 0..=n.min(3) {
-                for xl in [false, true] {
-                    let (m, main) = quux_hung_popj_one_word(pre, n, i, xl);
-                    let (_, rows) = rtl_timed(
-                        &m,
-                        &main,
-                        X_CYCLES,
-                        TimingModel::Sync { cycle_ticks: 4, ilong_ticks: 0 },
-                        None,
-                    );
-                    let r = row_of(&rows, hung_popj_insn(xl).raw());
-                    let over = (r.to - r.from).saturating_sub(40);
-                    if longest.as_ref().is_none_or(|&(o, _, _, _)| over > o) {
-                        longest = Some((over, m, main, r));
-                    }
-                }
-            }
-        }
-    }
-    let (over, mut m, main, r) = longest.unwrap();
-    assert!(over > 0, "a dispatch that waits for MD");
-    for (p, w) in main {
-        m.main[p as usize] = u64::from(w);
-    }
-    let mut e = Rtl::new(m);
-    e.boot();
-    let mut inside = 0;
-    while e.ns() < r.to + 2_000 {
-        let t = e.ns();
-        e.step_until(t + 10).unwrap();
-        inside += (e.ns() > r.from && e.ns() < r.to) as usize;
-        let mut w = Writer::new();
-        e.save(&mut w);
-        let body = w.finish();
-        let mut back = Rtl::new(as_quux(&Machine::new()));
-        back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
-        e = back;
-    }
-    assert!(inside > 0, "saved inside the wait ({}..{})", r.from, r.to);
-    let mm = e.machine();
-    assert_eq!((support::low(mm.mmem[5]), mm.spcptr), (AT_OLD_DPC, 1));
 }
 
 /// **muir-fpga's three programs of this shape, on `rtl` under its grid,
@@ -1858,8 +1621,8 @@ fn dispatch_constant_program() -> Vec<Insn> {
 /// decode of `IR<44:43>` under `NOP`, for every `DISPATCH`; `DISPWR` is
 /// `NOR(-IRDISP, -FUNCT2)` at 3F14, from the same `-IRDISP`, and gates
 /// nothing of the register (`data/CADR.netlist`). So the word read after
-/// the write is its `IR<41:32>`, on the board, `rtl` and `micro`; and on
-/// QUUX revisions 13 and 14, on `rtl` and `micro`. **Fails** an engine that
+/// the write is its `IR<41:32>`, on the board, `rtl` and `micro`.
+/// **Fails** an engine that
 /// loads the constant only on a dispatch that dispatches.
 #[test]
 fn a_dispatch_memory_write_loads_the_dispatch_constant() {
@@ -1867,15 +1630,5 @@ fn a_dispatch_memory_write_loads_the_dispatch_constant() {
     let t = run3(&m, &[], 60);
     for (name, e) in [("chip", &t.chip), ("rtl", &t.rtl), ("micro", &t.micro)] {
         assert_eq!(e.mmem[5], DC_FIELD as u32, "the CADR, {name}");
-    }
-    let mut r14 = Machine::with_geometry(muir::machine::Geometry::QUUX_14, 1);
-    let mut words = dispatch_constant_program();
-    words.resize(512, filler());
-    r14.load_prom(&words);
-    support::prom_program_in_ram(&mut r14);
-    for (what, m) in [("revision 13", as_quux(&m)), ("revision 14", r14)] {
-        for (name, (e, _)) in [("rtl", rtl(&m, &[], 60)), ("micro", micro(&m, &[], 60))] {
-            assert_eq!(e.mmem[5], DC_FIELD as u32, "{what}, {name}");
-        }
     }
 }

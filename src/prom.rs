@@ -58,35 +58,26 @@ pub fn boot_prom() -> Vec<Insn> {
     parse_mcr(PROMH_9MCR).expect("mit/sys/ubin/promh.mcr")
 }
 
-/// QUUX's boot PROM, version 2001, at control store 36000 (contracts Q2,
-/// G2 §4.4): muir-sys's `promh.text`, block-disk only, saving nothing and
-/// finding the microcode through the disk's GPT (contract Q8), in
-/// partition order; the register page at `1777777400` and block-disk's
-/// registers at its words 200-203 (contract Q13); the GPT and the
-/// microcode partition read by 4-byte transfers, 4 blocks a page; the
-/// 40-bit A-memory section loaded and a partition without it refused at
-/// `ERROR-A-MEM-SECTION-32-BITS`; and its buffer and the microcode's
-/// main-memory section on 1024-word pages. `data/README.md` has where it
-/// came from; `tests/quux_prom.rs` and `tests/system_2001.rs` hold it.
+/// QUUX's boot PROM, PROM 2002, at control store 36000 (contracts Q2,
+/// Q8, G2 §4.4): muir-sys's `promh.text`, block-disk only, saving nothing
+/// and finding the microcode through the disk's GPT, in QUUX's own `.mcr`
+/// format, its control store section from 36000 (A15b.7).
+/// `data/README.md` has where it came from; `tests/quux_prom.rs` and
+/// `tests/system_2002.rs` hold it.
 const QUUX_PROMH: &[u8] = include_bytes!("../data/quux-promh.mcr");
 
 /// QUUX's boot PROM's microinstructions, [`PROM_WORDS`] of them, from
-/// 36000 up: PROM 2001.
+/// 36000 up: PROM 2002.
 pub fn quux_boot_prom() -> Vec<Insn> {
     parse_quux_mcr(QUUX_PROMH, crate::machine::Geometry::QUUX).expect("data/quux-promh.mcr")
 }
 
-/// A QUUX boot PROM out of an MCR file in QUUX's partition order
-/// (contract Q8, [`crate::mcr::parse_partition_order`]): [`PROM_WORDS`]
-/// words for control store [`crate::machine::QUUX_PROM_BASE`] up. The
-/// assembler writes the control store section from 0, so the words are
-/// taken from the PROM's base, and a file with anything assembled below
-/// it, or past the top of the control store, is refused; so is a word
-/// setting `IR<46>`, as for the CADR's, a file in MIT's order, and a file
-/// whose section 6 is not `geometry`'s revision
-/// ([`crate::mcr::Mcr::check_revision`]). Revision 15's PROM is its own
-/// format's file, the control store section from 36000
-/// ([`crate::mcr::parse_15`]).
+/// A QUUX boot PROM out of a `.mcr` in QUUX's own format
+/// ([`crate::mcr::parse_15`]): [`PROM_WORDS`] words for control store
+/// [`crate::machine::QUUX_PROM_BASE`] up, the control store section's
+/// words from there. A file with nothing there is refused; so is a word
+/// setting `IR<46>`, as for the CADR's, a file of MIT's sections, and a
+/// file whose section 6 is not QUUX's ([`crate::mcr::Mcr::check_revision`]).
 pub fn parse_quux_mcr(
     bytes: &[u8],
     geometry: crate::machine::Geometry,
@@ -99,46 +90,19 @@ pub fn parse_quux_mcr(
             format!("not QUUX's MCR microcode file, as promh.mcr is: {e}")
         }
     })?;
-    // Revision 15's file holds the PROM's own words from 36000, which its
-    // reader has bounded (A15b.7).
-    if mcr.format.is_some() {
-        let mut v = mcr.imem;
-        if v.is_empty() {
-            return Err(format!("nothing at {base:o}: QUUX's PROM starts there"));
-        }
-        if let Some(at) = v.iter().position(|w| w.raw() >> 46 & 1 != 0) {
-            return Err(format!(
-                "word {:o} sets the statistics bit IR<46>, which a burned word has nowhere to hold",
-                base + at
-            ));
-        }
-        v.resize(PROM_WORDS, Insn::extended(0));
-        return Ok(v);
-    }
-    if mcr.imem_start != 0 {
-        return Err(format!("the control store section starts at {:o}, not 0", mcr.imem_start));
-    }
-    if mcr.imem.len() > base + PROM_WORDS {
-        return Err(format!(
-            "{:o} words: QUUX's PROM ends at {:o}",
-            mcr.imem.len(),
-            base + PROM_WORDS - 1
-        ));
-    }
-    if let Some(at) = mcr.imem.iter().take(base).position(|w| w.raw() != 0) {
-        return Err(format!("a word at {at:o}: QUUX's PROM is assembled at {base:o}"));
-    }
-    if mcr.imem.len() <= base {
+    // The file holds the PROM's own words from 36000, which its reader has
+    // bounded (A15b.7).
+    let mut v = mcr.imem;
+    if v.is_empty() {
         return Err(format!("nothing at {base:o}: QUUX's PROM starts there"));
     }
-    let mut v: Vec<Insn> = mcr.imem[base..].to_vec();
     if let Some(at) = v.iter().position(|w| w.raw() >> 46 & 1 != 0) {
         return Err(format!(
             "word {:o} sets the statistics bit IR<46>, which a burned word has nowhere to hold",
             base + at
         ));
     }
-    v.resize(PROM_WORDS, Insn::new(0));
+    v.resize(PROM_WORDS, Insn::extended(0));
     Ok(v)
 }
 

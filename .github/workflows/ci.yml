@@ -12,18 +12,17 @@
 # diagnostic of the machine among them. The two downloads, some 34 MB, are
 # cached on the script's hash; the pack is unpacked from them on every run.
 #
-# `system-for-quux` and `system-for-cadr` do the same with muir-sys's
-# releases, the ones the stable fetch scripts are pinned to: QUUX's, which
-# its tests boot, and the CADR's current one. Each is cached on its script's
-# hash, so a bump of the pin is one fresh download. Never the rolling
-# release: its bytes move, and a test run has to be repeatable. Each fails
-# if a test that wants its release said it skipped: such a test says
-# "skipped:" with the release's directory or fetch script in the line.
+# `system-for-cadr` does the same with muir-sys's release for the CADR,
+# its current one, the one the stable fetch script is pinned to. It is
+# cached on its script's hash, so a bump of the pin is one fresh download.
+# Never the rolling release: its bytes move, and a test run has to be
+# repeatable. It fails if a test that wants its release said it skipped:
+# such a test says "skipped:" with the release's directory or fetch script
+# in the line.
 #
 # `handover-2002` does the same with muir-sys's hand-over of System 2002,
-# unreleased, on QUUX revision 16: a pre-release whose tag never moves,
-# which its fetch script pins by every file's digest. It goes when
-# release-2002 exists.
+# unreleased, on QUUX: a pre-release whose tag never moves, which its fetch
+# script pins by every file's digest. It goes when release-2002 exists.
 #
 # The compiler version comes from rust-toolchain.toml, so it is pinned here
 # the same way it is pinned on a desk. `--locked` refuses to update
@@ -126,45 +125,6 @@ jobs:
       - name: Tests, with the release
         run: cargo test --locked
 
-  system-for-quux:
-    runs-on: ubuntu-latest
-    # A safety net, not a budget: the job takes far less. Without it a
-    # test that hangs runs until GitHub's six-hour limit.
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-system-for-quux-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Cache QUUX's release
-        uses: actions/cache@v4
-        with:
-          path: vendor/system-2001
-          key: system-for-quux-${{ hashFiles('tools/fetch-system-for-quux.sh') }}
-
-      - name: Fetch QUUX's release
-        run: tools/fetch-system-for-quux.sh
-
-      # Everything, with QUUX's release there: System 2001 booted on both
-      # engines, restored, ticking, on the video controller and the file
-      # device, under H8a's checkers, rebooted, at three ticks, and scanned
-      # for the clocks' codes; PROM 2001 held to the release's. A test that
-      # found no release says "skipped:", which fails the job.
-      - name: Tests, with QUUX's release
-        run: |
-          set -o pipefail
-          cargo test --locked -- --nocapture 2>&1 | tee test.out
-          if grep -nE 'skipped: .*(system-2001|fetch-system-for-quux)' test.out; then exit 1; fi
-
   handover-2002:
     runs-on: ubuntu-latest
     # A safety net, not a budget: the job takes far less. Without it a
@@ -193,9 +153,9 @@ jobs:
       - name: Fetch the hand-over of System 2002
         run: tools/fetch-handover-2002.sh
 
-      # System 2002 on revision 16, both disks booted on both engines to
-      # the listener on the screen and to the TELNET server on the
-      # Ethernet device; PROM 2002 held to the hand-over's. A test that
+      # System 2002, both disks booted on both engines to the listener on
+      # the screen and to the TELNET server on the Ethernet device, on the
+      # built-in PROM 2002, which is held to the hand-over's. A test that
       # found no hand-over says "skipped:", which fails the job.
       - name: Tests, with the hand-over of System 2002
         run: |

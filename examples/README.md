@@ -57,8 +57,9 @@ pack, and days on one that reads a band. See the note on `report` in
 `benchmark.rs`.
 
 `profile` is where a band's microcycles go. It boots the QUUX band that
-`MUIR_BAND` names, or the CADR's muir-sys release on the CADR, with the test
-harness's Chaosnet server, logs in, and types thirteen workloads at
+`MUIR_BAND` names, its files on the file device, or the CADR's muir-sys
+release on the CADR, with the test harness's Chaosnet server, logs in, and
+types thirteen workloads at
 the listener --- the empty form, compiling, two kinds of recursion, consing,
 fixnum multiply and remainder, flonum arithmetic, `aset` and `aref`, sorting,
 bignums, `intern`, printing, and compiling again --- each ending by writing a
@@ -86,6 +87,6 @@ needs the system sources too, since the Chaosnet server serves them to the
 machine as `SYS:`. `tools/fetch-system-100-for-cadr.sh` puts both in place.
 `profile` needs a muir-sys band instead: on QUUX the directory
 `MUIR_BAND` names, a band's disk and the tree it was built from, such as
-a directory holding System 2001's release disk, decompressed, and its
-`release-2001-sys.tar.gz`, both from `tools/fetch-system-for-quux.sh`; on
-the CADR its release, from `tools/fetch-system-for-cadr.sh`.
+a directory holding System 2002's hand-over disk, decompressed, and its
+`handover-2002-2999694-sys.tar.gz`, both from `tools/fetch-handover-2002.sh`;
+on the CADR its release, from `tools/fetch-system-for-cadr.sh`.

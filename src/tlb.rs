@@ -23,8 +23,8 @@
 //! memory, reached through the TLB or the physical memory window; `<28>` =
 //! 1 and `VA<27:0>` for the device window.
 
-/// The fewest and the most entries `--tlb` takes, and the default
-/// (decisions.md:265; A14.4).
+/// The fewest and the most entries [`Tlb::new`] takes, and QUUX's
+/// (A14.4).
 pub const MIN_ENTRIES: usize = 1024;
 pub const MAX_ENTRIES: usize = 32 * 1024;
 pub const DEFAULT_ENTRIES: usize = 4096;
@@ -360,8 +360,7 @@ impl Tlb {
 
     /// **A test aid, not a configuration:** an empty TLB of `entries`, any
     /// power of two up to [`MAX_ENTRIES`], down to 1. A TLB smaller than
-    /// [`MIN_ENTRIES`] is no revision 14's, and `--tlb` does not take one;
-    /// at 1 entry every fill evicts what the TLB held, so a program that
+    /// [`MIN_ENTRIES`] is no fabric's; at 1 entry every fill evicts what the TLB held, so a program that
     /// relies on an entry surviving another page's lookup fails at once.
     pub fn small_for_tests(entries: usize) -> Tlb {
         assert!(

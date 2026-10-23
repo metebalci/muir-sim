@@ -35,16 +35,12 @@
 //! enter it. A word on a wrong path leaves nothing: nothing a word does is
 //! architectural before its EX (the contract's §5, Choice 1).
 //!
-//! Time is the machine's on revision 15: a u64 of 0.5 ns units, the
+//! Time is the machine's: a u64 of 0.5 ns units, the
 //! period a whole number of them, every clock's instant a multiple of it
 //! ([`crate::clock::TimeBase`]). Under neutral time ([`Pipeline::neutral`],
 //! `MUIR_TIME_NEUTRAL=1`, MP2b ruling Q12) every device and the interrupts
 //! see the microcycle's number times the period instead, as `micro` does,
 //! and the clocks run on for the meters alone.
-//!
-//! Revision 14's machine runs here too, as a measurement aid and nothing
-//! of the contract's: its IMOD is the word after an OA write held until the
-//! write commits and ORed with it ([`Pipeline::new`]).
 
 mod control;
 mod exec;
@@ -69,10 +65,6 @@ pub const L: u64 = 1;
 /// A cache of [`Pipeline::new`]'s size when no flag says: the Kria
 /// KR260's 64K words (contract §12.1; MP2b ruling Q14).
 pub const CACHE_WORDS: u32 = 65_536;
-
-/// The period revision 14 runs at on the pipeline, a measurement aid: in
-/// its time's units, ns.
-pub const PERIOD_14: u64 = 9;
 
 /// The longest a word may wait in one stage before the engine gives up, in
 /// clocks: above a sweep of the largest TLB, a file device's sweep and the
@@ -115,14 +107,10 @@ pub(crate) struct Slot {
     /// RD squashed it ahead of the transfer's EX: a taken transfer with N
     /// in front of it, as RD resolved or predicted it.
     pub pre_nop: bool,
-    /// Revision 14's IMOD: OA-REG-LOW and -HIGH ORed into the word, as
-    /// the OA write before it left them pending.
-    pub imod_low: bool,
-    pub imod_high: bool,
     /// The clocks it has spent in RD: d3 is its first's.
     pub rd_clocks: u64,
     /// The word as RD decoded it: `IR<47:0>`, with SH's OR into its A and
-    /// M source on revision 15, or IMOD's on revision 14.
+    /// M source.
     pub ir: u64,
     /// The A operand: its address as CS sent it, its word with the
     /// bypasses so far.
@@ -175,8 +163,6 @@ impl Slot {
             word,
             nop: false,
             pre_nop: false,
-            imod_low: false,
-            imod_high: false,
             rd_clocks: 0,
             ir: 0,
             a_addr: 0,
@@ -571,14 +557,13 @@ pub enum Mutation {
 }
 
 impl Pipeline {
-    /// The pipeline running `m`: revision 15, or revision 14 as a
-    /// measurement aid. Revision 15's default period, 10 ns, and the Kria's
+    /// The pipeline running `m`, QUUX. The default period, 10 ns, and the Kria's
     /// memory timing and cache unless [`Pipeline::configure`] says otherwise
     /// (MP2b ruling Q14).
     pub fn new(m: Machine) -> Pipeline {
-        assert!(m.geometry.paged(), "the pipeline runs QUUX revisions 14 and 15");
-        let period = if m.geometry.extended() { crate::clock::PERIOD_15 } else { PERIOD_14 };
-        let time = Self::time_of(&m, period);
+        assert!(m.geometry.quux(), "the pipeline runs QUUX");
+        let period = crate::clock::PERIOD_15;
+        let time = TimeBase::half_ns(period);
         let mut p = Pipeline {
             port: Port::new(PortTiming::KRIA, time, CACHE_WORDS),
             m,
@@ -631,32 +616,22 @@ impl Pipeline {
         p.lc = line_clearing::LineClearing::idle_at(p.m.ethernet.filled());
         // 251 follows the entries filled by the engine's clears.
         p.m.ethernet.engine_clears = true;
-        p.m.period = if p.m.geometry.extended() { period } else { 0 };
+        p.m.period = period;
         p.x.lvmo = p.m.geometry.lvmo_at_power_on();
         p.port.window_words = p.m.tv.buffer_words();
         p
     }
 
-    fn time_of(m: &Machine, period: u64) -> TimeBase {
-        if m.geometry.extended() {
-            TimeBase::half_ns(period)
-        } else {
-            TimeBase { per_ns: 1, period }
-        }
-    }
-
     /// The machine's time base with this engine's period.
     pub fn time(&self) -> TimeBase {
-        Self::time_of(&self.m, self.period)
+        TimeBase::half_ns(self.period)
     }
 
     /// The period, the memory's timing and the cache's words, before the
     /// machine runs (`--microcycle-ns`, `--memory-timing`, `--cache`).
     pub fn configure(&mut self, period: u64, timing: PortTiming, cache_words: u32) {
         self.period = period;
-        if self.m.geometry.extended() {
-            self.m.period = period;
-        }
+        self.m.period = period;
         self.port = Port::new(timing, self.time(), cache_words);
         self.port.window_words = self.m.tv.buffer_words();
     }

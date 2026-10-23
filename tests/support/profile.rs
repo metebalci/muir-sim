@@ -74,7 +74,7 @@ impl Span {
         // Neutral time drops the charge (`Micro::neutral`, on a paged
         // machine): a memory cycle adds nothing to the clock, and a span
         // that counted one would subtract time never charged.
-        if e.neutral && e.machine().geometry.paged() {
+        if e.neutral && e.machine().geometry.quux() {
             return Span {
                 microcycles: e.machine().cycles,
                 memory_ns: 0,

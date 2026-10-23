@@ -54,11 +54,6 @@ pub(crate) struct Exec {
     /// positions less 26.
     pub oa_low: u64,
     pub oa_high: u64,
-    /// Revision 14's IMOD: the registers ORed into the next microcycle's
-    /// word.
-    pub imod: [bool; 2],
-    /// The sequence of the word IMOD's flags are for: the writer's next.
-    pub imod_seq: u64,
     pub map_write: Option<(Word, Word)>,
     pub map_write_d: Option<(Word, Word)>,
     pub map_seen: Option<crate::machine::Translation>,
@@ -230,7 +225,7 @@ impl Pipeline {
     fn d_may_wait(&self, popped: u32) -> bool {
         use crate::machine::macro_dispatch::{D_ENABLE, ENABLE, main};
         let register = self.m.macro_dispatch.register;
-        if !self.m.geometry.extended() || register & (ENABLE | D_ENABLE) != ENABLE | D_ENABLE {
+        if register & (ENABLE | D_ENABLE) != ENABLE | D_ENABLE {
             return false;
         }
         let int_enabled = self.m.interrupt_control & (1 << 27) != 0;
@@ -416,20 +411,8 @@ impl Pipeline {
             0o14 => self.m.pdl_pointer = data as u16 & self.m.geometry.pdl_mask(),
             // The stack keeps `SPC<18:0>` of the word, as `micro`.
             0o15 => self.push_spc(data & crate::machine::SPC_WORD),
-            0o16 => {
-                self.x.oa_low = data as u64 & 0o377777777;
-                if !self.m.geometry.extended() {
-                    self.x.imod[0] = true;
-                    self.x.imod_seq = self.x.seq + 1;
-                }
-            }
-            0o17 => {
-                self.x.oa_high = data as u64 & 0o37777777;
-                if !self.m.geometry.extended() {
-                    self.x.imod[1] = true;
-                    self.x.imod_seq = self.x.seq + 1;
-                }
-            }
+            0o16 => self.x.oa_low = data as u64 & 0o377777777,
+            0o17 => self.x.oa_high = data as u64 & 0o37777777,
             0o20 => self.m.vma = word,
             0o21 => {
                 self.m.vma = word;
@@ -733,18 +716,8 @@ impl Pipeline {
 
     /// **The OA selects** (A15b.15): `word`'s `IR<47:0>` with OA-REG-LOW
     /// ORed into the fields SL names and OA-REG-HIGH into SH's, or the halt
-    /// OA-OUTSIDE-FIELDS. Revision 14's IMOD ORs what is pending.
+    /// OA-OUTSIDE-FIELDS.
     fn oa_selected(&mut self, word: Insn, pc: u16) -> Result<u64, Halt> {
-        if !self.m.geometry.extended() {
-            let mut ir = word.raw();
-            if std::mem::take(&mut self.x.imod[0]) {
-                ir |= self.x.oa_low;
-            }
-            if std::mem::take(&mut self.x.imod[1]) {
-                ir |= self.x.oa_high << 26;
-            }
-            return Ok(ir & ((1 << 48) - 1));
-        }
         let selects = [word.oa_low_select(), word.oa_high_select()];
         let mut ir = word.low_48().raw();
         let fields = oa_fields(ir);
@@ -833,7 +806,6 @@ impl Pipeline {
             }
         }
         if slot.nop {
-            self.x.imod = [false; 2];
             self.x.halted = false;
             self.land_spc_write();
             self.end_of_microcycle(false, false);
@@ -842,12 +814,11 @@ impl Pipeline {
         }
         let ir = self.oa_selected(slot.word, slot.pc)?;
         self.x.ir = ir;
-        let pdl_field =
-            if matches!(slot.word.op(), Op::Alu | Op::Byte) && self.m.geometry.extended() {
-                slot.word.pdl_field().map(|f| self.pdl_field_index(f))
-            } else {
-                None
-            };
+        let pdl_field = if matches!(slot.word.op(), Op::Alu | Op::Byte) {
+            slot.word.pdl_field().map(|f| self.pdl_field_index(f))
+        } else {
+            None
+        };
         self.x.popj = Insn::new(ir).popj();
         self.x.pushed = false;
         self.x.spc_pushed = false;
@@ -858,8 +829,7 @@ impl Pipeline {
             if ir >> 31 & 1 != 0 { self.read_functional(self.x.maddr) } else { slot.m_val };
         self.x.adata = slot.a_val;
         self.land_spc_write();
-        let high = if self.m.geometry.extended() { LOW } else { 0o177777 };
-        self.x.iwr = ((self.x.adata & high) << 32) | (self.x.mdata & LOW);
+        self.x.iwr = ((self.x.adata & LOW) << 32) | (self.x.mdata & LOW);
         match Insn::new(ir).op() {
             Op::Alu => self.alu(),
             Op::Jump => self.jump(vmaok),
@@ -875,11 +845,7 @@ impl Pipeline {
             self.x.npc = (t & 0o37777) as u16;
         }
         if let Some((code, data)) = self.x.macro_write.take() {
-            if code == 5 && self.m.geometry.extended() {
-                self.m.macro_dispatch.write_register_15(data);
-            } else {
-                self.m.macro_dispatch.write(code, data);
-            }
+            self.m.macro_dispatch.write(code, data);
         }
         let mismatch = pdl_field.filter(|&formed| formed != self.m.pdl_index).map(|formed| {
             Halt::PdlFieldMismatch { pc: slot.pc, formed, written: self.m.pdl_index }

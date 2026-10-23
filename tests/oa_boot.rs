@@ -10,13 +10,15 @@
 //! ORed it into the first instruction it executed, which after a boot is
 //! the PROM's first word: the keyboard's warm boot then jumped somewhere
 //! else. Both engines are held here to the board's answer, through the
-//! boot button and through the console's `PROG.BOOT`, on QUUX and on the
-//! CADR.
+//! boot button and through the console's `PROG.BOOT`, on the CADR. QUUX
+//! has no IMOD: its OA registers are read only through a word's OA select,
+//! and `-RESET` clears them (`reset_clears_the_oa_registers` in
+//! `tests/revision_15.rs`).
 
 use muir::engine::Engine;
 use muir::isa::Insn;
 use muir::isa::asm::{ALU, ALWAYS, JUMP, N, SETA, a_src, filler, target};
-use muir::machine::{Geometry, Machine};
+use muir::machine::Machine;
 use muir::micro::Micro;
 use muir::rtl::Rtl;
 use muir::spy;
@@ -32,27 +34,20 @@ fn oa_write() -> Insn {
     Insn::new(ALU | SETA | a_src(5) | (0o16 << 19) | (0o37 << 14))
 }
 
-/// A machine whose PROM, at `base`, jumps from its first word to its
-/// word 10 under `N`, and whose word 10 jumps to `at`. At `at` the OA
-/// write; after it, a jump to itself. Returns the machine and `at`.
-fn machine(geometry: Geometry) -> (Machine, u16) {
+/// The CADR, whose PROM jumps from its first word to its word 10 under
+/// `N`, and whose word 10 jumps to `at`, 20. At `at` the OA write; after
+/// it, a jump to itself. The PROM overlays the bottom of the control store
+/// until `PROMDISABLE`, so the program stays in the PROM. Returns the
+/// machine and `at`.
+fn machine() -> (Machine, u16) {
     let mut m = Machine::new();
-    m.geometry = geometry;
     let base = m.reset_pc();
     let mut prom = vec![filler(); 1024];
     prom[0] = Insn::new(JUMP | target(base as u64 + 0o10) | ALWAYS | N);
-    // QUUX's control store below its PROM is RAM; the CADR's PROM overlays
-    // the bottom of it until `PROMDISABLE`, so the program stays in the PROM.
-    let at = if geometry.prom_base.is_some() { 0 } else { 0o20 };
+    let at = 0o20;
     prom[0o10] = Insn::new(JUMP | target(at as u64) | ALWAYS | N);
-    let jump_to_self = Insn::new(JUMP | target(at as u64 + 1) | ALWAYS | N);
-    if geometry.prom_base.is_some() {
-        m.imem[at as usize] = oa_write();
-        m.imem[at as usize + 1] = jump_to_self;
-    } else {
-        prom[at as usize] = oa_write();
-        prom[at as usize + 1] = jump_to_self;
-    }
+    prom[at as usize] = oa_write();
+    prom[at as usize + 1] = Insn::new(JUMP | target(at as u64 + 1) | ALWAYS | N);
     m.load_prom(&prom);
     m.amem[5] = u64::from(OA);
     (m, at)
@@ -111,14 +106,14 @@ fn executed_after_boot<E: Engine>(
 }
 
 /// **The PROM's first word runs as burned after a boot that follows an OA
-/// write**, on both engines, both machines and both boot lines: its jump
-/// goes to the PROM's word 10, and then to the OA write again.
+/// write**, on both engines and both boot lines: its jump goes to the
+/// PROM's word 10, and then to the OA write again.
 #[test]
 fn an_oa_write_does_not_survive_a_boot() {
     let mut wrong = Vec::new();
-    for geometry in [Geometry::QUUX, Geometry::CADR] {
+    {
         for how in [Boot::Button, Boot::Console] {
-            let (m, at) = machine(geometry);
+            let (m, at) = machine();
             let base = m.reset_pc();
             let want = vec![base, base + 0o10, at];
 
@@ -128,11 +123,10 @@ fn an_oa_write_does_not_survive_a_boot() {
             let got_micro = executed_after_boot(&mut e, Micro::executed, at, how, 3);
 
             let show = |v: &[u16]| v.iter().map(|a| format!("{a:o}")).collect::<Vec<_>>();
-            let name = if geometry.prom_base.is_some() { "QUUX" } else { "CADR" };
             for (engine, got) in [("rtl", got_rtl), ("micro", got_micro)] {
                 if got != want {
                     wrong.push(format!(
-                        "{name} {how:?} {engine}: {:?}, not {:?}",
+                        "{how:?} {engine}: {:?}, not {:?}",
                         show(&got),
                         show(&want)
                     ));
@@ -148,8 +142,8 @@ fn an_oa_write_does_not_survive_a_boot() {
 /// the modification is pending when the boot comes.
 #[test]
 fn the_boot_comes_with_the_modification_in_ir() {
-    for geometry in [Geometry::QUUX, Geometry::CADR] {
-        let (m, at) = machine(geometry);
+    {
+        let (m, at) = machine();
         let mut r = Rtl::new(m);
         r.boot();
         for _ in 0..50 {
@@ -204,17 +198,13 @@ fn executed_after_nop11<E: Engine>(
 #[test]
 fn an_oa_write_dies_with_an_instruction_nop11_nops() {
     let mut wrong = Vec::new();
-    for geometry in [Geometry::QUUX, Geometry::CADR] {
-        let (mut m, at) = machine(geometry);
+    {
+        let (mut m, at) = machine();
         let base = m.reset_pc();
         let next = Insn::new(JUMP | target(base as u64 + 0o10) | ALWAYS | N);
-        if geometry.prom_base.is_some() {
-            m.imem[at as usize + 2] = next;
-        } else {
-            let mut prom = m.prom.clone();
-            prom[at as usize + 2] = next;
-            m.load_prom(&prom);
-        }
+        let mut prom = m.prom.clone();
+        prom[at as usize + 2] = next;
+        m.load_prom(&prom);
         let want = vec![at + 2, base + 0o10, at];
 
         let mut r = Rtl::new(m.clone());
@@ -223,10 +213,9 @@ fn an_oa_write_dies_with_an_instruction_nop11_nops() {
         let got_micro = executed_after_nop11(&mut e, Micro::executed, at, 3);
 
         let show = |v: &[u16]| v.iter().map(|a| format!("{a:o}")).collect::<Vec<_>>();
-        let name = if geometry.prom_base.is_some() { "QUUX" } else { "CADR" };
         for (engine, got) in [("rtl", got_rtl), ("micro", got_micro)] {
             if got != want {
-                wrong.push(format!("{name} {engine}: {:?}, not {:?}", show(&got), show(&want)));
+                wrong.push(format!("{engine}: {:?}, not {:?}", show(&got), show(&want)));
             }
         }
     }

@@ -73,7 +73,7 @@ fn quux_boots_at_36000_and_the_ram_below_is_live() {
         let name = ["micro", "rtl"][k];
         let first = pcs.iter().position(|&p| p != 0).map(|i| pcs[i]);
         assert_eq!(first, Some(BASE), "{name}: the PC after the boot, {pcs:?}");
-        let ones = Geometry::QUUX_16.word_mask();
+        let ones = Geometry::QUUX.word_mask();
         assert_eq!(m, [ones; 3], "{name}: the PROM's 0 and 5, then the RAM's 6");
     }
 }
@@ -116,99 +116,27 @@ fn the_cadr_keeps_the_overlay() {
     assert_eq!(m.fetch(0), m.imem[0]);
 }
 
-/// Where 36000's `JUMP GO` goes: `GO`, at 36043, as PROM 2001's symbol
-/// table `promh.sym` says, `GO I-MEM 36043`
-/// ([`prom_2001_is_the_release_s`]).
-const GO: u64 = 0o36043;
+/// PROM 2002's SHA-256, as muir-sys's pre-release `handover-2002-2999694`
+/// gives it for its `promh.mcr` (`data/README.md`).
+const PROM_2002_SHA256: &str = "3d93319a8e851f5f14a2fcd66cd1ed21abb33049c355edf8cc893c791fb4b124";
 
-/// PROM 2001's last word: its `promh.locs` says `(I-MEM 36662)`, so the
-/// code is at 36000-36661, and 36661 is its last halt,
-/// `ERROR-A-MEM-SECTION-32-BITS`, where it stops on a microcode partition
-/// without the 40-bit A-memory section (contract G2 §2.8).
-const LAST_2001: usize = 0o36661;
-
-/// PROM 2001's halts after its disk routines, as its `promh.tbl` and
-/// `promh.sym` put them: no GPT header (or its entry array's LBA past 32
-/// bits), no current microcode partition, one whose first LBA is odd, and
-/// one without the 40-bit A-memory section.
-const HALTS_2001: [(u64, &str); 4] = [
-    (0o36653, "ERROR-NO-GPT"),
-    (0o36655, "ERROR-NO-CURRENT-MICR"),
-    (0o36657, "ERROR-ODD-MICR-START"),
-    (0o36661, "ERROR-A-MEM-SECTION-32-BITS"),
-];
-
-/// **A QUUX PROM file, PROM 2001, is read from 36000, in partition order**
-/// (contracts Q2 and Q8): the assembler writes the control store section
-/// from 0, so the reader takes 36000-37777 of it and refuses a file with
-/// anything assembled below 36000, or past 37777; and the file is QUUX's
-/// `.mcr`, every word's two halves swapped from MIT's order, so a file in
-/// MIT's order is refused saying so. 36000 is `JUMP GO`, and the code ends
-/// at [`LAST_2001`]. Its sections hold MIT's values, in revision 13's
-/// shapes: A memory as the 40-bit section (contract G2 appendix A1.12)
-/// with MIT's words, and the dispatch memory of 4,096 entries whose first
-/// 2,048 are MIT's; the main-memory section is four blocks, as MIT's; the
-/// control store section from 0, the program QUUX's.
+/// **The built-in PROM is PROM 2002**: `data/quux-promh.mcr` has the
+/// hand-over's digest (`tests/system_2002.rs` holds it to the hand-over's
+/// file itself, where that is fetched), reads as QUUX's `.mcr` with
+/// section 6 saying 15, and is what `quux` loads: its first word at 36000
+/// is the file's first control-store word. **Fails** another file in
+/// `data/`, or a built-in PROM that is not it.
 #[test]
-fn prom_2001_is_read_from_36000_in_partition_order() {
-    use muir::mcr::{parse, parse_partition_order, swap_halves};
-    use muir::prom::parse_quux_mcr;
-    const G: muir::machine::Geometry = muir::machine::Geometry::QUUX;
-    let file = include_bytes!("../data/quux-promh.mcr");
-    let words = parse_quux_mcr(file, G).unwrap();
-    assert_eq!(words.len(), 1024);
-    assert_eq!(words[0].raw() >> 43 & 3, 1, "a jump");
-    assert_eq!(words[0].jump().target as u64, GO);
-    let base = 0o36000;
-    assert_ne!(words[LAST_2001 - base].raw(), 0, "the last word");
-    assert!(words[LAST_2001 - base + 1..].iter().all(|w| w.raw() == 0), "nothing past it");
-    let err = parse_quux_mcr(&swap_halves(file).unwrap(), G).unwrap_err();
-    assert!(err.contains("MIT's order"), "{err}");
-    // MIT's own PROM, which is in MIT's order and assembled at 0.
-    let mit_file = include_bytes!("../mit/sys/ubin/promh.mcr");
-    let err = parse_quux_mcr(mit_file, G).unwrap_err();
-    assert!(err.contains("MIT's order"), "{err}");
-    let err = parse_quux_mcr(&swap_halves(mit_file).unwrap(), G).unwrap_err();
-    assert!(err.contains("QUUX's PROM is assembled at 36000"), "MIT's, at 0: {err}");
-    assert_eq!(words, muir::prom::quux_boot_prom(), "the built-in PROM");
-    let quux = parse_partition_order(file).unwrap();
-    let mits = parse(mit_file).unwrap();
-    assert!(quux.amem_wide, "A memory as the 40-bit section");
-    assert_eq!(quux.amem, mits.amem, "A memory's values MIT's");
-    assert_eq!(quux.dmem.len(), 4096, "revision 13's 4,096 dispatch entries");
-    assert_eq!(quux.dmem[..2048], mits.dmem[..], "the first 2,048 MIT's");
-    assert_eq!(quux.main_memory.map(|m| m.1), Some(4), "four blocks");
-    assert_eq!(quux.imem_start, mits.imem_start, "the control store section from 0");
-    assert_ne!(quux.imem, mits.imem, "the program is QUUX's");
-}
-
-/// **PROM 2001 is QUUX's release's, byte for byte**, where the release
-/// (`release-2001`, fetched by `tools/fetch-system-for-quux.sh` into
-/// `vendor/system-2001/`) is present: its `release-2001-promh.mcr` and its
-/// sources' `sys/ubin/promh.mcr`, assembled from muir-sys's `promh.text`
-/// at the release's commit; its symbols and error table say version 2001,
-/// 3721 octal, and put `GO`, the end and the halts of [`HALTS_2001`] where
-/// this file's constants say.
-#[test]
-fn prom_2001_is_the_release_s() {
-    let Some(asset) = support::quux_release(&["release-2001-promh.mcr"]) else { return };
-    let Some(dir) = support::quux_release(&["sys", "ubin"]) else { return };
-    let ours = include_bytes!("../data/quux-promh.mcr");
-    assert!(std::fs::read(&asset).unwrap() == ours, "the release's release-2001-promh.mcr");
-    let bytes = std::fs::read(dir.join("promh.mcr")).unwrap();
-    assert!(bytes == ours, "the release's sys/ubin/promh.mcr");
-    let locs = std::fs::read_to_string(dir.join("promh.locs")).unwrap();
-    assert!(locs.contains(&format!("(I-MEM {:o})", LAST_2001 + 1)), "{locs}");
-    let tbl = std::fs::read_to_string(dir.join("promh.tbl")).unwrap();
-    let sym = std::fs::read_to_string(dir.join("promh.sym")).unwrap();
-    assert!(
-        tbl.contains(&format!("MICROCODE-ERROR-TABLE-VERSION-NUMBER {:o})", 2001)),
-        "version 2001 in promh.tbl"
-    );
-    assert!(sym.contains(&format!(" VERSION-NUMBER {:o} ", 2001)), "version 2001 in promh.sym");
-    assert!(sym.contains(&format!("GO I-MEM {GO:o} ")), "GO in promh.sym");
-    for (at, name) in HALTS_2001 {
-        assert!(tbl.contains(&format!("({at:o} {name})")), "{name} at {at:o} in promh.tbl");
-        assert!(sym.contains(&format!("{name} I-MEM {at:o} ")), "{name} at {at:o} in promh.sym");
-    }
+fn the_built_in_prom_is_prom_2002() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/quux-promh.mcr");
+    let out = std::process::Command::new("sha256sum").arg(path).output().expect("sha256sum");
+    let sum = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(sum.split_whitespace().next(), Some(PROM_2002_SHA256));
+    let bytes = std::fs::read(path).unwrap();
+    let mcr = muir::mcr::parse_quux(&bytes, muir::mcr::Holds::Prom).unwrap();
+    assert_eq!(mcr.hardware_revision, Some(15), "section 6");
+    assert_eq!(mcr.imem_start, BASE as u32, "assembled at 36000");
+    let built_in = muir::prom::quux_boot_prom();
+    assert_eq!(built_in[0], mcr.imem[0], "the built-in PROM's first word");
+    assert_eq!(built_in[..mcr.imem.len()], mcr.imem[..], "word for word");
 }

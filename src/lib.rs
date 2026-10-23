@@ -40,7 +40,6 @@ pub mod isa;
 pub mod lashup;
 pub mod machine;
 pub mod mcr;
-pub mod memory_port;
 pub mod micro;
 pub mod muldiv;
 pub mod netlist;

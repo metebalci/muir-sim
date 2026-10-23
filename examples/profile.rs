@@ -4,30 +4,28 @@
 //! Where a band's microcycles go, workload by workload.
 //!
 //! Boots the CADR's release, System 1003 (`tools/fetch-system-for-cadr.sh`),
-//! on the CADR, and on QUUX the band `MUIR_BAND` names, System 2001's,
-//! with the test harness's Chaosnet server at OZ,
-//! logs in, defines a set of workloads at the listener and runs them one at
-//! a time, counting every control-store address the engine executes. Each workload ends by writing a marker
-//! file through the FILE service, which is how the run knows it is over:
-//! nothing here reads the screen.
+//! on the CADR, with the test harness's Chaosnet server at OZ, and on QUUX
+//! the band `MUIR_BAND` names, with its file device serving the band's
+//! tree; logs in, defines a set of workloads at the listener and runs them
+//! one at a time, counting every control-store address the engine
+//! executes. Each workload ends by writing a marker file through the FILE
+//! service, which is how the run knows it is over: nothing here reads the
+//! screen.
 //!
 //!     cargo run --release --example profile -- [micro|rtl] [cadr|quux|quux-4k|quux-16k] [workload ...]
 //!
-//! The machine is the CADR unless `quux` is named: QUUX, revision 13, as
-//! the `quux` executable runs it.
-//! `quux-4k` and `quux-16k` are QUUX with a PDL buffer of 4K or 16K words.
-//! `quux-14` and `quux-15` are revisions 14 and 15, their band
-//! `MUIR_BAND`'s and their PROM `MUIR_PROM`'s file, as `--prom` takes it;
-//! revision 15 has none built in. On them `rtl` is the pipeline
-//! (`muir::pipeline`), revision 14 as a measurement aid: its clock is
+//! The machine is the CADR unless `quux` is named: QUUX, as the `quux`
+//! executable runs it. `quux-4k` and `quux-16k` are QUUX with a PDL buffer
+//! of 4K or 16K words. QUUX's band is `MUIR_BAND`'s and its PROM
+//! `MUIR_PROM`'s file, as `--prom` takes it, or the built-in PROM 2002. On
+//! it `rtl` is the pipeline (`muir::pipeline`): its clock is
 //! `MUIR_MICROCYCLE_NS`, in ns, 5 to 63.5 in steps of 0.5, 10 by default,
 //! on `micro` too; `MUIR_MEMORY_NS` is the port's
 //! `<read>,<write>,<occupancy>` in ns or `kria`, `arty` or `de25`, `kria`
-//! by default, `MUIR_CACHE` its cache's words, and `MUIR_SYNC_TICKS` is
-//! refused.
+//! by default, and `MUIR_CACHE` its cache's words.
 //!
 //! `MUIR_PROFILE_OUT=<file>` writes the profile (A15b.8) of the pipeline's
-//! run, revision 15's `rtl`, over the workloads named: each predicted
+//! run, QUUX's `rtl`, over the workloads named: each predicted
 //! site's majority outcome, one line a site, in `docs/quux.md`'s format,
 //! with `MUIR_PROFILE_MICROCODE=<version> <sha256 of ucadr.mcr> <commit>`
 //! naming the microcode in its header.
@@ -45,12 +43,11 @@
 //! site's outcomes over the workloads, every entry a dispatch took, with
 //! `MUIR_PROFILE_OUT`'s record.
 //!
-//! `MUIR_D=off` holds revision 15's D off (MP2b ruling Q12(d)): D's enable,
+//! `MUIR_D=off` holds QUUX's D off (MP2b ruling Q12(d)): D's enable,
 //! the MACRO-DISPATCH register's `<30>`, is never kept, on either engine,
 //! whatever the microcode writes; `MUIR_D=on` sets it with the register's
 //! enable, `<31>`, for a microcode that does not (`MacroDispatch::d`,
-//! `DSwitch`). Unset, `<30>` is as the microcode writes it. The pipeline's
-//! fused returns use no prefetched word either way.
+//! `DSwitch`). Unset, `<30>` is as the microcode writes it.
 //!
 //! `MUIR_BUBBLES=2` gives the pipeline a wrong prediction's two bubbles,
 //! A15b.14's fallback, in place of the contract's one.
@@ -77,15 +74,12 @@
 //! writes the register itself, and the checkers watch from its first
 //! main-loop return with the register enabled. Either way the run is
 //! watched by that file's checkers, each workload says what they counted,
-//! and the whole run's counts close the output. On `rtl`, QUUX has its
-//! cache-only prefetch (`muir::memory_port`, contract H8a §3.5), looking
-//! for the next word in the fetched word's page; each workload then says
-//! what it took, and how often a fused return used it. For measurement,
-//! `MUIR_PREFETCH=line` fits it with the line's reach alone, and
-//! `MUIR_PREFETCH=off` takes it out; `page` is QUUX's own.
+//! and the whole run's counts close the output.
 //! `MUIR_MAIN_MEMORY_SIZE=<n>MW` gives QUUX `n` megawords of main memory,
 //! as `--main-memory-size` does and written as it takes it; 2MW if not
-//! given. QUUX boots its built-in PROM, PROM 2001.
+//! given. `MUIR_CACHE` and `MUIR_MEMORY_NS=<read>,<write>`, `arty` or
+//! `de25` fit the CADR's `rtl` with a memory cache and time its main
+//! memory so, a measurement's.
 //! `MUIR_RTC=<s>`
 //! counts QUUX's real-time clock from second `s` of the Unix epoch in the
 //! machine's own time, as `--rtc` does, in place of the host's clock, so
@@ -179,7 +173,7 @@ const DEFAULT_WORKLOADS: usize = 14;
 
 /// The definitions, typed once after login. `w-done` writes the marker.
 const DEFINITIONS: &[&str] = &[
-    "(defun w-done (name) (with-open-file (s (string-append \"OZ: //lispm//\" name \".done\") :direction :output) (print name s)))",
+    "(defun w-done (name) (with-open-file (s (string-append \"HOST: //lispm//\" name \".done\") :direction :output) (print name s)))",
     "(defun w-ack (m n) (cond ((zerop m) (1+ n)) ((zerop n) (w-ack (1- m) 1)) (t (w-ack (1- m) (w-ack m (1- n))))))",
     "(defun w-fib (n) (if (< n 2) n (+ (w-fib (1- n)) (w-fib (- n 2)))))",
     "(defun w-cons () (dotimes (i 10000) (make-list 200)))",
@@ -225,10 +219,6 @@ trait Profiled: Engine {
     /// `Some(wrong_word)` when the last microcycle started a macroinstruction
     /// fetch, where the engine says.
     fn fetch_started(&self) -> Option<bool> {
-        None
-    }
-    /// QUUX's prefetch's counts, where it is fitted.
-    fn prefetch_counts(&self) -> Option<muir::memory_port::PrefetchCounts> {
         None
     }
     /// A workload's end: under the time-neutral harness, its whole digest.
@@ -278,9 +268,6 @@ impl<E: Profiled + support::macro_dispatch::Executes> Profiled
     fn fetch_started(&self) -> Option<bool> {
         Profiled::fetch_started(&self.engine)
     }
-    fn prefetch_counts(&self) -> Option<muir::memory_port::PrefetchCounts> {
-        self.engine.prefetch_counts()
-    }
     fn workload_end(&mut self, name: &str) {
         self.engine.workload_end(name)
     }
@@ -295,7 +282,7 @@ impl<E: Profiled + support::macro_dispatch::Executes> Profiled
     }
 }
 
-/// Revision 15's `rtl`, its pipeline: no stall of its own in the bus's
+/// QUUX's `rtl`, its pipeline: no stall of its own in the bus's
 /// sense; the port's writes and fills are its memory cycles.
 impl Profiled for Pipeline {
     fn executed_pc(&self) -> Option<u16> {
@@ -371,9 +358,6 @@ impl<E: Profiled + Neutral + support::macro_dispatch::Executes> Profiled for Dig
     fn fetch_started(&self) -> Option<bool> {
         Profiled::fetch_started(&self.engine)
     }
-    fn prefetch_counts(&self) -> Option<muir::memory_port::PrefetchCounts> {
-        self.engine.prefetch_counts()
-    }
     fn workload_end(&mut self, name: &str) {
         self.end_of(name);
     }
@@ -401,9 +385,6 @@ impl Profiled for Rtl {
     }
     fn fetch_started(&self) -> Option<bool> {
         Rtl::fetch_started(self)
-    }
-    fn prefetch_counts(&self) -> Option<muir::memory_port::PrefetchCounts> {
-        self.prefetch().and(Rtl::prefetch_counts(self))
     }
 }
 
@@ -465,11 +446,9 @@ const TLB_COUNTS: usize = 32;
 struct Phase {
     /// The microcycles and the time, the memory's and in all.
     span: Span,
-    /// QUUX's prefetch's counts over the workload, where it is fitted.
-    prefetch: Option<muir::memory_port::PrefetchCounts>,
     /// What the fused return's checkers counted, where they ran.
     checked: Option<support::macro_dispatch::Counts>,
-    /// Revision 14's TLB over the workload: walks, sweeps, on `rtl` the time
+    /// The TLB over the workload: walks, sweeps, on `rtl` the time
     /// held for them, write-backs, those carrying accessed, modified and
     /// ephemeral-reference, the guard's refusals, and the PDL buffer
     /// redirect's references inside and outside the buffer (contract G3
@@ -619,7 +598,6 @@ fn run<E: Profiled>(
     let mut hist = vec![0u64; 1 << 14];
     let mut stall_hist = vec![0u64; 1 << 14];
     let span0 = e.span();
-    let prefetch0 = e.prefetch_counts();
     let fused0 = e.machine().macro_dispatch.fused;
     let tlb_counts = |m: &muir::machine::Machine| {
         let t = &m.tlb;
@@ -770,10 +748,9 @@ fn run<E: Profiled>(
     };
     Phase {
         span: e.span().since(span0),
-        prefetch: e.prefetch_counts().zip(prefetch0).map(|(a, b)| prefetch_since(a, b)),
         checked: e.checker().zip(checked0.as_ref()).map(|(c, c0)| c.counts.since(c0)),
         fused: e.machine().macro_dispatch.fused - fused0,
-        tlb: e.machine().geometry.paged().then(|| {
+        tlb: e.machine().geometry.quux().then(|| {
             let now = tlb_counts(e.machine());
             std::array::from_fn(|k| now[k] - tlb0[k])
         }),
@@ -786,45 +763,6 @@ fn run<E: Profiled>(
         decode_agrees,
         hazards: hz,
     }
-}
-
-/// The prefetch's counts after `b` was taken.
-fn prefetch_since(
-    a: muir::memory_port::PrefetchCounts,
-    b: muir::memory_port::PrefetchCounts,
-) -> muir::memory_port::PrefetchCounts {
-    muir::memory_port::PrefetchCounts {
-        fetches: a.fetches - b.fetches,
-        same_line: a.same_line - b.same_line,
-        next_line: a.next_line - b.next_line,
-        page_end: a.page_end - b.page_end,
-        not_held: a.not_held - b.not_held,
-        dropped: std::array::from_fn(|k| a.dropped[k] - b.dropped[k]),
-        used: a.used - b.used,
-        refused: std::array::from_fn(|k| a.refused[k] - b.refused[k]),
-    }
-}
-
-/// The prefetch's counts in a line.
-fn prefetch_line(c: &muir::memory_port::PrefetchCounts) -> String {
-    let taken = c.same_line + c.next_line;
-    format!(
-        "prefetch: {} fetches answered, {taken} next words taken ({:.1}% of the fetches answered: {} in the line, {} in the next), {} past the page, {} not held; dropped by LC {}, store {}, transfer {}, map {}, reset {}; used by {} fused returns; refused for condition 6 {}, a store starting {}",
-        c.fetches,
-        100.0 * taken as f64 / c.fetches.max(1) as f64,
-        c.same_line,
-        c.next_line,
-        c.page_end,
-        c.not_held,
-        c.dropped[0],
-        c.dropped[1],
-        c.dropped[2],
-        c.dropped[3],
-        c.dropped[4],
-        c.used,
-        c.refused[0],
-        c.refused[1],
-    )
 }
 
 /// The returns the checkers counted as made by a handler a fused return
@@ -919,9 +857,6 @@ fn report(
             t[27], t[29], t[28], t[30], t[31]
         );
     }
-    if let Some(c) = &p.prefetch {
-        println!("   {}", prefetch_line(c));
-    }
     if let Some([_, bus, _, hits, misses]) = p.bus {
         println!("   {bus} memory cycles");
         if hits + misses > 0 {
@@ -993,8 +928,6 @@ fn main() {
         Some("quux") => Some(Geometry::QUUX),
         Some("quux-4k") => Some(Geometry { pdl_bits: 12, ..Geometry::QUUX }),
         Some("quux-16k") => Some(Geometry { pdl_bits: 14, ..Geometry::QUUX }),
-        Some("quux-14") => Some(Geometry::QUUX_14),
-        Some("quux-15") => Some(Geometry::QUUX_15),
         _ => None,
     };
     let geometry = match geometry {
@@ -1014,24 +947,18 @@ fn main() {
             .collect()
     };
     let neutral = support::neutral::on();
-    // Revision 15's clock, on both engines: `MUIR_MICROCYCLE_NS`, in ns, 5
-    // to 63.5 in steps of 0.5; 10 by default.
+    // QUUX's clock, on both engines: `MUIR_MICROCYCLE_NS`, in ns, 5 to
+    // 63.5 in steps of 0.5; 10 by default.
     let period = std::env::var("MUIR_MICROCYCLE_NS").ok().map(|v| {
-        assert!(geometry.extended(), "MUIR_MICROCYCLE_NS={v} is QUUX revision 15's: quux-15");
+        assert!(geometry.quux(), "MUIR_MICROCYCLE_NS={v} is QUUX's");
         muir::clock::parse_microcycle_ns(&v).unwrap_or_else(|| {
             panic!("MUIR_MICROCYCLE_NS={v}: the period in ns, 5 to 63.5 in steps of 0.5")
         })
     });
     println!("{}", configuration(&engine, geometry, period, neutral));
     match engine.as_str() {
-        "rtl" if geometry.paged() => {
-            // Revisions 14 and 15 on `rtl` are the pipeline, 14 as a
-            // measurement aid; its clock is the period, never `sync`'s.
-            if let Ok(v) = std::env::var("MUIR_SYNC_TICKS") {
-                panic!(
-                    "MUIR_SYNC_TICKS={v} is refused on the pipeline, whose clock is MUIR_MICROCYCLE_NS's"
-                );
-            }
+        "rtl" if geometry.quux() => {
+            // QUUX's `rtl` is the pipeline; its clock is the period.
             // `MUIR_MEMORY_NS=<read>,<write>,<occupancy>`, or `kria`, `arty`
             // or `de25`: the port's timing; `MUIR_CACHE`, its cache's words.
             let timing = std::env::var("MUIR_MEMORY_NS").ok().map_or(muir::pipeline::PortTiming::KRIA, |v| {
@@ -1084,10 +1011,8 @@ fn main() {
             }
         }
         "rtl" => {
-            // `MUIR_SYNC_TICKS` runs QUUX's synchronous microcycle of that
-            // many ticks, and `MUIR_CACHE` fits a memory cache of that many
-            // words (H1a, H2).
-            let ticks = std::env::var("MUIR_SYNC_TICKS").ok().and_then(|v| v.parse().ok());
+            // `MUIR_CACHE` fits a memory cache of that many words in front
+            // of the CADR's boards (H2), a measurement's.
             let cache = std::env::var("MUIR_CACHE")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1106,32 +1031,11 @@ fn main() {
                     write_ns: w.parse().ok()?,
                 })
             });
-            // `MUIR_PREFETCH`: QUUX's cache-only prefetch with another
-            // reach, or none, as the module doc says.
-            let prefetch = std::env::var("MUIR_PREFETCH").ok().map(|v| {
-                use muir::memory_port::Reach;
-                match v.as_str() {
-                    "line" => Some(Reach::Line),
-                    "page" => Some(Reach::Page),
-                    "off" => None,
-                    _ => panic!("MUIR_PREFETCH={v}: line, page or off"),
-                }
-            });
             profile(
                 move |m| {
-                    let on_quux = m.geometry.machine_id.is_some();
                     let mut e = Rtl::new(m);
-                    if let Some(cycle_ticks) = ticks {
-                        e.set_timing_model(muir::clock::TimingModel::Sync {
-                            cycle_ticks,
-                            ilong_ticks: 0,
-                        });
-                    }
                     e.set_cache(cache);
                     e.set_memory_timing(memory);
-                    if let (true, Some(prefetch)) = (on_quux, prefetch) {
-                        e.set_prefetch(prefetch);
-                    }
                     e
                 },
                 geometry,
@@ -1140,14 +1044,9 @@ fn main() {
         }
         _ => {
             let micro = move |m: muir::machine::Machine| {
-                let revision_14 = m.geometry.paged() && !m.geometry.extended();
                 let mut e = Micro::new(m);
                 if let Some(p) = period {
                     e.period = p;
-                } else if revision_14 && neutral {
-                    // Revision 14's neutral time at the pipeline's period for
-                    // it, so that the two compare.
-                    e.period = muir::pipeline::PERIOD_14;
                 }
                 e
             };
@@ -1177,38 +1076,19 @@ fn configuration(
     neutral: bool,
 ) -> String {
     let env = |k: &str| std::env::var(k).unwrap_or_else(|_| "unset".into());
-    let machine = match geometry.revision() {
-        _ if geometry == muir::machine::Geometry::CADR => "the CADR".to_string(),
-        Some(r) => {
-            format!("QUUX revision {r}, a PDL buffer of {} words", geometry.pdl_mask() as u32 + 1)
-        }
-        None => "QUUX".to_string(),
-    };
-    let pipeline = engine == "rtl" && geometry.paged();
-    let clock = if pipeline || (geometry.paged() && neutral) {
-        let p = period.unwrap_or(if geometry.extended() {
-            muir::clock::PERIOD_15
-        } else {
-            muir::pipeline::PERIOD_14
-        });
-        if geometry.extended() {
-            format!("{} ns", muir::clock::microcycle_ns_text(p))
-        } else {
-            format!("{p} ns")
-        }
+    let machine = if geometry.quux() {
+        format!("QUUX, a PDL buffer of {} words", geometry.pdl_mask() as u32 + 1)
     } else {
-        format!("the engine's own (MUIR_SYNC_TICKS {})", env("MUIR_SYNC_TICKS"))
+        "the CADR".to_string()
     };
-    let prefetch = if pipeline {
-        "none: the pipeline's fused returns use no prefetched word, as with MUIR_PREFETCH=off"
-            .to_string()
-    } else if engine == "rtl" && geometry != muir::machine::Geometry::CADR {
-        format!("MUIR_PREFETCH {}, page when unset", env("MUIR_PREFETCH"))
+    let pipeline = engine == "rtl" && geometry.quux();
+    let clock = if geometry.quux() {
+        format!("{} ns", muir::clock::microcycle_ns_text(period.unwrap_or(muir::clock::PERIOD_15)))
     } else {
-        "none".to_string()
+        "the engine's own".to_string()
     };
     format!(
-        "configuration: engine {engine}; machine {machine}; band {}; PROM {}; microcode {}; main memory {}; period {clock}; memory timing {}; cache {}; prefetch {prefetch}; MUIR_H8A {}; D {}; time-neutral {neutral}; RTC {}",
+        "configuration: engine {engine}; machine {machine}; band {}; PROM {}; microcode {}; main memory {}; period {clock}; memory timing {}; cache {}; MUIR_H8A {}; D {}; time-neutral {neutral}; RTC {}",
         env("MUIR_BAND"),
         std::env::var("MUIR_PROM").unwrap_or_else(|_| "built in".into()),
         std::env::var("MUIR_UCODE").unwrap_or_else(|_| "the pack's".into()),
@@ -1386,19 +1266,14 @@ fn profile<E: Profiled + support::macro_dispatch::Executes>(
                 n << 4
             });
         let mut m = muir::machine::Machine::with_geometry(geometry, boards);
-        // QUUX's own PROM, PROM 2001, or `MUIR_PROM`'s file, as `--prom`
-        // takes it: revision 15 has no PROM built in.
+        // QUUX's own PROM, PROM 2002, or `MUIR_PROM`'s file, as `--prom`
+        // takes it.
         let prom = match std::env::var_os("MUIR_PROM").map(PathBuf::from) {
             Some(file) => {
                 let bytes =
                     std::fs::read(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
                 muir::prom::parse_quux_mcr(&bytes, geometry)
                     .unwrap_or_else(|e| panic!("MUIR_PROM={}: {e}", file.display()))
-            }
-            None if geometry.extended() => {
-                panic!(
-                    "QUUX revision 15 has no built-in boot PROM: MUIR_PROM=<file>, a revision-15 .mcr"
-                )
             }
             None => muir::prom::quux_boot_prom(),
         };
@@ -1509,18 +1384,26 @@ fn measure<E: Profiled>(
     // Neutral time runs the machine's waits at the period, many more
     // microcycles than its time otherwise gives them.
     let limit = if support::neutral::on() { 4_000_000_000 } else { 400_000_000 };
-    let ran = support::boot_to_the_prompt_within(&mut e, CHAOS, root.clone(), limit);
+    // The file host: on the CADR the harness's Chaosnet server at OZ; on
+    // QUUX, which has no Chaosnet interface, FILES, its file device.
+    let on_quux = e.machine().geometry.quux();
+    let host = if on_quux { "FILES" } else { "OZ" };
+    let ran = if on_quux {
+        support::wait_for_the_prompt_within(&mut e, limit)
+    } else {
+        support::boot_to_the_prompt_within(&mut e, CHAOS, root.clone(), limit)
+    };
     eprintln!("listener after {ran} microcycles");
     let mut k = Keyboard::new();
     let mut plain = |e: &mut E| {
         e.step().expect("halted");
     };
-    type_echoed(&mut e, &mut k, "(login \"LISPM\" \"OZ\" t)", &mut plain);
+    type_echoed(&mut e, &mut k, &format!("(login \"LISPM\" \"{host}\" t)"), &mut plain);
     // No **MORE** break when the printing workloads fill the screen: it
     // waits for a key that nobody types.
     type_echoed(&mut e, &mut k, "(send terminal-io :set-more-p nil)", &mut plain);
     for d in DEFINITIONS {
-        type_echoed(&mut e, &mut k, d, &mut plain);
+        type_echoed(&mut e, &mut k, &d.replace("HOST:", &format!("{host}:")), &mut plain);
     }
     // Compiled before any workload runs, so that each is measured compiled
     // whichever are asked for; `compile` and `compile-again` compile them
@@ -1551,7 +1434,7 @@ fn measure<E: Profiled>(
     let profile_out = std::env::var_os("MUIR_PROFILE_OUT").map(PathBuf::from);
     let outcomes_out = std::env::var_os("MUIR_OUTCOMES_OUT").map(PathBuf::from);
     if profile_out.is_some() || outcomes_out.is_some() {
-        assert!(e.record_outcomes(), "MUIR_PROFILE_OUT: the profile is made on revision 15's rtl");
+        assert!(e.record_outcomes(), "MUIR_PROFILE_OUT: the profile is made on QUUX's rtl");
     }
     // A marker of its own for every run, so that a workload named twice is
     // run twice.
@@ -1593,7 +1476,7 @@ fn measure<E: Profiled>(
     }
     // The whole run's counts, from the fill on: the boot, the login and
     // the definitions too.
-    if e.checker().is_some() || e.prefetch_counts().is_some() {
+    if e.checker().is_some() {
         println!("== the whole run");
     }
     if let Some(c) = e.checker() {
@@ -1604,9 +1487,6 @@ fn measure<E: Profiled>(
         };
         println!("   checkers: {}, problems {}", c.counts.report(label), c.counts.problems());
         println!("   {}", handler_returns_line(&c.counts, &generic, label));
-    }
-    if let Some(c) = e.prefetch_counts() {
-        println!("   {}", prefetch_line(&c));
     }
     for line in e.run_lines() {
         println!("== the whole run: {line}");
@@ -1703,7 +1583,7 @@ fn profile_text(
     out.push_str(&format!("muir-sim {}\n", option_env!("MUIR_GIT").unwrap_or("unknown")));
     out.push_str(&format!("workloads {}\n", names.join(" ")));
     out.push_str(&format!(
-        "; run: rtl, QUUX revision 15, {} of main memory\n",
+        "; run: rtl, QUUX, {} of main memory\n",
         std::env::var("MUIR_MAIN_MEMORY_SIZE").unwrap_or_else(|_| "2MW".into())
     ));
     out.push_str(&format!(

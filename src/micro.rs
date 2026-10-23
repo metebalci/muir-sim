@@ -85,11 +85,12 @@ pub struct Micro {
     next_instrd: bool,
 
     /// IMOD's pending flags: an OA register written in the microcycle
-    /// before, to be ORed into this one's word. Never set on revision 15.
+    /// before, to be ORed into this one's word: the CADR's. Never set on
+    /// QUUX.
     oal: bool,
     oah: bool,
     /// The OA registers, `IMOD<25:0>` and `IMOD<47:26>`, in `IR`'s
-    /// positions less 0 and 26: on revision 15 OA-REG-LOW and OA-REG-HIGH,
+    /// positions less 0 and 26: on QUUX OA-REG-LOW and OA-REG-HIGH,
     /// which keep their word until the next write and are read only through
     /// a word's OA select (A15b.15).
     oa_low: u64,
@@ -165,17 +166,11 @@ pub struct Micro {
     /// the bus, which this engine does not model. [`MEMORY_ACCESS_NS`], the
     /// band's mean; a test sets it to zero to see the periods alone.
     pub memory_cycle_ns: u64,
-    /// QUUX's microcycle, which has no delay lines: `sync`'s K ticks of
-    /// 10 ns, in nanoseconds, in place of the speed's period; 0 on the
-    /// CADR and on revision 15, whose clock is [`Micro::period`].
-    /// [`Micro::new`] gives revisions 13 and 14 four ticks, and `muir` sets
-    /// `--sync-cycle-ticks`'.
-    pub sync_cycle_ns: u64,
-    /// **Revision 15's clock period**, in its units of 0.5 ns
+    /// **QUUX's clock period**, in its units of 0.5 ns
     /// ([`crate::clock::TimeBase`]): the microcycle, and feature word 25.
     /// [`Micro::new`] gives the default 10 ns, and `muir` sets
     /// `--microcycle-ns`' (contract G3 revision 15, §12.1; MP2b rulings Q1,
-    /// Q14, Q15). 0 on every other machine.
+    /// Q14, Q15). 0 on the CADR.
     pub period: u64,
     /// **Neutral time** (revision 15, MP2b ruling Q12): the machine's time
     /// is [`Machine::cycles`] times the period and nothing else, so that
@@ -183,9 +178,7 @@ pub struct Micro {
     /// under the time-neutral harness. The memory cycle's charge, the
     /// divider's and the multiplier's holds, the nopped microcycles of a
     /// control-store write and a halted machine's steps take none.
-    /// `MUIR_TIME_NEUTRAL=1` in the harnesses. Revision 14 takes it too, at
-    /// the period it is given, as a measurement aid for the pipeline's
-    /// revision-14 runs.
+    /// `MUIR_TIME_NEUTRAL=1` in the harnesses. QUUX's alone.
     pub neutral: bool,
     /// Memory cycles started, for [`Micro::memory_cycles`].
     memory_cycles: u64,
@@ -234,10 +227,10 @@ pub struct Micro {
     read_held: u8,
     /// Revision 14: the virtual address of that write, for its write-back
     /// as it goes out, which carries the setter's bit from the word written
-    /// (A14.6, A14.8). Kept in a checkpoint of revision 14 alone.
+    /// (A14.6, A14.8). Kept in QUUX's checkpoint.
     write_va: Option<u32>,
     /// Revision 14: that write redirected into the PDL buffer, at this
-    /// index (A14.7). Kept in a checkpoint of revision 14 alone.
+    /// index (A14.7). Kept in QUUX's checkpoint.
     write_pdl: Option<u16>,
     /// Revision 14: the redirect the start in progress takes (A14.7). Set
     /// and used within one start.
@@ -304,12 +297,7 @@ pub struct Micro {
 impl Micro {
     pub fn new(m: Machine) -> Self {
         // QUUX drops the delay lines: four ticks of 10 ns a microcycle.
-        let period = if m.geometry.extended() { crate::clock::PERIOD_15 } else { 0 };
-        let sync_cycle_ns = if m.geometry.machine_id.is_some() && !m.geometry.extended() {
-            crate::clock::SYNC_CYCLE_TICKS as u64 * crate::clock::GRID_NS
-        } else {
-            0
-        };
+        let period = if m.geometry.quux() { crate::clock::PERIOD_15 } else { 0 };
         let lvmo = m.geometry.lvmo_at_power_on();
         Micro {
             m,
@@ -350,7 +338,6 @@ impl Micro {
             speed: Speed::ExtraSlow,
             speed_a: Speed::ExtraSlow,
             memory_cycle_ns: MEMORY_ACCESS_NS,
-            sync_cycle_ns,
             period,
             neutral: false,
             memory_cycles: 0,
@@ -386,16 +373,10 @@ impl Micro {
         }
     }
 
-    /// A microcycle's length: revision 15's period, in its units; QUUX's
-    /// `sync` period; or on the CADR the speed bits' and `ILONG`'s.
+    /// A microcycle's length: QUUX's period, in its units; or on the CADR
+    /// the speed bits' and `ILONG`'s.
     fn cycle_ns(&self, ilong: bool) -> u64 {
-        if self.m.geometry.extended() {
-            self.period
-        } else if self.sync_cycle_ns > 0 {
-            self.sync_cycle_ns
-        } else {
-            self.speed.cycle_ns(ilong) as u64
-        }
+        if self.m.geometry.quux() { self.period } else { self.speed.cycle_ns(ilong) as u64 }
     }
 
     /// What a memory cycle charges the clock: [`Micro::memory_cycle_ns`],
@@ -403,10 +384,10 @@ impl Micro {
     /// whole periods, so that every instant stays a clock's (MP2b ruling
     /// Q1), and nothing under neutral time.
     fn memory_charge(&self) -> u64 {
-        if self.neutral && self.m.geometry.paged() {
+        if self.neutral && self.m.geometry.quux() {
             return 0;
         }
-        if !self.m.geometry.extended() {
+        if !self.m.geometry.quux() {
             return self.memory_cycle_ns;
         }
         let units = self.m.time_base().ns(self.memory_cycle_ns);
@@ -573,7 +554,7 @@ impl Micro {
     /// Revision 14's `MAP(MD)` and dispatches read port B, addressed by `MD`
     /// alone (A14.4, A14.5).
     fn map_address(&self) -> u32 {
-        (if self.memstart && !self.m.geometry.paged() { self.m.vma } else { self.m.md }) as u32
+        (if self.memstart && !self.m.geometry.quux() { self.m.vma } else { self.m.md }) as u32
     }
 
     /// Whether the instruction about to execute, `p0` with the OA
@@ -839,11 +820,11 @@ impl Micro {
         Ok(())
     }
 
-    /// `-RESET` clears revision 15's OA registers (A15b.15), and the shadow
-    /// with them. The CADR's and revisions 13 and 14's IMOD registers keep
-    /// their words; their pending flags are the boot's to drop.
+    /// `-RESET` clears QUUX's OA registers (A15b.15), and the shadow with
+    /// them. The CADR's IMOD registers keep their words; their pending
+    /// flags are the boot's to drop.
     fn reset_oa_registers(&mut self) {
-        if self.m.geometry.extended() {
+        if self.m.geometry.quux() {
             (self.oa_low, self.oa_high, self.oa_shadow) = (0, 0, [false; 2]);
         }
     }
@@ -930,7 +911,7 @@ impl Micro {
     fn d_may_wait(&self, popped: u32) -> bool {
         use crate::machine::macro_dispatch::{D_ENABLE, ENABLE, main};
         let register = self.m.macro_dispatch.register;
-        if !self.m.geometry.extended() || register & (ENABLE | D_ENABLE) != ENABLE | D_ENABLE {
+        if !self.m.geometry.quux() || register & (ENABLE | D_ENABLE) != ENABLE | D_ENABLE {
             return false;
         }
         let int_enabled = self.m.interrupt_control & (1 << 27) != 0;
@@ -1054,7 +1035,7 @@ impl Micro {
             self.m.macro_dispatch.m_written(0o31, w);
         }
         if let Some((physical, WriteOut::Started)) = self.write_out {
-            if self.m.geometry.extended() {
+            if self.m.geometry.quux() {
                 // Revision 15: the word is fixed here, as the start's
                 // microcycle leaves `MD`, with a read's word due at the next
                 // head, which stands after anything this word wrote to `MD`
@@ -1237,25 +1218,15 @@ impl Micro {
             // `TRANS-OLD0`'s `DISPATCH L2-MAP-STATUS-CODE` reads exactly the
             // bits of the last cycle's page. The rest is live, at whatever
             // `MAPI` addresses: `VMA` just after a start, `MD` otherwise.
-            // Revision 13's layout is A1.7's: the level-1 entry in
-            // `<38:32>`, the two fault bits in `<31:30>` from the latched
-            // entry's `<27:26>`, and the 28-bit level-2 entry in `<27:0>`.
-            // Revision 14's (A14.5): `<39:32>` 0, the fault bits the same,
-            // and `<29:0>` the entry for `MD`'s address, port B's, walked
-            // for at the head of the microcycle ([`Micro::step`]).
-            0o11 if self.m.geometry.paged() => {
+            // QUUX's layout (A14.5): `<39:32>` 0, the two fault bits in
+            // `<31:30>` from the latched entry's `<27:26>`, and `<29:0>` the
+            // entry for `MD`'s address, port B's, walked for at the head of
+            // the microcycle ([`Micro::step`]).
+            0o11 if self.m.geometry.quux() => {
                 let t = self.map_seen.unwrap_or_else(|| self.m.translate(self.map_address()));
                 let pfr = (self.lvmo >> 27) & 1 != 0;
                 let pfw = !((self.lvmo >> 26) & 1 == 0 && self.wrcyc);
                 Word::from((!pfw as u32) << 31 | (!pfr as u32) << 30 | t.l2_data)
-            }
-            0o11 if self.m.geometry.wide() => {
-                let t = self.map_seen.unwrap_or_else(|| self.m.translate(self.map_address()));
-                let pfr = (self.lvmo >> 27) & 1 != 0;
-                let pfw = !((self.lvmo >> 26) & 1 == 0 && self.wrcyc);
-                Word::from(t.l1_data & 0o177) << 32
-                    | Word::from((!pfw as u32) << 31 | (!pfr as u32) << 30)
-                    | Word::from(t.l2_data & crate::machine::MAP_LEVEL_2_13)
             }
             0o11 => {
                 let t = self.map_seen.unwrap_or_else(|| self.m.translate(self.map_address()));
@@ -1270,10 +1241,8 @@ impl Micro {
             // MD
             0o12 => self.m.md,
             // Location Counter.  Bit 0 only means anything in byte mode.
-            // Revision 13's layout is A1.6's: NEED-FETCH in `<39>`, the
-            // four flags in `<37:34>`, the counter in `<29:0>`.
-            // Revision 14's counter is `<33:0>` under the same flags
-            // (A14.11).
+            // QUUX's layout is A1.6's: NEED-FETCH in `<39>`, the four flags
+            // in `<37:34>`, and the counter in `<33:0>` (A14.11).
             0o13 if self.m.geometry.wide() => {
                 let counter = self.m.lc & self.m.geometry.lc_counter();
                 let counter = if self.m.byte_mode() { counter } else { counter & !1 };
@@ -1459,7 +1428,7 @@ impl Micro {
             // left shift, LC's adder's (A14.11).
             0o1 => {
                 let counter = self.m.geometry.lc_counter();
-                let value = if self.m.geometry.paged() {
+                let value = if self.m.geometry.quux() {
                     let high = self.lc_adder.unwrap_or(word >> 32 & 3);
                     high << 32 | Word::from(data)
                 } else {
@@ -1522,12 +1491,12 @@ impl Micro {
             // (A15b.15).
             0o16 => {
                 self.oa_low = data as u64 & 0o377777777;
-                self.oal = !self.m.geometry.extended();
+                self.oal = !self.m.geometry.quux();
                 self.oa_shadow[0] = true;
             }
             0o17 => {
                 self.oa_high = data as u64 & 0o37777777;
-                self.oah = !self.m.geometry.extended();
+                self.oah = !self.m.geometry.quux();
                 self.oa_shadow[1] = true;
             }
             // VMA, and the three that start a cycle with it
@@ -1629,7 +1598,7 @@ impl Micro {
         self.memop = true;
         // Revision 14's port A: a miss walks and fills before the start
         // translates (A14.6).
-        if self.m.geometry.paged() {
+        if self.m.geometry.quux() {
             let va = self.m.vma as u32;
             self.port_a_missed =
                 self.m.tlb_fill(va, crate::tlb::Port::A).is_some().then(|| self.m.tlb.index(va));
@@ -1637,7 +1606,7 @@ impl Micro {
         self.lvmo = self.m.translate(self.m.vma as u32).l2_data;
         // Revision 14's PDL buffer redirect (A14.7): the reference then
         // proceeds as if its access code were `11`.
-        if self.m.geometry.paged() {
+        if self.m.geometry.quux() {
             let (entry, redirect) = self.m.redirect_14(self.m.vma as u32, self.lvmo, write);
             self.lvmo = entry;
             self.redirect = redirect;
@@ -1692,7 +1661,7 @@ impl Micro {
         self.start_cycle(true);
         let mut t = self.m.translate(self.m.vma as u32);
         // Revision 14: through the entry the redirect leaves (A14.7).
-        if self.m.geometry.paged() {
+        if self.m.geometry.quux() {
             let e = self.lvmo;
             t.physical = crate::tlb::bus_address(self.m.vma as u32, e);
             t.access_permitted = e & 1 << 27 != 0;
@@ -1710,7 +1679,7 @@ impl Micro {
             match self.redirect.take() {
                 // Inside the buffer: no memory cycle and no write-back.
                 Some(crate::tlb::Redirect::Inside(i)) => self.write_pdl = Some(i),
-                _ => self.write_va = self.m.geometry.paged().then_some(self.m.vma as u32),
+                _ => self.write_va = self.m.geometry.quux().then_some(self.m.vma as u32),
             }
         }
     }
@@ -1735,7 +1704,7 @@ impl Micro {
             // Under neutral time the device sees the write at its start's
             // instant, as `rtl`'s does (MP2b rulings 1, Q12(c)).
             let keep = self.m.ns;
-            if self.neutral && self.m.geometry.paged() {
+            if self.neutral && self.m.geometry.quux() {
                 self.m.ns = self.write_ns;
             }
             self.m.bus_write(physical, md);
@@ -1751,11 +1720,9 @@ impl Micro {
     /// the write does to a device, an interrupt level it raises among it;
     /// the next word that tests the interrupt does. A start in that
     /// microcycle or a halt sends it out sooner. Main memory keeps the
-    /// shortcut, where nothing can see the difference. Revision 14 under
-    /// neutral time takes the rule too, the measurement aid that compares
-    /// it with the pipeline; its own runs keep their traces.
+    /// shortcut, where nothing can see the difference.
     fn register_write_waits(&self, physical: u32) -> bool {
-        (self.m.geometry.extended() || (self.neutral && self.m.geometry.paged()))
+        self.m.geometry.quux()
             && crate::busint::decode_quux_14(physical, self.m.main.len(), self.m.tv.buffer_words())
                 == crate::busint::Responder::Device
     }
@@ -1814,7 +1781,7 @@ impl Micro {
         let starts = fetches || matches!(dest, 0o21 | 0o22 | 0o31 | 0o32);
         if self.m.geometry.unibus {
             loads_md || starts
-        } else if self.m.geometry.extended() {
+        } else if self.m.geometry.quux() {
             // Revision 15: the word is fixed at the start's own microcycle,
             // whatever the next does to `MD` (MD-after-write ruling).
             false
@@ -1831,14 +1798,10 @@ impl Micro {
     /// tests for the fault.
     fn start_read(&mut self) {
         self.start_cycle(false);
-        if self.m.geometry.paged() {
+        if self.m.geometry.quux() {
             return self.start_read_14();
         }
         if self.m.translate(self.m.vma as u32).access_permitted {
-            // Revision 14's write-back, before the read (A14.6).
-            if self.m.geometry.paged() {
-                self.m.write_back(self.m.vma as u32, self.lvmo, false, 0);
-            }
             let w = self.read(self.m.vma as u32);
             self.pend_md(w);
         } else {
@@ -1869,8 +1832,8 @@ impl Micro {
         let device =
             crate::busint::decode_quux_14(bus, self.m.main.len(), self.m.tv.buffer_words())
                 == crate::busint::Responder::Device;
-        let w = if self.m.geometry.extended() && device {
-            // Revision 15: a register read's side effect counts from the
+        let w = if device {
+            // A register read's side effect counts from the
             // end of the next microcycle, whose checks see the interrupt as
             // it stood (MP2b ruling Q4).
             self.read_held = 2;
@@ -2033,7 +1996,7 @@ impl Micro {
         // Revision 14's LC adder (A14.11): an arithmetic function through
         // the ALU or the left shift, not QUUX's multiply or divide.
         let osel = self.ir(12, 2);
-        self.lc_adder = (self.m.geometry.paged()
+        self.lc_adder = (self.m.geometry.quux()
             && !ctl.alumode
             && self.muldiv().is_none()
             && (osel == 1 || osel == 3))
@@ -2192,10 +2155,8 @@ impl Micro {
         let int_enabled = self.m.interrupt_control & (1 << 27) != 0;
         let pending = int_enabled && self.m.interrupt();
         let code = match self.ir(0, 5) {
-            c @ (0o10 | 0o11) => c,
-            // Revision 14's condition 12, M <= A on the fields, unsigned
-            // (A14.10).
-            0o12 if self.m.geometry.paged() => 0o12,
+            // Condition 12, M <= A on the fields, unsigned (A14.10).
+            c @ (0o10..=0o12) => c,
             c => c & 7,
         };
         match code {
@@ -2359,7 +2320,7 @@ impl Micro {
         // Revision 13's are the entry's `<22>` and `<23>`, the meta bits
         // moved up by 4 with the rest (A1.7).
         if map != 0 {
-            let bits = if self.m.geometry.paged() {
+            let bits = if self.m.geometry.quux() {
                 self.map_bits_14()
             } else {
                 self.map_seen.unwrap_or_else(|| self.m.translate(self.map_address())).l2_data
@@ -2509,7 +2470,7 @@ impl Micro {
 
 impl Engine for Micro {
     fn nominal_cycle_ns(&self) -> u64 {
-        if self.sync_cycle_ns > 0 { self.sync_cycle_ns } else { crate::ioboard::CYCLE_NS }
+        crate::ioboard::CYCLE_NS
     }
 
     /// The boot sequence: reset, enable the PROM, then trap to control store
@@ -2590,8 +2551,6 @@ impl Engine for Micro {
             speed,
             speed_a,
             memory_cycle_ns,
-            // The flags set it again on a resume, as the timing model is.
-            sync_cycle_ns: _,
             // Revision 15's, kept below, so that a resume at another
             // period is refused (MP2b ruling Q16).
             period,
@@ -2696,14 +2655,12 @@ impl Engine for Micro {
         w.u16s(opc);
         w.bool(*opc_ck);
         w.bool(*trap);
-        // Revision 14's pending write's address (A14.14).
-        if m.geometry.paged() {
+        // QUUX's: the pending write's address (A14.14); the OA select
+        // check's shadow (A15b.13), the OA registers being above, where
+        // IMOD's are.
+        if m.geometry.quux() {
             w.opt(*write_va, crate::checkpoint::Writer::u32);
             w.opt(*write_pdl, crate::checkpoint::Writer::u16);
-        }
-        // Revision 15's: the OA select check's shadow (A15b.13); the OA
-        // registers are above, where IMOD's are.
-        if m.geometry.extended() {
             w.bool(oa_shadow[0]);
             w.bool(oa_shadow[1]);
             w.u64(*period);
@@ -2778,11 +2735,9 @@ impl Engine for Micro {
         r.u16s_into(&mut self.opc)?;
         self.opc_ck = r.bool()?;
         self.trap = r.bool()?;
-        if self.m.geometry.paged() {
+        if self.m.geometry.quux() {
             self.write_va = r.opt(crate::checkpoint::Reader::u32)?;
             self.write_pdl = r.opt(crate::checkpoint::Reader::u16)?;
-        }
-        if self.m.geometry.extended() {
             self.oa_shadow = [r.bool()?, r.bool()?];
             let period = r.u64()?;
             if period != self.period {
@@ -2803,7 +2758,7 @@ impl Engine for Micro {
         // The period feature word 25 reads on revision 15 (A15b.1), and the
         // grid its devices act on.
         self.m.period = self.period;
-        let neutral = self.neutral && self.m.geometry.paged();
+        let neutral = self.neutral && self.m.geometry.quux();
         // `MACHRUN`, less the statistics halt this engine cannot raise, and
         // with the one `ERR` it can: no parity check, but `HALTED` under
         // `ERRSTOP`.  Halted, a step is one master clock cycle and no
@@ -2860,8 +2815,8 @@ impl Engine for Micro {
         // time, and nothing under neutral time.
         let held = match muldiv::decode(self.p1.raw()) {
             _ if !self.m.geometry.muldiv || nopa || stepping => 0,
-            Some(muldiv::Op::Div) if self.m.geometry.extended() => muldiv::DIV_CLOCKS_15 - 1,
-            Some(muldiv::Op::Mul) if self.m.geometry.extended() => muldiv::MUL_CLOCKS_15 - 1,
+            Some(muldiv::Op::Div) if self.m.geometry.quux() => muldiv::DIV_CLOCKS_15 - 1,
+            Some(muldiv::Op::Mul) if self.m.geometry.quux() => muldiv::MUL_CLOCKS_15 - 1,
             Some(muldiv::Op::Div) => muldiv::DIV_CYCLES,
             _ => 0,
         };
@@ -2887,7 +2842,7 @@ impl Engine for Micro {
         self.advance_pipeline();
         self.memstart = std::mem::take(&mut self.memop);
         self.lc_adder = None;
-        if self.m.geometry.paged() {
+        if self.m.geometry.quux() {
             self.head_of_microcycle_14();
         } else {
             self.head_of_microcycle();
@@ -2927,7 +2882,7 @@ impl Engine for Micro {
         // nothing: the word's fields are its `IR<47:0>`. What the extension
         // asks of this engine is the PDL address field's check, below.
         let mut pdl_field = None;
-        if self.m.geometry.extended() {
+        if self.m.geometry.quux() {
             let word = self.p0;
             self.p0 = self.oa_selected(word)?;
             self.write_imem_check()?;
@@ -2964,7 +2919,7 @@ impl Engine for Micro {
         // `IWR<47:32>` from `A<15:0>` and `IWR<31:0>` from `M<31:0>`; on
         // revision 15 `IWR<63:32>` from `A<31:0>`, the field, so that no
         // tag left in A reaches the extension (A15b.4).
-        let high = if self.m.geometry.extended() { LOW } else { 0o177777 };
+        let high = if self.m.geometry.quux() { LOW } else { 0o177777 };
         self.iwr = ((self.adata & high) << 32) | (self.mdata & LOW);
 
         match self.p0.op() {
@@ -2989,12 +2944,7 @@ impl Engine for Micro {
             self.npc = (t & 0o37777) as u16;
         }
         if let Some((code, data)) = self.macro_write.take() {
-            // Revision 15 keeps D's enable, `<30>` (A15b.9).
-            if code == 5 && self.m.geometry.extended() {
-                self.m.macro_dispatch.write_register_15(data);
-            } else {
-                self.m.macro_dispatch.write(code, data);
-            }
+            self.m.macro_dispatch.write(code, data);
         }
         // The PDL address field's index against the index written (A15b.2),
         // before the edge, whose operand-address load is a fused return's.
@@ -3028,7 +2978,7 @@ impl Engine for Micro {
         let half = |v: u64, k: u8| (v >> (16 * k as u32)) as u16;
         match eadr {
             spy::IR_LOW | spy::IR_MED | spy::IR_HIGH => half(self.p1.raw(), eadr),
-            spy::IR_EXT if self.m.geometry.extended() => half(self.p1.raw(), eadr),
+            spy::IR_EXT if self.m.geometry.quux() => half(self.p1.raw(), eadr),
             spy::OPC => self.opc[7] & 0x3fff,
             spy::PC => self.npc & 0x3fff,
             spy::OB_LOW => self.out as u16,

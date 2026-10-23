@@ -7,7 +7,6 @@
 //! the memory's time and the time in all side by side, and the time in all
 //! is the clock's.
 
-use muir::cache::MemoryTiming;
 use muir::engine::Engine;
 use muir::isa::Insn;
 use muir::isa::asm::{
@@ -15,46 +14,26 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, Machine};
 use muir::micro::Micro;
-use muir::rtl::Rtl;
 
 mod support;
 
 use support::profile::Span;
 
-/// QUUX's microcycle: four ticks of 10 ns, one period whatever the
-/// instruction (`sync`, no `ILONG` ticks).
-const QUUX_PERIOD_NS: u64 = 40;
-
-/// A loop reading main memory a line apart, 64 lines round, so that
-/// with QUUX's 4K-word cache fitted the first round misses on every read
-/// and waits for its line, and the later rounds hit: revision 13.
-fn reading() -> Machine {
-    let mut prom = vec![
+/// A loop reading main memory a line apart, 64 lines round, page 4
+/// through the physical memory window.
+fn reading_16() -> Machine {
+    let prom = [
         Insn::new(ALU | SETM | m_src(1) | START_READ),
         // The microinstruction after a start may not read `MD`.
         filler(),
         Insn::new(ALU | SETM | SRC_MD | a_dest(0o200)),
+        Insn::new(JUMP | target(0) | ALWAYS | N),
     ];
-    prom.push(Insn::new(JUMP | target(0) | ALWAYS | N));
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
+    let mut q = support::quux_16();
     let mut words = vec![filler(); 1024];
     words[..prom.len()].copy_from_slice(&prom);
-    m.load_prom(&words);
-    support::prom_program_in_ram(&mut m);
-    // Virtual page 1 onto physical page 4, of 1024 words; M 1 its first
-    // word.
-    m.l2_map[1] = (1 << 27) | (1 << 26) | 4;
-    m.mmem[1] = 1 << 10;
-    m
-}
-
-/// [`reading`] on revision 16: page 4 through the physical memory window.
-fn reading_16() -> Machine {
-    let mut m = reading();
-    let mut q = support::quux_16();
-    q.prom = m.prom.clone();
-    q.imem = std::mem::take(&mut m.imem);
+    q.load_prom(&words);
+    support::prom_program_in_ram(&mut q);
     q.mmem[1] = PHYS | 4 << 10;
     q
 }
@@ -86,54 +65,6 @@ fn after(line: &str, label: &str) -> u64 {
     let at = line.find(label).unwrap_or_else(|| panic!("no {label:?} in {line:?}")) + label.len();
     let word = line[at..].trim_start().split(' ').next().unwrap();
     word.parse().unwrap_or_else(|_| panic!("no number after {label:?} in {line:?}"))
-}
-
-/// **On `rtl` the time in all is the microcycles' time and the stalls
-/// together**, and the line says each: with the Arty Z7-20's memory, a span
-/// that misses in the cache waits, so its clock is more than 40 ns times
-/// its microcycles by exactly the time stalled, and the line's "ns in all"
-/// is the clock's.
-#[test]
-fn rtl_s_time_in_all_has_the_stalls_in_it() {
-    let mut e = Rtl::new(reading());
-    e.set_memory_timing(Some(MemoryTiming::ARTY_Z7_20));
-    e.boot();
-    run(&mut e, 100);
-    let (start, ns0) = (Span::of_rtl(&e), e.ns());
-    run(&mut e, 2000);
-    let (mid, ns1) = (Span::of_rtl(&e), e.ns());
-    run(&mut e, 2000);
-    let (end, ns2) = (Span::of_rtl(&e), e.ns());
-    let first = mid.since(start);
-    let both = first.plus(end.since(mid));
-
-    for (span, clock, what) in [(first, ns1 - ns0, "a span"), (both, ns2 - ns0, "two spans added")]
-    {
-        let line = span.line();
-        eprintln!("{what}: {line}");
-        let microcycles = after(&line, "time:");
-        let microcycle_ns = after(&line, " microcycles in");
-        let stalled = after(&line, "stalled on memory");
-        let in_all = before(&line, " ns in all");
-        assert!(stalled > 0, "{what}: the reads missed and waited: {line}");
-        assert_eq!(in_all, clock, "{what}: the line's time in all is the clock's: {line}");
-        assert_eq!(
-            microcycle_ns,
-            QUUX_PERIOD_NS * microcycles,
-            "{what}: the microcycles' time is their period's: {line}"
-        );
-        assert_ne!(
-            in_all,
-            QUUX_PERIOD_NS * microcycles,
-            "{what}: a microcycle count leaves the stalls out: {line}"
-        );
-        assert_eq!(in_all, microcycle_ns + stalled, "{what}: the time in all is both: {line}");
-        let share = 100.0 * stalled as f64 / clock as f64;
-        assert!(
-            line.ends_with(&format!("stalled {share:.2}% of the time in all")),
-            "{what}: the share names what it is of: {line}"
-        );
-    }
 }
 
 /// **On `micro` the memory's time is a charge, and the line says so**:
@@ -184,7 +115,7 @@ fn micro_under_neutral_time_charges_no_memory_time() {
         Insn::new(JUMP | target(0) | ALWAYS | N),
         filler(),
     ];
-    let mut m = Machine::with_geometry(Geometry::QUUX_16, 1);
+    let mut m = Machine::with_geometry(Geometry::QUUX, 1);
     let mut words = vec![filler(); 1024];
     words[..prom.len()].copy_from_slice(&prom);
     m.load_prom(&words);
@@ -216,38 +147,30 @@ fn micro_under_neutral_time_charges_no_memory_time() {
     assert!(line.contains("neutral time, no memory charged"), "{line}");
 }
 
-/// **The pipeline's line names its clock's period in ns** on both revisions
-/// it runs: revision 14's, a measurement aid whose period counts whole ns,
-/// at 9 ns (`muir::pipeline::PERIOD_14`), and revision 16's, in units of
+/// **The pipeline's line names its clock's period in ns**, in units of
 /// 0.5 ns, at 8.5, set, so that the half shows. The line's time in all is
-/// clocks times that period. A line that reads revision 14's period as
-/// half-ns units says 4.5.
+/// clocks times that period. A line that reads the period as whole ns
+/// says 17.
 #[test]
 fn the_pipeline_s_line_names_its_period_in_ns() {
     use muir::pipeline::{CACHE_WORDS, Pipeline, PortTiming};
-    for (geometry, text, ns_tenths) in
-        [(Geometry::QUUX_14, "clocks of 9 ns", 90), (Geometry::QUUX_16, "clocks of 8.5 ns", 85)]
-    {
-        let mut m = Machine::with_geometry(geometry, 1);
-        let mut words = vec![filler(); 1024];
-        words[0] = Insn::new(JUMP | target(0) | ALWAYS | N);
-        m.load_prom(&words);
-        support::prom_program_in_ram(&mut m);
-        let mut e = Pipeline::new(m);
-        if geometry.extended() {
-            e.configure(17, PortTiming::KRIA, CACHE_WORDS);
-        }
-        e.boot();
-        e.skip_sweep();
-        let start = Span::of_pipeline(&e);
-        for _ in 0..1000 {
-            e.step().unwrap();
-        }
-        let span = Span::of_pipeline(&e).since(start);
-        let line = span.line();
-        eprintln!("{line}");
-        assert!(line.contains(text), "{geometry:?}: {line}");
-        let clocks = before(&line, "clocks of");
-        assert_eq!(before(&line, " ns in all"), clocks * ns_tenths / 10, "{line}");
+    let mut m = Machine::with_geometry(Geometry::QUUX, 1);
+    let mut words = vec![filler(); 1024];
+    words[0] = Insn::new(JUMP | target(0) | ALWAYS | N);
+    m.load_prom(&words);
+    support::prom_program_in_ram(&mut m);
+    let mut e = Pipeline::new(m);
+    e.configure(17, PortTiming::KRIA, CACHE_WORDS);
+    e.boot();
+    e.skip_sweep();
+    let start = Span::of_pipeline(&e);
+    for _ in 0..1000 {
+        e.step().unwrap();
     }
+    let span = Span::of_pipeline(&e).since(start);
+    let line = span.line();
+    eprintln!("{line}");
+    assert!(line.contains("clocks of 8.5 ns"), "{line}");
+    let clocks = before(&line, "clocks of");
+    assert_eq!(before(&line, " ns in all"), clocks * 85 / 10, "{line}");
 }

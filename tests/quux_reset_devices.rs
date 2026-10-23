@@ -338,7 +338,7 @@ fn m5_a_jump_after_the_reset_sees_what_it_resets_down() {
                 e.step().unwrap();
             }
             assert_eq!(
-                e.machine().mmem[5] == Geometry::QUUX_16.word_mask(),
+                e.machine().mmem[5] == Geometry::QUUX.word_mask(),
                 taken,
                 "{name}: reset {reset}, the jump {jump_after} microcycles after the write"
             );

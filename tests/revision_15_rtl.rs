@@ -24,7 +24,7 @@ use muir::pipeline::{Mutation, Pipeline};
 mod support;
 
 /// Revision 16, the machine the pipeline runs.
-const REV16: Geometry = Geometry::QUUX_16;
+const REV16: Geometry = Geometry::QUUX;
 
 /// A memory's constants 0 and 1, and M memory's.
 const ZERO: u64 = 0o40;
@@ -4300,47 +4300,6 @@ fn the_harness_digests_the_pipeline_as_micro_at_every_boundary() {
     }
 }
 
-/// **Revision 14's IMOD on the pipeline, the measurement aid**: an
-/// OA-REG-LOW write is ORed into the word after it and into no other. The
-/// word after that, an unconditional jump RD resolves, whose target the
-/// value would change, jumps where it says. A decode that ORs the value
-/// into every word leaving CS before the flags are spent is caught here.
-#[test]
-fn revision_14_s_imod_reaches_the_next_word_alone() {
-    let mut p = Prog::default();
-    let to = 0o300u64;
-    // OA-REG-LOW's value, in the jump target's place: 2 << 12, a bit the
-    // target lacks.
-    let v = p.k(2 << 12);
-    p.op(ALU | SETA | a_src(v) | fd(0o16));
-    p.fill(1);
-    p.op(JUMP | ALWAYS | N | target(to));
-    p.fill(1);
-    let mark = |m: u64| ALU | muir::isa::asm::ADD | a_src(ONE) | m_src(m) | m_dest(m);
-    for (at, slot) in [(to, 0o26), (to | 2, 0o27)] {
-        while p.at() < at {
-            p.fill(1);
-        }
-        p.op(mark(slot));
-        p.stop();
-    }
-    let g = Geometry::QUUX_14;
-    let u = match run_engine(Micro::new(machine(&p, g))) {
-        Ok(u) => u,
-        Err((h, _)) => panic!("micro halted: {h:?}"),
-    };
-    let e = match run_engine(Pipeline::new(machine(&p, g))).and_then(settled) {
-        Ok(e) => e,
-        Err((h, _)) => panic!("the pipeline halted: {h:?}"),
-    };
-    assert_eq!(
-        (u.machine().mmem[0o26], u.machine().mmem[0o27]),
-        (1, 0),
-        "micro: the target as written"
-    );
-    assert_eq!(state(e.machine()), state(u.machine()), "the pipeline against micro");
-}
-
 /// The pipeline on the main-loop machine `m` to opcode 7's stop, halted at
 /// clock `halt` and run on, from a checkpoint with `checkpoint`: its trace
 /// and its end. At the halt the state is `micro`'s, `u`, at the same
@@ -5412,56 +5371,6 @@ fn row_a_read_start_right_after_a_read_start_both_land() {
     assert_eq!(caught, 3, "the first word dropped is caught in every case");
 }
 
-/// **On revision 14 too, both reads land** (MP2b rulings 2, Q2: the hold is
-/// QUUX's on every revision): the program of
-/// [`row_a_read_start_right_after_a_read_start_both_land`] on revision 14's
-/// `rtl`, the single-edge engine, and `micro`: the word after the second
-/// start reads the first's word on both. A checkpoint of `micro` taken
-/// between the two starts' landings carries the second word.
-#[test]
-fn revision_14_s_engines_land_both_reads() {
-    let mut p = Prog::default();
-    p.main.push((0o40, 5));
-    p.main.push((0o50, 7));
-    let (two, a, b) = (p.k(2), p.k(PHYS | 0o40), p.k(PHYS | 0o50));
-    p.op(ALU | SETA | a_src(two) | MD);
-    p.op(ALU | SETA | a_src(a) | START_READ);
-    p.op(ALU | SETA | a_src(b) | START_READ);
-    p.op(ALU | SETM | SRC_MD | m_dest(0o26));
-    p.op(ALU | SETM | SRC_MD | m_dest(0o27));
-    p.fill(2);
-    p.stop();
-    let g = Geometry::QUUX_14;
-    let u = match run_engine(Micro::new(machine(&p, g))) {
-        Ok(u) => u,
-        Err((h, _)) => panic!("micro halted: {h:?}"),
-    };
-    let r = match run_engine(muir::rtl::Rtl::new(machine(&p, g))) {
-        Ok(r) => r,
-        Err((h, _)) => panic!("rtl halted: {h:?}"),
-    };
-    for (what, m) in [("micro", u.machine()), ("rtl", r.machine())] {
-        assert_eq!((m.mmem[0o26], m.mmem[0o27]), (5, 7), "{what}");
-    }
-    // micro's checkpoint at every microcycle of the run, resumed: the end.
-    for k in 1..40 {
-        let mut v = Micro::new(machine(&p, g));
-        v.boot();
-        for _ in 0..k {
-            v.step().unwrap();
-        }
-        let mut w = muir::checkpoint::Writer::new();
-        v.save(&mut w);
-        let bytes = w.finish();
-        let mut x = Micro::new(machine(&p, g));
-        x.load(&mut muir::checkpoint::Reader::for_word_bits(&bytes, 40)).unwrap();
-        while x.machine().opc != STOP as u16 {
-            x.step().unwrap();
-        }
-        assert_eq!((x.machine().mmem[0o26], x.machine().mmem[0o27]), (5, 7), "resumed after {k}");
-    }
-}
-
 /// **Under neutral time a device sees a register write at its start's
 /// instant** (MP2b rulings 1, Q12(c); rulings 2, Q1), however late the
 /// write goes out: timer 0, one-shot, a microsecond, its interrupt enabled,
@@ -5624,19 +5533,16 @@ fn pipeline_halted_on(p: &Prog, geometry: Geometry) -> Pipeline {
 }
 
 /// **Spy register 3 reads `IR<63:48>` and write strobe 6, with its alias
-/// 14, loads the debug IR's `<63:48>`, on revision 15 only** (MP4 ruling
-/// Q4: `SPY-IR-EXT` and `-LDDBIRX`). Strobe 7 and 15 load
-/// nothing; on revision 14 and the CADR, 6 and 14 load nothing and
-/// register 3 is open. Read on `micro` and on the pipeline, halted at a
-/// word whose extension is 1.
+/// 14, loads the debug IR's `<63:48>`, on QUUX only** (MP4 ruling Q4:
+/// `SPY-IR-EXT` and `-LDDBIRX`). Strobe 7 and 15 load nothing; on the
+/// CADR, 6 and 14 load nothing. Read on `micro` and on the pipeline,
+/// halted at a word whose extension is 1.
 #[test]
-fn spy_register_3_and_write_strobe_6_are_ir_s_extension_on_revision_15() {
+fn spy_register_3_and_write_strobe_6_are_ir_s_extension_on_quux() {
     use muir::spy;
-    for (what, mut m, connected) in [
-        ("revision 15", Machine::with_geometry(REV16, 1), true),
-        ("revision 14", Machine::with_geometry(Geometry::QUUX_14, 1), false),
-        ("the CADR", Machine::new(), false),
-    ] {
+    for (what, mut m, connected) in
+        [("QUUX", Machine::with_geometry(REV16, 1), true), ("the CADR", Machine::new(), false)]
+    {
         m.debug_ir = 0o1234;
         m.spy_write(spy::LDDBIRX, 0xabcd);
         let want = if connected { 0xabcd << 48 | 0o1234 } else { 0o1234 };
@@ -5654,8 +5560,6 @@ fn spy_register_3_and_write_strobe_6_are_ir_s_extension_on_revision_15() {
     let e = pipeline_halted(&p);
     assert_eq!(e.spy_read(spy::IR_EXT), 1, "the pipeline: IR<63:48>");
     assert_eq!(e.spy_read(spy::IR_HIGH), u.spy_read(spy::IR_HIGH));
-    let u = micro_halted(&p, Geometry::QUUX_14);
-    assert_eq!(u.spy_read(spy::IR_EXT), spy::OPEN_READ, "revision 14: open");
 }
 
 /// The debug IR loaded through the spy as a console writes it, its four
@@ -5721,57 +5625,6 @@ fn the_pipeline_runs_the_debug_ir_s_64_bits_as_micro_does() {
     assert_eq!(em.cycles, cycles + 2, "the pipeline: a microcycle each");
     assert_eq!(e.pc(), pc + 2, "the pipeline: the words at PC replaced");
     diff_state(&em, &um, 0);
-}
-
-/// **A revision-15 checkpoint keeps no pending OA flag** (A15b.13: "no
-/// pending OA flag"; MP4 ruling Q3), and is version 56; one of version 55,
-/// written with revision 14's two IMOD flags after the OA registers, still
-/// loads. Halted among fillers, the pipeline's checkpoint and the same with
-/// two zero flags put back resume alike, run on alike, and the second
-/// written again is the first: 45 bytes follow the flags when no SPC or map
-/// write is pending.
-#[test]
-fn a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_55_one_loads() {
-    use muir::checkpoint::{Checkpoint, VERSION_15, VERSION_40, Writer, version_for};
-    const REV15: Geometry = Geometry::QUUX_15;
-    assert_eq!(version_for(&REV15), VERSION_15);
-    assert_eq!(VERSION_15, 56);
-    assert_eq!(version_for(&Geometry::QUUX_14), VERSION_40);
-    let p = Prog::default();
-    let e = pipeline_halted_on(&p, REV15);
-    let saved = |e: &Pipeline| {
-        let mut w = Writer::new();
-        e.save(&mut w);
-        w.finish()
-    };
-    let body = saved(&e);
-    let tail = body.len() - 45;
-    let mut old = body[..tail].to_vec();
-    old.extend([0, 0]);
-    old.extend(&body[tail..]);
-    let resume = |bytes: &[u8], version: u32| {
-        let c = Checkpoint {
-            version,
-            word_bits: 40,
-            engine: "rtl".into(),
-            memory_boards: 1,
-            body: bytes.to_vec(),
-        };
-        let mut f = Pipeline::new(machine(&p, REV15));
-        f.load(&mut c.reader()).expect("it loads");
-        f
-    };
-    let (mut a, mut b) = (resume(&body, VERSION_15), resume(&old, VERSION_40));
-    assert_eq!(saved(&b), body, "version 55's, written again, is version 56's");
-    for f in [&mut a, &mut b] {
-        f.skip_sweep();
-        f.spy_write(muir::spy::CLK, 1);
-        for _ in 0..200 {
-            f.tick().unwrap();
-        }
-    }
-    assert_eq!((a.pc(), a.machine().cycles), (b.pc(), b.machine().cycles));
-    diff_state(a.machine(), b.machine(), 0);
 }
 
 /// **A dispatch-memory write loads the dispatch constant** on revision 15,

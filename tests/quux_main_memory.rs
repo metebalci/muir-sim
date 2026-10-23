@@ -14,7 +14,7 @@
 mod support;
 
 use muir::machine::{Geometry, Machine, bus_error};
-use support::{Run, cadr, idle_prom_16, quux, quux_on_16, scratch, text};
+use support::{Run, cadr, idle_prom_16, quux, scratch, text};
 
 /// What a refused form of the amount is told.
 const UNIT: &str = "main memory is given in megawords, with the unit MW, such as 32MW";
@@ -52,7 +52,7 @@ fn runs_with(n: usize) {
     for engine in ["--micro", "--rtl"] {
         let chk = dir.join(format!("{}.chk", &engine[2..]));
         let amount = format!("{n}MW");
-        let out = quux_on_16()
+        let out = quux()
             .arg("--prom")
             .arg(&prom)
             .args([engine, "--main-memory-size", &amount, "--stop-after", "10", "--checkpoint"])
@@ -82,7 +82,7 @@ fn quux_runs_with_each_amount() {
 fn the_default_is_32mw() {
     let dir = scratch("main-memory-default");
     let chk = dir.join("default.chk");
-    let out = quux_on_16()
+    let out = quux()
         .arg("--prom")
         .arg(idle_prom_16(&dir))
         .args(["--micro", "--stop-after", "1", "--checkpoint"])
@@ -93,7 +93,7 @@ fn the_default_is_32mw() {
     assert!(t.contains("memory: 32MW\n"), "the start:\n{t}");
     let m = checkpointed(&chk);
     assert_eq!(m.main.len(), 32 << 20, "32MW by default");
-    assert_eq!(m.geometry, Geometry::QUUX_16, "the machine built");
+    assert_eq!(m.geometry, Geometry::QUUX, "the machine built");
 }
 
 /// **Any other way of writing the amount is refused**, saying how it is
@@ -117,8 +117,7 @@ fn another_form_is_refused() {
 #[test]
 fn an_amount_out_of_range_is_refused() {
     for form in ["0MW", "65MW", "1024MW"] {
-        let out =
-            quux_on_16().args(["--micro", "--main-memory-size", form, "--stop-after", "1"]).run();
+        let out = quux().args(["--micro", "--main-memory-size", form, "--stop-after", "1"]).run();
         refused(&out, &format!("--main-memory-size {form}: "));
         refused(&out, "main memory is 1MW to 64MW");
     }
@@ -175,21 +174,21 @@ fn a_resume_says_its_memory_in_mw() {
     let prom = idle_prom_16(&dir);
     for engine in ["--micro", "--rtl"] {
         let chk = dir.join(format!("{}.chk", &engine[2..]));
-        let out = quux_on_16()
+        let out = quux()
             .arg("--prom")
             .arg(&prom)
             .args([engine, "--main-memory-size", "4MW", "--stop-after", "100", "--checkpoint"])
             .arg(&chk)
             .run();
         assert!(out.status.success(), "{engine}: {}", text(&out));
-        let out = quux_on_16().args([engine, "--stop-after", "10", "--resume"]).arg(&chk).run();
+        let out = quux().args([engine, "--stop-after", "10", "--resume"]).arg(&chk).run();
         let t = text(&out);
         assert!(out.status.success(), "{engine}: {t}");
         assert!(t.contains("with 4MW of main memory"), "{engine}: the start:\n{t}");
         // The pipeline's checkpoint is drained, a microcycle or more on.
         assert!(t.contains("resumed: ") && t.contains(", 4MW of main memory"), "{t}");
         assert!(!t.contains("boards"), "{engine}: no boards on QUUX:\n{t}");
-        let out = quux_on_16()
+        let out = quux()
             .args([engine, "--main-memory-size", "8MW", "--stop-after", "10", "--resume"])
             .arg(&chk)
             .run();
@@ -198,7 +197,7 @@ fn a_resume_says_its_memory_in_mw() {
     // The machine's own refusal, loading one checkpoint onto another
     // amount, says it in MW too.
     let c = muir::checkpoint::read(&dir.join("micro.chk")).unwrap();
-    let mut m = Machine::with_geometry(Geometry::QUUX_16, 128);
+    let mut m = Machine::with_geometry(Geometry::QUUX, 128);
     let err = m.load(&mut c.reader()).unwrap_err().to_string();
     assert!(err.contains("4MW of main memory") && err.contains("this machine has 8MW"), "{err}");
     assert!(!err.contains("boards"), "{err}");

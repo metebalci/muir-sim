@@ -36,6 +36,13 @@ pub const PROM_WORDS: usize = 1024;
 /// Where QUUX's boot PROM sits in the control store (contract Q2): 1K words
 /// at 36000-37777, never overlaid, the PC starting there at reset.
 pub const QUUX_PROM_BASE: u16 = 0o36000;
+
+/// QUUX's hardware revision, MACHINE-ID's `<15:4>` ([`Geometry::QUUX`]).
+pub const QUUX_REVISION: u32 = 16;
+
+/// The tag of muir-sim's last commit that runs QUUX's hardware revisions 13,
+/// 14 and 15, which a refusal of one of theirs names.
+pub const EARLIER_REVISIONS_TAG: &str = "quux-revisions-13-15";
 /// Main memory by default, in 32-bit words: thirty-two boards of 64K.
 /// [`Machine::with_memory_boards`] builds a machine with another count.
 /// Physical pages above the memory are devices, or nothing.
@@ -140,7 +147,7 @@ pub mod bus_error {
 /// machine, `VMA<12:8>` choosing one in it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Geometry {
-    /// Bits in a word ([`Word`]): 32 on the CADR; 40 on QUUX revision 13,
+    /// Bits in a word ([`Word`]): 32 on the CADR; 40 on QUUX,
     /// [`Geometry::QUUX`], whose fields,
     /// rotator, jump conditions, dispatch memory, location counter and map
     /// come with the word (contract G2 §2-§3, appendix A1): what
@@ -222,23 +229,33 @@ impl Geometry {
         macro_dispatch: false,
     };
 
-    /// **QUUX's, revision 13** (contract G2, with its appendix A1): a
-    /// 40-bit word (G2 §2.1) and what comes with it, all keyed on
-    /// [`Geometry::wide`]. The BYTE fields are 6 bits, the JUMP and
-    /// DISPATCH rotates take `IR<47>` as their bit 5, the DISPATCH address
-    /// is `IR<23:12>` into a dispatch memory of 4,096 entries (A1.1,
-    /// A1.4); the rotator is a ring of 40 and the masker empty for a byte
-    /// that does not fit in bits 0-39 (A1.2); the conditions compare
-    /// fields, equality sees the tag, and two conditions are new, fixnum
-    /// overflow and unsigned less than (A1.3); the location counter has 30
-    /// bits and its flags above bit 31 (A1.6); and the map is two levels
-    /// of 8,192 7-bit and 4,096 28-bit entries over 1024-word pages, a
-    /// 28-bit virtual address and an 18-bit physical page (A1.7).
+    /// **QUUX's** (contract G2, with its appendix A1; contract G3
+    /// revisions 14 and 15, appendices A14 and A15b; QUUX's Ethernet
+    /// contract, §10): hardware revision 16. A 40-bit word (G2 §2.1) and
+    /// what comes with it, all keyed on [`Geometry::wide`]. The BYTE fields
+    /// are 6 bits, the JUMP and DISPATCH rotates take `IR<47>` as their bit
+    /// 5, the DISPATCH address is `IR<23:12>` into a dispatch memory of
+    /// 4,096 entries (A1.1, A1.4); the rotator is a ring of 40 and the
+    /// masker empty for a byte that does not fit in bits 0-39 (A1.2); the
+    /// conditions compare fields, equality sees the tag, and two conditions
+    /// are new, fixnum overflow and unsigned less than (A1.3), and jump
+    /// condition 12 (A14). A 32-bit virtual address space, its two windows,
+    /// and a page table walked by hardware behind a TLB ([`crate::tlb`]),
+    /// with no map levels, so no level-1 entry (feature word 1 reads 0);
+    /// the location counter at 34 bits with its adder (A14.11); the memory
+    /// system's register-page words 220-224 (A14.9). A 64-bit
+    /// microinstruction, MIT's 48 bits and an extension (A15b.2); the OA
+    /// registers read only through a word's OA select (A15b.15); its own
+    /// `.mcr` (A15b.7); feature word 25 and register-page word 225
+    /// (A15b.1). The Ethernet device, register-page words 240-257, word 100
+    /// `<8>` and feature word 15 `<2>` ([`crate::ethernet_device`]). No
+    /// Chaosnet interface (QUUX's Ethernet contract, §8 R4): 140-157 are
+    /// reserved and word 100 `<6>` is never set.
     ///
     /// With it: the MACRO-DISPATCH register, the MACRO DISPATCH MEMORY and
     /// the fused return (contract H8a, [`macro_dispatch`]), functional
-    /// destinations 5 to 7; the register page at the last page of the
-    /// physical space, [`REGISTER_PAGE_13`], with block-disk and the video
+    /// destinations 5 to 7; the register page at
+    /// [`crate::tlb::REGISTER_PAGE_BUS`], with block-disk and the video
     /// controller on it and word 100 in its final order (contract Q13,
     /// [`Machine::interrupt_sources`]); three interval timers and reset
     /// devices on the register page (contract Q11, [`Timers`],
@@ -246,26 +263,25 @@ impl Geometry {
     /// the register page (contract Q9, [`Rtc`], [`crate::file_device`]);
     /// main memory and the frame buffer on its own port through its cache,
     /// with no bus interface (contract Q6), and its devices reached by
-    /// their registers alone, with no bus (contract Q7,
-    /// [`crate::memory_port`]); its boot PROM at control store 36000
-    /// (contract Q2, [`Geometry::prom_base`]); the microsecond clock in the
-    /// processor, functional source 15, and timer 0 of the interval timers
-    /// the tick ([`Timers`]); `MUL` and `DIV` in one instruction each, ALU
-    /// functions 42 and 43 ([`crate::muldiv`]); and a PDL buffer of 16K
-    /// words, its pointer and index 14 bits. The rest of the machine is
-    /// the CADR's.
+    /// their registers alone, with no bus (contract Q7); its boot PROM at
+    /// control store 36000 (contract Q2, [`Geometry::prom_base`]); the
+    /// microsecond clock in the processor, functional source 15, and timer
+    /// 0 of the interval timers the tick ([`Timers`]); `MUL` and `DIV` in
+    /// one instruction each, ALU functions 42 and 43 ([`crate::muldiv`]);
+    /// and a PDL buffer of 16K words, its pointer and index 14 bits. The
+    /// rest of the machine is the CADR's.
     ///
     /// It says so in functional source 16, its MACHINE-ID, which no
     /// microcode of MIT's reads and nothing on the CADR drives: the
     /// signature `0x5155` in bits 31:16, the hardware revision in 15:4,
-    /// 13, and the processor type, 4, in 3:0. Feature words 1, 2 and 6
+    /// 16, and the processor type, 4, in 3:0. Feature words 1, 2 and 6
     /// give the sizes ([`Geometry::feature_word`]). A CADR's open bus
     /// reads all ones there, which can never carry the signature.
     pub const QUUX: Geometry = Geometry {
         word_bits: 40,
-        l1_bits: 7,
+        l1_bits: 0,
         pdl_bits: 14,
-        machine_id: Some((0x5155 << 16) | (13 << 4) | 4),
+        machine_id: Some((0x5155 << 16) | (QUUX_REVISION << 4) | 4),
         muldiv: true,
         tick: true,
         speed_bits: false,
@@ -278,70 +294,19 @@ impl Geometry {
         macro_dispatch: true,
     };
 
-    /// **QUUX's, revision 14** (contract G3 revision 14, appendix A14):
-    /// revision 13 with a 32-bit virtual address space, its two windows,
-    /// and a page table walked by hardware behind a TLB ([`crate::tlb`])
-    /// in place of the two map levels, so no level-1 entry (feature word 1
-    /// reads 0); the location counter at 34 bits with its adder (A14.11);
-    /// jump condition 12; the memory system's register-page words 220-224
-    /// (A14.9). All of it keyed on [`Geometry::paged`].
-    pub const QUUX_14: Geometry =
-        Geometry { l1_bits: 0, machine_id: Some((0x5155 << 16) | (14 << 4) | 4), ..Geometry::QUUX };
-
-    /// **QUUX's, revision 15** (contract G3 revision 15, appendix A15b), on
-    /// `micro`: revision 14's machine with a 64-bit microinstruction, MIT's
-    /// 48 bits and an extension (A15b.2); the OA registers read only through
-    /// a word's OA select, in place of IMOD (A15b.15); its own `.mcr`
-    /// (A15b.7); feature word 25 and register-page word 225 (A15b.1). All of
-    /// it keyed on [`Geometry::extended`]. `rtl` does not run it.
-    pub const QUUX_15: Geometry =
-        Geometry { machine_id: Some((0x5155 << 16) | (15 << 4) | 4), ..Geometry::QUUX_14 };
-
-    /// **QUUX's, revision 16** (QUUX's Ethernet contract, §10): revision
-    /// 15 with the Ethernet device, register-page words 240-257, word 100
-    /// `<8>` and feature word 15 `<2>` ([`crate::ethernet_device`]), and a
-    /// checkpoint version of its own. All of it keyed on
-    /// [`Geometry::ethernet`]. It has no Chaosnet interface (QUUX's
-    /// Ethernet contract, §8 R4): 140-157 are reserved, word 100 `<6>` is
-    /// never set, [`Geometry::chaos`].
-    pub const QUUX_16: Geometry =
-        Geometry { machine_id: Some((0x5155 << 16) | (16 << 4) | 4), ..Geometry::QUUX_15 };
-
-    /// Whether the machine translates through the TLB, revision 14's
-    /// ([`Geometry::QUUX_14`]), rather than through two map levels.
-    pub fn paged(self) -> bool {
-        self.revision().is_some_and(|r| r >= 14)
-    }
-
-    /// Whether the microinstruction is 64 bits with the OA selects in place
-    /// of IMOD, revision 15's ([`Geometry::QUUX_15`]).
-    pub fn extended(self) -> bool {
-        self.revision().is_some_and(|r| r >= 15)
-    }
-
-    /// Whether the machine has the Ethernet device, revision 16's
-    /// ([`Geometry::QUUX_16`]).
-    pub fn ethernet(self) -> bool {
-        self.revision().is_some_and(|r| r >= 16)
-    }
-
-    /// Whether the machine has a Chaosnet interface: the CADR's, on its
-    /// Unibus, and QUUX's to revision 15, at words 140-147 of the register
-    /// page with word 100 `<6>` (contract Q4). Revision 16 lost it (QUUX's
-    /// Ethernet contract, §8 R4): its 140-157 are reserved and never
-    /// reused, and nothing sets `<6>`.
-    pub fn chaos(self) -> bool {
-        !self.ethernet()
+    /// Whether the machine is QUUX: it has a MACHINE-ID.
+    pub fn quux(self) -> bool {
+        self.machine_id.is_some()
     }
 
     /// The level-1 entry a CADR's map store writes: `VMA<31:27>`
     /// (`mit/cadr/ir.bits`, "VMA<26>=1 writes the level 1 map from
-    /// VMA<31-27>"). Revision 13 writes its own ([`Machine::write_map_13`]).
+    /// VMA<31-27>").
     pub fn l1_from_vma(self, vma: u32) -> u32 {
         (vma >> 27) & self.l1_mask()
     }
 
-    /// QUUX's revision, from its MACHINE-ID's `<15:4>`: 13 or 14, and
+    /// QUUX's revision, from its MACHINE-ID's `<15:4>`, [`QUUX_REVISION`], and
     /// `None` on the CADR, which has no MACHINE-ID.
     pub fn revision(self) -> Option<u32> {
         self.machine_id.map(|id| id >> 4 & 0o7777)
@@ -373,41 +338,34 @@ impl Geometry {
     }
 
     /// Whether a word is wider than 32 bits, `<39:32>` above the CADR's:
-    /// revision 13, and with it its fields, rotator, conditions, dispatch
-    /// memory, location counter and map ([`Geometry::QUUX`]).
+    /// QUUX, and with it its fields, rotator, conditions, dispatch memory
+    /// and location counter ([`Geometry::QUUX`]).
     pub fn wide(self) -> bool {
         self.word_bits > 32
     }
 
     /// The dispatch memory's entries: 2,048 (`IR<22:12>`), and 4,096
-    /// (`IR<23:12>`) on revision 13 (contract G2 §2.4, A1.4).
+    /// (`IR<23:12>`) on QUUX (contract G2 §2.4, A1.4).
     pub fn dmem_words(self) -> usize {
         if self.wide() { DMEM_WORDS } else { 2048 }
     }
 
     /// The location counter's own bits, the counter without the flags an
-    /// engine keeps beside it: `LC<25:0>` ([`LC_COUNTER`]), and on revision
-    /// 13 `LC<29:0>`, a byte address of a 28-bit word address (A1.6), and
-    /// on revision 14 `LC<33:0>`, of a 32-bit one (A14.11).
+    /// engine keeps beside it: `LC<25:0>` ([`LC_COUNTER`]), and on QUUX
+    /// `LC<33:0>`, a byte address of a 32-bit word address (A14.11).
     pub fn lc_counter(self) -> u64 {
-        if self.paged() {
-            LC_COUNTER_14
-        } else if self.wide() {
-            u64::from(LC_COUNTER_13)
-        } else {
-            u64::from(LC_COUNTER)
-        }
+        if self.quux() { LC_COUNTER_14 } else { u64::from(LC_COUNTER) }
     }
 
     /// Where `micro` carries `NEEDFETCH` in [`Machine::lc`]: bit 31, above
-    /// the counter, and on revision 14, whose counter has bit 31, bit 40.
+    /// the counter, and on QUUX, whose counter has bit 31, bit 40.
     pub fn need_fetch(self) -> u64 {
-        if self.paged() { 1 << 40 } else { 1 << 31 }
+        if self.quux() { 1 << 40 } else { 1 << 31 }
     }
 
     /// The map word the latch at VMEMDR 1D14 holds before any memory cycle
-    /// has loaded it: [`LVMO_AT_POWER_ON`], and on revision 13 the same
-    /// with its access bits at `<27:26>` and its page 18 bits (A1.7).
+    /// has loaded it: [`LVMO_AT_POWER_ON`], and on QUUX the same with its
+    /// access bits at `<27:26>` and its page 18 bits (A1.7, A14.5).
     pub fn lvmo_at_power_on(self) -> u32 {
         if self.wide() { (1 << 27) | (1 << 26) | 0o777777 } else { LVMO_AT_POWER_ON }
     }
@@ -429,8 +387,8 @@ impl Geometry {
     }
 
     /// Whether this machine has the register page, and with it QUUX's
-    /// decode of its physical space ([`busint::decode_quux_13`]): main
-    /// memory, the frame buffer window, the page, and nothing else.
+    /// decode of its bus addresses ([`busint::decode_quux_14`]): main memory,
+    /// the frame buffer window, the page, and nothing else.
     pub fn has_register_page(self) -> bool {
         self.machine_id.is_some()
     }
@@ -443,19 +401,16 @@ impl Geometry {
     /// the tick, timer 0 (1); words 11 to 13, the main screen, are the
     /// display's ([`Machine::bus_read`]); word 14 the microsecond clock;
     /// word 15 the optional devices, a bit each, `<0>` the real-time clock,
-    /// `<1>` the file device and on revision 16 `<2>` the Ethernet device;
+    /// `<1>` the file device and `<2>` the Ethernet device;
     /// word 16 the number of interval timers, 3; word 17 the MACRO
     /// DISPATCH MEMORY's entries, 1,024; words 20 to 24 the board name, the
     /// machine's ([`Machine::set_board_name`]); every other word 0.
     /// Read-only, as every word 0-77 is.
     ///
-    /// The page is at `1777777400`, the last page of the 28-bit physical
-    /// space ([`REGISTER_PAGE_13`]), and on revision 14 at bus address
-    /// [`crate::tlb::REGISTER_PAGE_BUS`], with the same offsets.
+    /// The page is at bus address [`crate::tlb::REGISTER_PAGE_BUS`].
     pub fn feature_word(self, phys: u32) -> Option<u32> {
         let id = self.machine_id?;
-        let page = if self.paged() { crate::tlb::REGISTER_PAGE_BUS } else { REGISTER_PAGE_13 };
-        if phys & !0o377 != page {
+        if phys & !0o377 != crate::tlb::REGISTER_PAGE_BUS {
             return None;
         }
         Some(match phys & 0o377 {
@@ -473,11 +428,11 @@ impl Geometry {
             0o14 => self.tick as u32,
             // The optional devices, a bit each (contracts Q9, Q13): `<0>`
             // the real-time clock, `<1>` the file device.
-            // `<2>` the Ethernet device, revision 16's.
+            // `<2>` the Ethernet device.
             0o15 => {
                 self.rtc as u32
                     | (self.file_device as u32) << 1
-                    | (self.ethernet() as u32) << crate::ethernet_device::FEATURE_BIT
+                    | (self.quux() as u32) << crate::ethernet_device::FEATURE_BIT
             }
             // The number of interval timers (contract Q11, revision 10).
             0o16 => self.tick as u32 * Timers::COUNT,
@@ -574,10 +529,9 @@ impl Geometry {
 pub mod macro_dispatch {
     /// `<31>` of the register, the enable.
     pub const ENABLE: u32 = 1 << 31;
-    /// `<30>` of the register on revision 15, D's enable, with `<31>`
-    /// (contract G3 revision 15, A15b.9): a return that would fuse but for
-    /// a needed fetch dispatches on the fetched word. Below revision 15 the
-    /// bit is reserved and not kept.
+    /// `<30>` of the register, D's enable, with `<31>` (contract G3
+    /// revision 15, A15b.9): a return that would fuse but for a needed
+    /// fetch dispatches on the fetched word.
     pub const D_ENABLE: u32 = 1 << 30;
     /// The register's bits kept: `<31>` and `<28:0>`.
     pub const REGISTER_BITS: u32 = ENABLE | 0o3777777777;
@@ -768,11 +722,11 @@ impl Default for MacroDispatch {
 }
 
 impl MacroDispatch {
-    /// Revision 15's write of the register, destination 5, with `data`:
-    /// [`MacroDispatch::write`], and D's enable, `<30>`, kept as written,
-    /// or as D's switch says (A15b.9; [`DSwitch`]).
-    pub fn write_register_15(&mut self, data: u32) {
-        self.write(5, data);
+    /// The write of the register, destination 5, with `data`: `<31>` and
+    /// `<28:0>`, and D's enable, `<30>`, kept as written, or as D's switch
+    /// says (A15b.9; [`DSwitch`]).
+    fn write_register(&mut self, data: u32) {
+        self.register = data & macro_dispatch::REGISTER_BITS;
         let d = match self.d {
             DSwitch::AsWritten => data & macro_dispatch::D_ENABLE,
             DSwitch::Off => 0,
@@ -801,7 +755,7 @@ impl MacroDispatch {
     /// writes of the words it names from then on.
     pub fn write(&mut self, code: u32, data: u32) {
         match code {
-            5 => self.register = data & macro_dispatch::REGISTER_BITS,
+            5 => self.write_register(data),
             6 => self.index = (data & (macro_dispatch::ENTRIES as u32 - 1)) as u16,
             7 => self.entries[self.index as usize] = data & macro_dispatch::ENTRY_BITS,
             _ => unreachable!("destination {code:o} is not the MACRO DISPATCH MEMORY's"),
@@ -1249,13 +1203,9 @@ pub enum Halt {
 /// this is the mask that leaves the register the engines can be held to.
 pub const LC_COUNTER: u32 = 0o377777777;
 
-/// Revision 13's location counter, `LC<29:0>`: a byte address, the word
-/// `<29:2>`, the halfword `<1>` and the byte `<0>` (contract G2 §2.1,
-/// appendix A1.6). [`Geometry::lc_counter`].
-pub const LC_COUNTER_13: u32 = (1 << 30) - 1;
-
-/// Revision 14's location counter, `LC<33:0>`: a byte address, the word
-/// `<33:2>`, any 32-bit word address (appendix A14.11).
+/// QUUX's location counter, `LC<33:0>`: a byte address, the word `<33:2>`,
+/// the halfword `<1>` and the byte `<0>`, any 32-bit word address
+/// (appendix A14.11).
 pub const LC_COUNTER_14: u64 = (1 << 34) - 1;
 
 #[derive(Clone)]
@@ -1314,11 +1264,10 @@ pub struct Machine {
     pub opc: u16,
     /// Location counter.  The 26 bits of address [`LC_COUNTER`] leaves, plus
     /// NEED-FETCH in bit 31 and the interrupt-control flags mirrored in bits
-    /// 29:26. On revision 13 the 30 bits of [`LC_COUNTER_13`] and
-    /// NEED-FETCH in bit 31, the flags not mirrored: the location counter
-    /// source reads them from [`Machine::interrupt_control`] (A1.6). On
-    /// revision 14 the 34 bits of [`LC_COUNTER_14`] and NEED-FETCH in bit
-    /// 40 ([`Geometry::need_fetch`]; A14.11).
+    /// 29:26. On QUUX the 34 bits of [`LC_COUNTER_14`] and NEED-FETCH in
+    /// bit 40 ([`Geometry::need_fetch`]; A14.11), the flags not mirrored:
+    /// the location counter source reads them from
+    /// [`Machine::interrupt_control`] (A1.6).
     pub lc: u64,
     pub vma: Word,
     pub md: Word,
@@ -1428,12 +1377,12 @@ pub struct Machine {
     /// inside the board, is not time at any speed but one, and is not
     /// advanced at all by the far end of `chip`'s cables.
     ///
-    /// **On QUUX revision 15 it counts units of 0.5 ns**, not nanoseconds,
-    /// in both engines ([`Machine::time_base`], contract G3 revision 15's
-    /// MP2b ruling Q1); every instant there is a multiple of the clock's
-    /// period. The name is kept for the CADR's and revisions 13 and 14's
-    /// sake, whose nanoseconds it is; every conversion of a real duration
-    /// into it goes through [`Machine::time_base`].
+    /// **On QUUX it counts units of 0.5 ns**, not nanoseconds, in both
+    /// engines ([`Machine::time_base`], contract G3 revision 15's MP2b
+    /// ruling Q1); every instant there is a multiple of the clock's period.
+    /// The name is kept for the CADR's sake, whose nanoseconds it is; every
+    /// conversion of a real duration into it goes through
+    /// [`Machine::time_base`].
     pub ns: u64,
     /// QUUX's interval timers, where the geometry has them.
     pub timers: Timers,
@@ -1579,12 +1528,12 @@ impl Machine {
             chaos: crate::chaos::Config::default(),
             // The I/O board has its Chaosnet interface whether or not a
             // cable is plugged in: the switches at the configured address,
-            // nothing on the cable until [`Machine::plug_chaos`]. Revision
-            // 16 has none ([`Geometry::chaos`]).
+            // nothing on the cable until [`Machine::plug_chaos`]. QUUX has
+            // none.
             quux_input: crate::quux_input::QuuxInput::new(),
             ioboard: {
                 let mut b = ioboard::IoBoard::default();
-                if geometry.chaos() {
+                if !geometry.quux() {
                     b.plug_chaos(crate::chaos::Config::default().address, None, 0, false);
                 }
                 b
@@ -1633,10 +1582,10 @@ impl Machine {
     }
 
     /// **The unit [`Machine::ns`] counts and the grid devices act on**:
-    /// nanoseconds with no grid, and on revision 15 units of 0.5 ns on its
+    /// nanoseconds with no grid, and on QUUX units of 0.5 ns on its
     /// clock's period ([`crate::clock::TimeBase`]).
     pub fn time_base(&self) -> crate::clock::TimeBase {
-        if self.geometry.extended() {
+        if self.geometry.quux() {
             crate::clock::TimeBase::half_ns(self.period)
         } else {
             crate::clock::TimeBase::NS
@@ -1677,11 +1626,11 @@ impl Machine {
     /// The Chaosnet interface told the machine's unit of time and its
     /// clock's grid ([`crate::chaos::board::Interface::set_time_base`]),
     /// and the machine's time in those units, [`Machine::ns`] itself: on
-    /// revision 15 its times double into units of 0.5 ns, its turn timer
-    /// acts at the first clock at or after each edge, and the delays it
-    /// starts end ⌈2d/P⌉ clocks after their start (MP2b ruling Q19).
-    /// Revision 16 has no interface, so the rule is retired there (QUUX's
-    /// Ethernet contract, §8 R4) and this is [`Machine::ns`] alone.
+    /// a machine whose time base is units of 0.5 ns its times double, its
+    /// turn timer acts at the first clock at or after each edge, and the
+    /// delays it starts end ⌈2d/P⌉ clocks after their start (MP2b ruling
+    /// Q19). QUUX has no interface (QUUX's Ethernet contract, §8 R4), so on
+    /// the CADR this is [`Machine::ns`] alone.
     pub fn chaos_time(&mut self) -> u64 {
         let time = self.time_base();
         if let Some(c) = self.ioboard.chaos.as_mut() {
@@ -1711,24 +1660,19 @@ impl Machine {
     /// under its interrupt enable (contract Q11); `<3>` block-disk's done
     /// under its enable, command `<11>`; `<4>` the keyboard and `<5>` the
     /// mouse ([`crate::quux_input`]); `<6>` the network, the Chaosnet
-    /// interface's request (contract Q4), to revision 15, and never set on
-    /// 16, which has no interface ([`Geometry::chaos`]); `<7>` the file device, a response
-    /// waiting under its interrupt enable (contract Q9); `<8>` on revision
-    /// 16 the Ethernet device, an Ethernet frame waiting under its interrupt
-    /// enable (QUUX's Ethernet contract, §2.6). Every bit is a
+    /// interface's request (contract Q4), never set: QUUX has no interface;
+    /// `<7>` the file device, a response waiting under its interrupt enable
+    /// (contract Q9); `<8>` the Ethernet device, an Ethernet frame waiting
+    /// under its interrupt enable (QUUX's Ethernet contract, §2.6). Every bit is a
     /// level cleared at its source, so one write turns each off: a stray's
     /// handler in the microcode relies on it (contract Q13, section 2).
     pub fn interrupt_sources(&self) -> u32 {
         (if self.geometry.tick { self.timers.interrupt_sources(self.ns) } else { 0 })
             | (self.block_disk.as_ref().is_some_and(|d| d.interrupt_at(self.ns)) as u32) << 3
             | if self.geometry.machine_id.is_some() { self.quux_input.interrupts() } else { 0 }
-            | ((self.geometry.chaos()
-                && self.ioboard.chaos.as_ref().is_some_and(|c| c.interrupt_request().is_some()))
-                as u32)
-                << 6
             | ((self.geometry.file_device && self.file_device.interrupt_at(self.ns)) as u32)
                 << crate::file_device::INTERRUPT_BIT
-            | ((self.geometry.ethernet() && self.ethernet.interrupt()) as u32)
+            | ((self.geometry.quux() && self.ethernet.interrupt()) as u32)
                 << crate::ethernet_device::INTERRUPT_BIT
     }
 
@@ -1750,7 +1694,7 @@ impl Machine {
     /// engine with a cache clears a delivery's lines' sets before it moves
     /// 251 ([`crate::ethernet_device::EthernetDevice::engine_clears`]).
     pub fn advance_ethernet(&mut self) {
-        if !self.geometry.ethernet() {
+        if !self.geometry.quux() {
             return;
         }
         self.advance_ethernet_now();
@@ -1762,9 +1706,9 @@ impl Machine {
     /// does, so what arrives while the device is disabled is discarded at
     /// the next edge, and a clocked one waits at an edge. With a scripted
     /// peer, what has arrived while it is disabled is dropped at the next
-    /// register access, which advances it first, and nothing is due. So a
-    /// machine below revision 16, or one without the socket whose device is
-    /// not enabled, pays one test an edge.
+    /// register access, which advances it first, and nothing is due. So the
+    /// CADR, or a QUUX without the socket whose device is not enabled, pays
+    /// one test an edge.
     #[inline]
     pub fn advance_ethernet_at_edge(&mut self) {
         if self.ethernet.at_edges() {
@@ -1800,14 +1744,10 @@ impl Machine {
         self.geometry.file_device.then(|| self.file_device.checkpoint_refusal()).flatten()
     }
 
-    /// The debug IR as the word it runs: its 64 bits on revision 15, 48
-    /// elsewhere.
+    /// The debug IR as the word it runs: its 64 bits on QUUX, 48 on the
+    /// CADR.
     pub fn debug_insn(&self) -> Insn {
-        if self.geometry.extended() {
-            Insn::extended(self.debug_ir)
-        } else {
-            Insn::new(self.debug_ir)
-        }
+        if self.geometry.quux() { Insn::extended(self.debug_ir) } else { Insn::new(self.debug_ir) }
     }
 
     /// Fetches from the control store, honoring the PROM overlay on the
@@ -1893,11 +1833,8 @@ impl Machine {
     /// 2 as `-VMO`.  That matters to `src/chip.rs`, which holds cells; this
     /// holds values, so it does not appear here.
     pub fn translate(&self, vaddr: u32) -> Translation {
-        if self.geometry.paged() {
+        if self.geometry.quux() {
             return self.translate_14(vaddr);
-        }
-        if self.geometry.wide() {
-            return self.translate_13(vaddr);
         }
         // Only VMA<23:0> reaches MAPI; `ir.bits` writes level 2 from the same
         // 24 bits.
@@ -1920,38 +1857,7 @@ impl Machine {
         }
     }
 
-    /// **Revision 13's map** (contract G2 §2.6, appendix A1.7): two levels,
-    /// as today, over a 28-bit virtual address and 1024-word pages.
-    ///
-    /// | level | entries | width | addressed by |
-    /// |---|---|---|---|
-    /// | 1 | 8,192 | 7 | `VA<27:15>` |
-    /// | 2 | 4,096 | 28 | `{L1<6:0>, VA<14:10>}` |
-    ///
-    /// The physical word address is `{L2<17:0>, VA<9:0>}`, 28 bits. The
-    /// level-2 entry is PHT word 2's: `<27>` read access, `<26>` write
-    /// access (the access code `<27:26>`), `<23:22>` the meta bits a
-    /// DISPATCH takes, `<17:0>` the physical page. An address with
-    /// `<31:28>` not zero reads block `177`, the invalid block, whatever
-    /// level 1 holds there, so that the map-miss path runs and nothing
-    /// aliases the low 256 M words; `<39:32>` never reaches the map. The
-    /// appendix's own words for the gate: "the level-1 output reads `177`,
-    /// whatever the RAM holds".
-    fn translate_13(&self, vaddr: u32) -> Translation {
-        let l1_data = self.map_level_1_13(vaddr);
-        let l2_data = self.l2_map[map_level_2_index_13(l1_data, vaddr)];
-        let page = l2_data & 0o777777;
-        Translation {
-            physical: (page << 10) | (vaddr & 0o1777),
-            page,
-            l1_data,
-            l2_data,
-            write_permitted: l2_data & (1 << 26) != 0,
-            access_permitted: l2_data & (1 << 27) != 0,
-        }
-    }
-
-    /// **Revision 14's translation** (A14.1, A14.5, A14.6) of `vaddr`: a
+    /// **QUUX's translation** (A14.1, A14.5, A14.6) of `vaddr`: a
     /// window's fixed entry from the decode; a paged address's TLB entry,
     /// or on a miss what the walk would find, the no-entry word if
     /// nothing. Nothing is loaded and no walk is counted here: the engines
@@ -2044,11 +1950,11 @@ impl Machine {
         Some(wb)
     }
 
-    /// **Revision 14's snoop of A memory's write pulse** (A14.7): a write of
-    /// A location `adr` with `word` takes the redirect's base at 430 and its
-    /// head at 431. Nothing on another revision.
+    /// **QUUX's snoop of A memory's write pulse** (A14.7): a write of A
+    /// location `adr` with `word` takes the redirect's base at 430 and its
+    /// head at 431. Nothing on the CADR.
     pub fn a_written_14(&mut self, adr: usize, word: Word) {
-        if self.geometry.paged() {
+        if self.geometry.quux() {
             self.pdl_copies.a_written(adr, word);
         }
     }
@@ -2098,51 +2004,14 @@ impl Machine {
         self.tlb.sweep_until = now + self.tlb.sweep_ns();
     }
 
-    /// `-RESET` on revision 14 (A14.4, A14.9), at `now`: the TLB swept and
-    /// the memory system's words cleared. Nothing on another revision.
+    /// `-RESET` on QUUX (A14.4, A14.9), at `now`: the TLB swept and the
+    /// memory system's words cleared. Nothing on the CADR.
     pub fn reset_memory_system(&mut self, now: u64) {
-        if self.geometry.paged() {
+        if self.geometry.quux() {
             self.sweep_tlb(now);
             self.memory_words = crate::tlb::Words::default();
-            // Revision 15's word 225 with them, as word 224 (A15b.1).
+            // Word 225 with them, as word 224 (A15b.1).
             self.posted_write_errors = 0;
-        }
-    }
-
-    /// A TLB of `entries`, `--tlb` (A14.4): a power of two from 1,024 to
-    /// 32,768, swept; before the machine runs.
-    pub fn set_tlb_entries(&mut self, entries: usize) {
-        self.tlb = crate::tlb::Tlb::new(entries);
-    }
-
-    /// Revision 13's level-1 output for the address `addr` (A1.7): the
-    /// entry at `VA<27:15>`, or block `177` when `<31:28>` is not zero.
-    pub fn map_level_1_13(&self, addr: u32) -> u32 {
-        if addr >> 28 != 0 {
-            MAP_INVALID_BLOCK_13
-        } else {
-            self.l1_map[(addr >> 15) as usize & (L1_MAP_WORDS - 1)] & 0o177
-        }
-    }
-
-    /// Revision 13's map write (A1.7), from the word in `VMA` at the
-    /// address `addr`, which is `MD` (or `VMA` in the microcycle after a
-    /// memory start, as `MAPI` is on every machine): `VMA<29>` writes level
-    /// 1 at `addr<27:15>` with `VMA<38:32>`; `VMA<28>` writes level 2 at
-    /// level 1's output for `addr` and `addr<14:10>` with `VMA<27:0>`. With
-    /// both, level 1 only: the CADR's write of level 2 at block 0 is its
-    /// RAMs' artefact, and on QUUX block 0 is wired. An address with
-    /// `<31:28>` not zero writes neither, or it would land in the invalid
-    /// block or map an alias.
-    pub fn write_map_13(&mut self, vma: Word, addr: u32) {
-        if addr >> 28 != 0 {
-            return;
-        }
-        if vma & (1 << 29) != 0 {
-            self.l1_map[(addr >> 15) as usize & (L1_MAP_WORDS - 1)] = (vma >> 32) as u32 & 0o177;
-        } else if vma & (1 << 28) != 0 {
-            let l1 = self.map_level_1_13(addr);
-            self.l2_map[map_level_2_index_13(l1, addr)] = vma as u32 & MAP_LEVEL_2_13;
         }
     }
 
@@ -2175,12 +2044,9 @@ impl Machine {
     /// settle it.  Microcode 323 writes the levels in separate stores
     /// (`LEVEL-1-MAP-MISS` in `uc-page-fault.lisp`), so the band never asks.
     pub fn write_map(&mut self, vma: Word, md: Word) {
-        if self.geometry.paged() {
+        if self.geometry.quux() {
             self.write_map_14(vma, md, self.ns);
             return;
-        }
-        if self.geometry.wide() {
-            return self.write_map_13(vma, md as u32);
         }
         let (vma, md) = (vma as u32, md as u32);
         let l1_index = (md >> 13) as usize & 0o3777;
@@ -2292,19 +2158,11 @@ impl Machine {
             || (self.geometry.unibus && self.unibus_interrupt().is_some())
             || (self.geometry.tick && self.timers.pending(now.max(self.ns)))
             || (self.geometry.machine_id.is_some() && self.quux_input.interrupts() != 0)
-            // The network's request, word 100's <6> (contract Q4), reaches
-            // the processor as every bit of the register page's does, not
-            // only through the Unibus interrupt that 766040 enables; never
-            // on revision 16, which has no interface (§8 R4).
-            || (self.geometry.machine_id.is_some()
-                && self.geometry.chaos()
-                && self.ioboard.chaos.as_ref().is_some_and(|c| c.interrupt_request().is_some()))
-            // The file device's, word 100's <6> (contract Q9), from its due
+            // The file device's, word 100's <7> (contract Q9), from its due
             // times.
             || (self.geometry.file_device && self.file_device.interrupt_at(now.max(self.ns)))
             // The Ethernet device's, word 100's <8>, as advanced to the
-            // last edge: never below revision 16, whose page has no device
-            // to enable.
+            // last edge: never on the CADR, which has no device to enable.
             || self.ethernet.interrupt()
     }
 
@@ -2372,11 +2230,11 @@ impl Machine {
     /// the test harness, with its Chaosnet server --- puts one there
     /// instead.
     ///
-    /// **Revision 16 has no interface to plug** (QUUX's Ethernet contract,
-    /// §8 R4): its I/O board is left with none, also when the machine was
-    /// built as another and given 16's geometry since.
+    /// **QUUX has no interface to plug** (QUUX's Ethernet contract, §8
+    /// R4): its I/O board is left with none, also when the machine was
+    /// built as a CADR and given QUUX's geometry since.
     pub fn plug_chaos(&mut self, powered_at: u64) {
-        if !self.geometry.chaos() {
+        if self.geometry.quux() {
             self.ioboard.chaos = None;
             return;
         }
@@ -2565,9 +2423,7 @@ impl Machine {
             half @ (spy::IR_LOW | spy::IR_MED | spy::IR_HIGH) => {
                 spy::write_debug_ir(&mut self.debug_ir, half, v)
             }
-            spy::LDDBIRX if self.geometry.extended() => {
-                spy::write_debug_ir(&mut self.debug_ir, 3, v)
-            }
+            spy::LDDBIRX if self.geometry.quux() => spy::write_debug_ir(&mut self.debug_ir, 3, v),
             spy::CLK => self.clock_control.write(v),
             spy::OPC_CONTROL => self.opc_control.write(v),
             spy::MODE => {
@@ -2668,7 +2524,7 @@ impl Machine {
         // The Ethernet device, which `PROG.UNIBUS.RESET` does not reach:
         // disabled, status `<2>` and `<3>` cleared (QUUX's Ethernet
         // contract, §2.7).
-        if self.geometry.ethernet() {
+        if self.geometry.quux() {
             self.ethernet.reset();
         }
         self.timers = Timers::new();
@@ -2715,21 +2571,18 @@ impl Machine {
             // width in 31:16 and height in 15:0; bits a pixel in 31:16 and
             // words a line in 15:0; and the buffer's first physical address.
             let (width, height, words_per_line) = self.tv.screen();
-            let paged = self.geometry.paged();
             return Word::from(match phys & 0o377 {
-                // Revision 14 (A14.9): word 2 the TLB's entries, word 13
-                // the buffer's device-window address, 220-227 the memory
-                // system's words.
-                0o2 if paged => self.tlb.len() as u32,
-                0o13 if paged => crate::tlb::DEVICE_WINDOW,
-                // Revision 15 (A15b.1): word 25 the microcycle in units of
-                // 0.5 ns, word 225 the posted writes answered with an error.
-                0o25 if self.geometry.extended() => self.period as u32,
-                0o225 if self.geometry.extended() => self.posted_write_errors,
-                k @ 0o220..=0o227 if paged => self.memory_words.read(k).unwrap_or(0),
+                // A14.9: word 2 the TLB's entries, word 13 the buffer's
+                // device-window address, 220-227 the memory system's words.
+                0o2 => self.tlb.len() as u32,
+                0o13 => crate::tlb::DEVICE_WINDOW,
+                // A15b.1: word 25 the microcycle in units of 0.5 ns, word
+                // 225 the posted writes answered with an error.
+                0o25 => self.period as u32,
+                0o225 => self.posted_write_errors,
+                k @ 0o220..=0o227 => self.memory_words.read(k).unwrap_or(0),
                 0o11 => (width as u32) << 16 | height as u32,
                 0o12 => 1 << 16 | words_per_line as u32,
-                0o13 => WINDOW_13,
                 // The board name (contract HD §6.4).
                 k @ 0o20..=0o24 => self.board_name_word(k - 0o20),
                 // The register page (contract Q2): who interrupted, the
@@ -2753,20 +2606,10 @@ impl Machine {
                 }
                 // The Ethernet device (QUUX's Ethernet contract, §2.2), at
                 // the machine's clock.
-                k @ 0o240..=0o257 if self.geometry.ethernet() => {
+                k @ 0o240..=0o257 => {
                     self.advance_ethernet();
                     self.ethernet.machine_read(k)
                 }
-                // The network (contract Q4): the Chaosnet interface's five
-                // registers (contract Q13), to revision 15. On 16 they are
-                // reserved, as the rest of the page's are (§8 R4).
-                k @ 0o140..=0o147 if self.geometry.chaos() => match network_register(k, false) {
-                    Some(r) => {
-                        let now = self.chaos_time();
-                        self.ioboard.read(r, now) as u32
-                    }
-                    None => 0,
-                },
                 // Block-disk (contract Q13), when it is fitted.
                 k @ 0o200..=0o203 => match self.block_disk.as_mut() {
                     Some(d) => {
@@ -2782,18 +2625,11 @@ impl Machine {
                 k => self.quux_input.read(k).unwrap_or(w),
             });
         }
-        if self.geometry.paged() {
-            return match self.space_14(phys) {
-                Space13::Window(off) => UNBOXED_TAG | Word::from(self.tv.read_buffer(off)),
-                Space13::Main(a) => self.main[a],
-                Space13::Nothing => 0,
-            };
-        }
         if self.geometry.has_register_page() {
-            return match self.space_13(phys) {
-                Space13::Window(off) => UNBOXED_TAG | Word::from(self.tv.read_buffer(off)),
-                Space13::Main(a) => self.main[a],
-                Space13::Nothing => 0,
+            return match self.space_14(phys) {
+                Space::Window(off) => UNBOXED_TAG | Word::from(self.tv.read_buffer(off)),
+                Space::Main(a) => self.main[a],
+                Space::Nothing => 0,
             };
         }
         if let Some(off) = self.tv.buffer_offset(phys) {
@@ -2835,32 +2671,18 @@ impl Machine {
         tv::control_register(phys).filter(|&r| self.tv.control_registers() >> r & 1 != 0)
     }
 
-    /// Revision 13, past the register page: the window's word, main
-    /// memory's, or nothing there, which sets word 101 `<0>`
-    /// ([`busint::decode_quux_13`]).
-    fn space_13(&mut self, phys: u32) -> Space13 {
-        match busint::decode_quux_13(phys, self.main.len(), self.tv.buffer_words()) {
-            busint::Responder::Memory(_) if phys >= WINDOW_13 => Space13::Window(phys - WINDOW_13),
-            busint::Responder::Memory(_) => Space13::Main(phys as usize),
-            _ => {
-                self.bus_error |= bus_error::XBUS_NXM;
-                Space13::Nothing
-            }
-        }
-    }
-
-    /// Revision 14, past the register page: the bus address `bus` in main
+    /// QUUX, past the register page: the bus address `bus` in main
     /// memory, the frame buffer in the device window's slice 0, or nothing
     /// there, which sets word 101 `<0>` ([`busint::decode_quux_14`]).
-    fn space_14(&mut self, bus: u32) -> Space13 {
+    fn space_14(&mut self, bus: u32) -> Space {
         match busint::decode_quux_14(bus, self.main.len(), self.tv.buffer_words()) {
             busint::Responder::Memory(_) if bus & crate::tlb::DEVICE != 0 => {
-                Space13::Window(bus & !crate::tlb::DEVICE)
+                Space::Window(bus & !crate::tlb::DEVICE)
             }
-            busint::Responder::Memory(_) => Space13::Main(bus as usize),
+            busint::Responder::Memory(_) => Space::Main(bus as usize),
             _ => {
                 self.bus_error |= bus_error::XBUS_NXM;
-                Space13::Nothing
+                Space::Nothing
             }
         }
     }
@@ -2908,19 +2730,10 @@ impl Machine {
                 // The Ethernet device (QUUX's Ethernet contract, §2.2):
                 // what was due is done first. The pipeline holds a write of
                 // 244 or 250 until every earlier write is answered (§2.5).
-                k @ 0o240..=0o257 if self.geometry.ethernet() => {
+                k @ 0o240..=0o257 => {
                     self.advance_ethernet();
                     let time = self.time_base();
                     self.ethernet.write(k, value, self.ns, time, &self.main);
-                }
-                // The network: the CSR and the write buffer; writes of its
-                // other words are ignored (contract Q13). To revision 15;
-                // reserved on 16 (§8 R4).
-                k @ 0o140..=0o147 if self.geometry.chaos() => {
-                    if let Some(r) = network_register(k, true) {
-                        let now = self.chaos_time();
-                        self.ioboard.write(r, value as u16, now);
-                    }
                 }
                 // Block-disk (contract Q13): a transfer is a bus master
                 // reading and writing physical memory directly, which is
@@ -2941,10 +2754,10 @@ impl Machine {
                     let ns = self.device_ns();
                     self.tv.write_control(0, value, ns);
                 }
-                // Revision 15's word 225: a write clears it (A15b.1).
-                0o225 if self.geometry.extended() => self.posted_write_errors = 0,
-                // Revision 14's memory system's words (A14.9).
-                k @ 0o220..=0o227 if self.geometry.paged() => {
+                // Word 225: a write clears it (A15b.1).
+                0o225 => self.posted_write_errors = 0,
+                // The memory system's words (A14.9).
+                k @ 0o220..=0o227 => {
                     self.memory_words.write(k, value);
                 }
                 k => {
@@ -2954,18 +2767,16 @@ impl Machine {
             return;
         }
         if self.geometry.has_register_page() {
-            let space =
-                if self.geometry.paged() { self.space_14(phys) } else { self.space_13(phys) };
-            match space {
+            match self.space_14(phys) {
                 // The window stores the field and drops the tag (G1 §4.2).
-                Space13::Window(off) => self.tv.write_buffer(off, value),
-                Space13::Main(a) => {
+                Space::Window(off) => self.tv.write_buffer(off, value),
+                Space::Main(a) => {
                     self.main[a] = word;
                     if let Some(log) = self.store_log.as_mut() {
                         log.push(a as u32);
                     }
                 }
-                Space13::Nothing => {}
+                Space::Nothing => {}
             }
             return;
         }
@@ -3042,25 +2853,12 @@ impl Default for Machine {
 /// `MAP[MD]` before any memory cycle is what would fix it.
 pub const LVMO_AT_POWER_ON: u32 = (1 << 23) | (1 << 22) | 0x3fff;
 
-/// **Revision 13's physical space** (contract G1 §3.2, G2 §4.1): 28-bit
-/// word addresses, main memory from 0, the frame buffer window from
-/// [`WINDOW_13`], the register page at the last page, and nothing
-/// anywhere else.
-///
-/// The register page, `1777777400`-`1777777777` ([`Geometry::feature_word`]).
-pub const REGISTER_PAGE_13: u32 = 0o1777777400;
-
 /// The board name's most characters, 4 to a word in feature words 20-24
 /// (contract HD §6.4).
 pub const BOARD_NAME_CHARS: usize = 20;
 
 /// muir-sim's board name, on both engines.
 pub const BOARD_NAME: &str = "muir-sim";
-
-/// The frame buffer window, `1760000000`-`1777775777`: the video
-/// controller's buffer from its base, 4 bytes a word, the field only (G1
-/// §4.2). Main memory ends below it.
-pub const WINDOW_13: u32 = 0o1760000000;
 
 /// The tag a word read from the window, a 4-byte transfer or the file
 /// device's buffers carries: `005`, the unboxed fixnum's (G1 §2.6).
@@ -3073,23 +2871,8 @@ pub const UNBOXED_TAG: Word = 0o005 << 32;
 /// its word, and every read of the stack returns them.
 pub const SPC_WORD: u32 = 0o1777777;
 
-/// Revision 13's invalid level-2 block, whose 32 entries the software
-/// keeps 0: what level 1 reads for an address with `<31:28>` not zero
-/// (A1.7; today's `A-LEVEL-1-MAP-INVALID`, `77`).
-pub const MAP_INVALID_BLOCK_13: u32 = 0o177;
-
-/// Revision 13's level-2 entry: 28 bits, the 18-bit physical page and the
-/// ten bits above it (A1.7, which corrects G1 §3.3's 29).
-pub const MAP_LEVEL_2_13: u32 = (1 << 28) - 1;
-
-/// Revision 13's level-2 index: the block level 1 gives, and `VA<14:10>`
-/// in it (A1.7).
-pub fn map_level_2_index_13(l1: u32, addr: u32) -> usize {
-    (((l1 & 0o177) << 5) | ((addr >> 10) & 0o37)) as usize
-}
-
-/// Where a revision-13 physical address lands past the register page.
-enum Space13 {
+/// Where a bus address lands past the register page.
+enum Space {
     /// The frame buffer window, at this word of the buffer.
     Window(u32),
     /// Main memory, at this word.
@@ -3099,9 +2882,9 @@ enum Space13 {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Translation {
-    /// 22-bit physical address; 28 bits on revision 13.
+    /// 22-bit physical address; on QUUX a 29-bit bus address.
     pub physical: u32,
-    /// 14-bit physical page number; 18 bits on revision 13, of 1024 words.
+    /// 14-bit physical page number; on QUUX 18 bits, of 1024 words.
     pub page: u32,
     pub l1_data: u32,
     pub l2_data: u32,
@@ -3204,25 +2987,18 @@ impl Machine {
         w.u16(*pdl_index);
         w.word(*q);
         w.u16(*opc);
-        // `<31:0>` with NEED-FETCH in bit 31 to revision 13, as always;
-        // revision 14's counter's `<33:32>` and its NEED-FETCH go at the
-        // end, below.
+        // `<31:0>`; on the CADR with NEED-FETCH in bit 31. QUUX's counter's
+        // `<33:32>` and its NEED-FETCH go at the end, below.
         w.u32(*lc as u32);
         w.word(*vma);
         w.word(*md);
         w.u32(*interrupt_control);
         w.u16(*dispatch_constant);
         w.u32s(if wide { &l1_map[..] } else { &l1_map[..2048] });
-        // The level-1 entry's bits, 0 on revision 14, which has no level-1
-        // map; revision 15, which has none either, writes its revision
-        // with `<7>` set, [`REVISION_15_MARK`] (A15b.13).
-        w.u8(if geometry.ethernet() {
-            REVISION_16_MARK
-        } else if geometry.extended() {
-            REVISION_15_MARK
-        } else {
-            geometry.l1_bits as u8
-        });
+        // The level-1 entry's bits on the CADR; QUUX, which has no level-1
+        // map, writes its revision with `<7>` set, [`REVISION_16_MARK`]
+        // (A15b.13).
+        w.u8(if geometry.quux() { REVISION_16_MARK } else { geometry.l1_bits as u8 });
         w.u8(geometry.pdl_bits as u8);
         w.bool(geometry.muldiv);
         w.bool(geometry.tick);
@@ -3262,23 +3038,18 @@ impl Machine {
         quux_input.save(w);
         w.u64(*cycles);
         w.u64(*ns);
-        // Revision 14's own (A14.14), after everything revision 13 has:
-        // `LC<40:32>`, NEED-FETCH and the counter's top two bits, and the
-        // memory system's words. The TLB is not kept; the latched entry
-        // behind `MAP(MD)`'s fault bits is the engine's.
-        if geometry.paged() {
+        // QUUX's own, at the end (A14.14, A15b.13): `LC<40:32>`,
+        // NEED-FETCH and the counter's top two bits, the memory system's
+        // words and the PDL buffer redirect's copies; word 225; and the
+        // Ethernet device. The TLB is not kept; the latched entry behind
+        // `MAP(MD)`'s fault bits is the engine's. The control store's 64
+        // bits are in its words above.
+        if geometry.quux() {
             w.u16((*lc >> 32) as u16);
             memory_words.save(w);
             w.u32(pdl_copies.base);
             w.u16(pdl_copies.head);
-        }
-        // Revision 15's own (A15b.13), after revision 14's: word 225. The
-        // control store's 64 bits are in its words above.
-        if geometry.extended() {
             w.u32(*posted_write_errors);
-        }
-        // Revision 16's own, after revision 15's: the Ethernet device.
-        if geometry.ethernet() {
             ethernet.save(w);
         }
     }
@@ -3355,31 +3126,33 @@ impl Machine {
             }
             self.overflow = r.bool()?;
         }
-        self.timers = Timers::load(r)?;
-        self.macro_dispatch.load(r)?;
-        self.rtc = Rtc::load(r)?;
-        self.file_device.load(r)?;
-        self.dma_written = r.bool()?;
-        // The CADR, or QUUX, revision 13 or 14, with a PDL buffer of 1K to 16K
-        // words. A 32-bit QUUX is a retired revision's, 12 with the fused
-        // return and 11 without, which wrote the CADR's format version and
-        // is known by these fields: refused as what it is.
+        // The CADR, or QUUX with a PDL buffer of 1K to 16K words, its
+        // revision's mark in the level-1 entry's place (A15b.13). A QUUX of
+        // an earlier hardware revision is refused as what it is: 13 by its
+        // 7-bit level-1 entry, 14 by none (A14.14), 15 by its mark; and a
+        // 32-bit one, 12 with the fused return and 11 without, which wrote
+        // the CADR's format version, by these fields.
         self.geometry = match (word_bits, l1_bits, pdl_bits, muldiv, tick, fused) {
             (32, 5, 10, false, false, false) => Geometry::CADR,
-            (40, 7, 10..=14, true, true, true) => Geometry { pdl_bits, ..Geometry::QUUX },
-            // Revision 14 (A14.14): no level-1 map, its entry 0 bits.
-            (40, 0, 10..=14, true, true, true) => Geometry { pdl_bits, ..Geometry::QUUX_14 },
-            // Revision 15 (A15b.13): its mark in the level-1 entry's place.
-            (40, l1, 10..=14, true, true, true) if l1 == u32::from(REVISION_15_MARK) => {
-                Geometry { pdl_bits, ..Geometry::QUUX_15 }
-            }
             (40, l1, 10..=14, true, true, true) if l1 == u32::from(REVISION_16_MARK) => {
-                Geometry { pdl_bits, ..Geometry::QUUX_16 }
+                Geometry { pdl_bits, ..Geometry::QUUX }
+            }
+            (40, l1, 10..=14, true, true, true)
+                if l1 == 7 || l1 == 0 || l1 == u32::from(REVISION_15_MARK) =>
+            {
+                let revision = match l1 {
+                    7 => 13,
+                    0 => 14,
+                    _ => 15,
+                };
+                return Err(crate::checkpoint::unsupported(format!(
+                    "a checkpoint of QUUX revision {revision}, which this build does not run: it runs the CADR and QUUX; it resumes on muir-sim's tag {EARLIER_REVISIONS_TAG}"
+                )));
             }
             (32, 6, 10..=14, true, true, fused) => {
                 let revision = if fused { 12 } else { 11 };
-                return Err(crate::checkpoint::bad(format!(
-                    "a checkpoint of QUUX revision {revision}, which this build no longer runs: it runs the CADR and QUUX revisions 13 to 16, and a revision-{revision} checkpoint resumes only on an earlier muir-sim"
+                return Err(crate::checkpoint::unsupported(format!(
+                    "a checkpoint of QUUX revision {revision}, which this build does not run: it runs the CADR and QUUX, and a revision-{revision} checkpoint resumes only on an earlier muir-sim"
                 )));
             }
             _ => {
@@ -3388,7 +3161,12 @@ impl Machine {
                 )));
             }
         };
-        if !self.geometry.extended() {
+        self.timers = Timers::load(r)?;
+        self.macro_dispatch.load(r)?;
+        self.rtc = Rtc::load(r)?;
+        self.file_device.load(r)?;
+        self.dma_written = r.bool()?;
+        if !self.geometry.quux() {
             for w in self.prom.iter_mut().chain(self.imem.iter_mut()) {
                 *w = w.low_48();
             }
@@ -3433,7 +3211,7 @@ impl Machine {
         if self.geometry.wide() && r.word_bits() == 32 {
             Machine::with_memory_boards(1).load_to_geometry(r)?;
             return Err(crate::checkpoint::bad(
-                "a checkpoint of 32-bit words, the CADR's, and this is QUUX, revision 13",
+                "a checkpoint of 32-bit words, the CADR's, and this is QUUX",
             ));
         }
         self.load_to_geometry(r)?;
@@ -3487,42 +3265,17 @@ impl Machine {
         self.quux_input.load(r)?;
         self.cycles = r.u64()?;
         self.ns = r.u64()?;
-        if self.geometry.paged() {
+        if self.geometry.quux() {
             self.lc |= u64::from(r.u16()?) << 32;
             self.memory_words = crate::tlb::Words::load(r)?;
             self.pdl_copies =
                 crate::tlb::PdlCopies { base: r.u32()?, head: r.u16()? & crate::tlb::PDL_INDEX };
             // The TLB is not kept: the resume starts with it swept.
             self.tlb = self.tlb.swept_copy();
-        }
-        if self.geometry.extended() {
             self.posted_write_errors = r.u32()?;
-        }
-        if self.geometry.ethernet() {
             self.ethernet.load(r)?;
             self.ethernet.check(self.main.len())?;
         }
         Ok(())
-    }
-}
-
-/// The Chaosnet interface's register a word of QUUX's register page names,
-/// read or written (contract Q4; contract Q13): 140 the CSR, read and
-/// written; 141 my address read and the write buffer written; 142 the read
-/// buffer, 143 the bit count and 145 START, each read only. Only these five
-/// are decoded: 144, 146 and 147 are reserved, where the CADR's board
-/// answers the CSR at `764150` and the bit count at `764156` as aliases,
-/// and a write of 142, 143 or 145 goes nowhere, where the board takes one
-/// of `764152` as the write buffer's ([`ioboard::answers`]).
-fn network_register(word: u32, write: bool) -> Option<u32> {
-    use crate::chaos::interface as chaos;
-    match (word, write) {
-        (0o140, _) => Some(chaos::CSR),
-        (0o141, false) => Some(chaos::MY_ADDRESS),
-        (0o141, true) => Some(chaos::WRITE_BUFFER),
-        (0o142, false) => Some(chaos::READ_BUFFER),
-        (0o143, false) => Some(chaos::BIT_COUNT),
-        (0o145, false) => Some(chaos::START),
-        _ => None,
     }
 }

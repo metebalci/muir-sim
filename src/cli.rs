@@ -384,7 +384,7 @@ struct Pace {
     from: Instant,
     /// The machine's time there, in its units.
     ns: u64,
-    /// The machine's units a nanosecond: 1, but 2 on QUUX revision 15,
+    /// The machine's units a nanosecond: 1, but 2 on QUUX,
     /// whose clock counts units of 0.5 ns ([`Machine::time_base`]).
     per_ns: u64,
 }
@@ -1079,8 +1079,6 @@ const OWN_FLAGS: &[(&str, Whose)] = &[
     ("--memory-timing", Whose::Quux),
     ("--microcycle-ns", Whose::Quux),
     ("--rtc", Whose::Quux),
-    ("--sync-cycle-ticks", Whose::Quux),
-    ("--tlb", Whose::Quux),
     ("--video-size", Whose::Quux),
 ];
 
@@ -1126,12 +1124,12 @@ const USAGE_QUUX: &str = "usage: quux [--micro|--rtl] [--cache <words>] [--chaos
             [--ip-gateway A.B.C.D] [--keyboard-boot <keys>]
             [--keyboard-mapping <file>] [--keyboard-mapping-dump]
             [--keyboard-mapping-trace] [--main-memory-size <n>MW]
-            [--memory-timing <r>,<w>[,<o>]] [--microcycle-ns <ns>]
+            [--memory-timing <r>,<w>,<o>] [--microcycle-ns <ns>]
             [--no-auto-boot] [--no-pace]
             [--pace] [--prom <file>] [--resume <file>]
             [--rtc <unix-seconds>|host] [--stop-after <microcycles>]
             [--stop-at <pc>] [--stop-at-prom <pc>]
-            [--sync-cycle-ticks <k>] [--terminal [<endpoint>]] [--tlb <entries>]
+            [--terminal [<endpoint>]]
             [--tv-capture <gif>] [--tv-capture-no-time]
             [--video-size <w>x<h>] [-h|--help] [-V|--version]";
 
@@ -1435,7 +1433,7 @@ const HELP: &[(Whose, &str)] = &[
     (
         Whose::Quux,
         "  --ethernet-mac XX:XX:XX:XX:XX:XX
-                               QUUX revision 16: the Ethernet device's MAC
+                               QUUX: the Ethernet device's MAC
                                address, register-page words 253-254, and
                                the address its filter takes besides
                                broadcast. Not a group address.
@@ -1445,7 +1443,7 @@ const HELP: &[(Whose, &str)] = &[
     (
         Whose::Quux,
         "  --ethernet-socket <path>[,clocked]
-                               QUUX revision 16: what sits behind the
+                               QUUX: what sits behind the
                                Ethernet device, a UNIX stream socket muir
                                connects to. Each Ethernet frame is a 32-bit
                                big-endian length and its bytes (QEMU's
@@ -1456,7 +1454,7 @@ const HELP: &[(Whose, &str)] = &[
     ),
     (
         Whose::Quux,
-        "  --ethernet-trace             QUUX revision 16: every Ethernet frame sent
+        "  --ethernet-trace             QUUX: every Ethernet frame sent
                                and received, to stderr, and why one is
                                refused or dropped.",
     ),
@@ -1471,8 +1469,12 @@ const HELP: &[(Whose, &str)] = &[
                                refuses every write under it. Repeatable, a
                                name once and one default folder; with no
                                default folder / holds the mounts alone and
-                               is read-only. The start lists them.
-                               [default: none; / is empty]",
+                               is read-only. The start lists them. A symlink
+                               is followed only where it stays inside its
+                               folder: a folder of links into another serves
+                               nothing through them, and that other folder is
+                               given whole, or by name. [default: none; / is
+                               empty]",
     ),
     (
         Whose::Cadr,
@@ -1533,7 +1535,7 @@ const HELP: &[(Whose, &str)] = &[
     ),
     (
         Whose::Quux,
-        "  --ip-address A.B.C.D/N       QUUX revision 16: the machine's IPv4 address
+        "  --ip-address A.B.C.D/N       QUUX: the machine's IPv4 address
                                and its prefix length, register-page words 255
                                and 256. N is 1 to 30, and the address a
                                host's: not the subnet's network or broadcast
@@ -1545,7 +1547,7 @@ const HELP: &[(Whose, &str)] = &[
     ),
     (
         Whose::Quux,
-        "  --ip-gateway A.B.C.D         QUUX revision 16: the gateway's IPv4 address,
+        "  --ip-gateway A.B.C.D         QUUX: the gateway's IPv4 address,
                                register-page word 257. There is always one:
                                on --ip-address's subnet, and not 0.0.0.0 or
                                QUUX's own address. A resume keeps the
@@ -1822,38 +1824,24 @@ const HELP: &[(Whose, &str)] = &[
     ),
     (
         Whose::Quux,
-        "  --cache <words>              rtl, QUUX: its memory cache of <words>, 16
-                               or more, in lines of 8, 2-way, a hit in 20 ns:
-                               write-through, by physical address, main
-                               memory and the frame buffer. [default: 4096]",
+        "  --cache <words>              rtl, QUUX: its memory cache of <words>, a
+                               power of two, 16 or more, in lines of 8,
+                               2-way, a hit in two clocks: write-through, by
+                               physical address, main memory and the frame
+                               buffer. [default: 65536]",
     ),
     (
         Whose::Quux,
-        "  --tlb <entries>              QUUX revision 14: its TLB of <entries>, a power
-                               of two from 1024 to 32768, direct-mapped.
-                               [default: 4096]",
+        "  --memory-timing <r>,<w>,<o>  rtl, QUUX: main memory's line fill, its
+                               write and the occupancy between two writes,
+                               in ns, or kria, arty or de25, the boards' own.
+                               [default: kria, 344,215,10]",
     ),
     (
         Whose::Quux,
-        "  --memory-timing <r>,<w>[,<o>]
-                               rtl, QUUX: main memory's line fill and write
-                               in ns, or arty or de25, the boards' own; on
-                               revision 15 the occupancy between two
-                               writes too, <r>,<w>,<o>, or kria, arty or
-                               de25. [default: 380,290; revision 15: kria,
-                               344,215,10]",
-    ),
-    (
-        Whose::Quux,
-        "  --microcycle-ns <ns>         QUUX revisions 15 and 16: the clock's period,
-                               the microcycle, 5 to 63.5 in steps of 0.5, on
-                               both engines. [default: 10]",
-    ),
-    (
-        Whose::Quux,
-        "  --sync-cycle-ticks <k>       sync: a microcycle's 10 ns ticks, the
-                               board's: its fit proves its longest path
-                               settles in them. [default: 4]",
+        "  --microcycle-ns <ns>         QUUX: the clock's period, the microcycle, 5
+                               to 63.5 in steps of 0.5, on both engines.
+                               [default: 10]",
     ),
     (Whose::Cadr, "  --tv netlist|model           chip: the display. [default: netlist]"),
     (
@@ -2561,8 +2549,7 @@ fn shown(path: &Path) -> String {
 
 /// QUUX's main memory from `--main-memory-size`'s word, in 64K-word boards
 /// as the machine is built: a whole number of megawords with the unit
-/// written, `32MW`, in [`Geometry::main_memory_mw`]'s range for the
-/// revision. Nothing else is taken --- no KW, no fraction, and never a
+/// written, `32MW`, in [`Geometry::main_memory_mw`]'s range. Nothing else is taken --- no KW, no fraction, and never a
 /// bare M, which could be read as megabytes --- and the word is
 /// case-sensitive, as every flag's word is.
 ///
@@ -2581,8 +2568,7 @@ fn main_memory_amount(
     let range = geometry.main_memory_mw();
     if !range.contains(&n) {
         return Err(format!(
-            "--main-memory-size {word}: revision {}'s main memory is {}MW to {}MW",
-            geometry.revision().unwrap_or(0),
+            "--main-memory-size {word}: QUUX's main memory is {}MW to {}MW",
             range.start(),
             range.end()
         ));
@@ -2716,7 +2702,7 @@ fn machine(
     m
 }
 
-/// Revision 16's Ethernet device as the run's flags make it (QUUX's
+/// QUUX's Ethernet device as the run's flags make it (QUUX's
 /// Ethernet contract, §3): `--ethernet-mac`'s address in 253-254 and its
 /// filter, `--ip-address` and `--ip-gateway`'s in 255-257,
 /// `--ethernet-trace`, and the socket's peer behind it. A resume loads
@@ -2728,7 +2714,7 @@ fn fit_ethernet(
     (host, trace): (crate::ethernet_device::Host, bool),
     peer: Option<Box<dyn crate::ethernet_device::Peer>>,
 ) {
-    if !m.geometry.ethernet() {
+    if !m.geometry.quux() {
         return;
     }
     m.ethernet.host = host;
@@ -2748,18 +2734,9 @@ fn fit_ethernet(
 /// back on: 512 zero words are not a boot PROM.
 fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry, resuming: bool) -> Vec<Insn> {
     let Some(path) = file else {
-        // PROM 2001 is MIT's sections, which revision 15 does not read
-        // (A15b.1), and no PROM of revision 15's is built in; a resume
-        // takes the checkpoint's.
-        if geometry.extended() && resuming {
+        // A resume takes the checkpoint's.
+        if geometry.quux() && resuming {
             return vec![Insn::extended(0); crate::machine::PROM_WORDS];
-        }
-        if geometry.extended() {
-            // Revision 16 loads revision 15's files (QUUX's Ethernet contract, §10).
-            usage(&format!(
-                "QUUX revision {} has no built-in boot PROM: --prom <file>, a revision-15 .mcr",
-                geometry.revision().unwrap_or(15)
-            ));
         }
         return if geometry == crate::machine::Geometry::CADR {
             crate::prom::boot_prom()
@@ -2786,21 +2763,23 @@ fn boot_prom(file: Option<&Path>, geometry: crate::machine::Geometry, resuming: 
 /// nothing about a copy announces which it is --- so a run on a file of
 /// one's own says how the file stands to MIT's: word for word, or how
 /// many words apart.
-fn prom_shown(file: Option<&Path>, prom: &[Insn], geometry: crate::machine::Geometry) -> String {
+fn prom_shown(
+    file: Option<&Path>,
+    prom: &[Insn],
+    geometry: crate::machine::Geometry,
+    resuming: bool,
+) -> String {
     let Some(path) = file else {
-        if geometry.extended() {
+        // QUUX's checkpoint carries its PROM ([`boot_prom`]).
+        if geometry.quux() && resuming {
             return "the checkpoint's".to_string();
         }
         return if geometry == crate::machine::Geometry::CADR {
             "built in, System 100's own sys/ubin/promh.mcr, version 9".to_string()
         } else {
-            "built in, QUUX's data/quux-promh.mcr, version 2001, at 36000".to_string()
+            "built in, QUUX's data/quux-promh.mcr, version 2002, at 36000".to_string()
         };
     };
-    // Revision 15's PROM has no built-in one to be measured against.
-    if geometry.extended() {
-        return format!("{}, a revision-15 .mcr", shown(path));
-    }
     let (theirs, whose) = if geometry == crate::machine::Geometry::CADR {
         (crate::prom::boot_prom(), "MIT's own")
     } else {
@@ -3791,9 +3770,8 @@ fn time_engine<S: Stepper>(
         let now = m.ns;
         port.poll_cable(&mut m.ioboard.serial.cable, now);
     }
-    // Revision 15's hardware runs at its period, 10 ns at 20 units by
-    // default, on either engine; every other machine at the engine's own
-    // microcycle.
+    // QUUX runs at its period, 10 ns at 20 units by default, on either
+    // engine; the CADR at the engine's own microcycle.
     let cycle_ns = s.engine().machine().period_ns().unwrap_or(s.engine().nominal_cycle_ns() as f64);
     report(name, ran, t.elapsed().as_secs_f64(), cycle_ns);
     hold.conclude(s.engine(), &stop, ran, halt);
@@ -4556,55 +4534,41 @@ fn refuse_other_executable((path, c): &(PathBuf, Checkpoint), exe: &str) {
     }
 }
 
-/// **Which revision `quux` runs** (contract G3 revision 14): `geometry`
-/// as it is, revision 13, unless `MUIR_QUUX_REVISION` says 14, 15 or 16.
-/// Unset or `13` is revision 13, the released machine; any other value is
-/// refused at the start, naming the four. `cadr` does not read it. The switch is
-/// not a documented flag: a bitstream, which muir-fpga builds for one
-/// revision, could not carry it.
-fn quux_revision(geometry: crate::machine::Geometry) -> crate::machine::Geometry {
-    use crate::machine::Geometry;
-    if geometry != Geometry::QUUX {
-        return geometry;
-    }
-    match std::env::var_os("MUIR_QUUX_REVISION") {
-        None => geometry,
-        Some(v) if v == "13" => geometry,
-        Some(v) if v == "14" => Geometry::QUUX_14,
-        Some(v) if v == "15" => Geometry::QUUX_15,
-        Some(v) if v == "16" => Geometry::QUUX_16,
-        Some(v) => {
-            eprintln!(
-                "{}: MUIR_QUUX_REVISION={:?}: revision 13, 14, 15 or 16",
-                executable(),
-                v.to_string_lossy()
-            );
-            std::process::exit(2);
-        }
-    }
-}
-
-/// **A checkpoint of the other revision is refused**, naming the revision
-/// that wrote it and how to resume it: a revision-14 checkpoint's
-/// addresses, TLB and location counter are revision 14's, and the reverse
-/// (A14.13). Settled, like [`refuse_other_executable`], before anything
-/// is built.
-fn refuse_other_revision((path, c): &(PathBuf, Checkpoint), geometry: crate::machine::Geometry) {
+/// **A checkpoint of a machine this build does not run is refused** as
+/// that machine's, an earlier QUUX hardware revision's, before anything is
+/// built: its body says the revision, and the refusal names what runs it.
+fn refuse_earlier_revision((path, c): &(PathBuf, Checkpoint)) {
     if c.engine == "chip" {
         return;
     }
-    let Ok(saved) = crate::machine::Machine::checkpointed_geometry_at(&c.body, c.word_bits) else {
-        return;
-    };
-    // A retired revision, 11 or 12, is refused by what it is when the
-    // checkpoint is read.
-    if let (Some(theirs @ (13..=16)), Some(ours)) = (saved.revision(), geometry.revision())
-        && theirs != ours
+    if let Err(e) = crate::machine::Machine::checkpointed_geometry_at(&c.body, c.word_bits)
+        && e.kind() == std::io::ErrorKind::Unsupported
     {
-        let p = path.display();
-        usage(&format!(
-            "--resume {p} is revision {theirs}'s, and this is revision {ours}: MUIR_QUUX_REVISION={theirs} quux --resume {p}"
-        ));
+        usage(&format!("--resume {}: {e}", path.display()));
+    }
+}
+
+/// **`MUIR_QUUX_REVISION`**, which earlier commits read to choose QUUX's
+/// hardware revision: set to 16, the revision `quux` runs, it is taken and
+/// says nothing, as the cards' resume commands and older wrappers set it;
+/// any other value is refused at the start, naming the tag of muir-sim's
+/// commit that runs the earlier revisions. `cadr` does not read it.
+fn check_quux_revision(geometry: crate::machine::Geometry) {
+    if !geometry.quux() {
+        return;
+    }
+    match std::env::var_os("MUIR_QUUX_REVISION") {
+        None => {}
+        Some(v) if v.to_str() == Some(&crate::machine::QUUX_REVISION.to_string()) => {}
+        Some(v) => {
+            eprintln!(
+                "{}: MUIR_QUUX_REVISION={:?}: this quux runs one QUUX and takes no other; an earlier QUUX hardware revision runs on muir-sim's tag {}",
+                executable(),
+                v.to_string_lossy(),
+                crate::machine::EARLIER_REVISIONS_TAG
+            );
+            std::process::exit(2);
+        }
     }
 }
 
@@ -4636,16 +4600,12 @@ fn refuse_machine(
 /// refused by the flag's name: every instant in it is on the time it was
 /// run on.
 fn refuse_timing_model((path, _): &(PathBuf, Checkpoint), saved: TimingModel, flag: TimingModel) {
-    let said = |m: TimingModel| match m {
-        TimingModel::Sync { cycle_ticks, .. } => format!("sync of {cycle_ticks} ticks"),
-        _ => m.name().to_string(),
-    };
     if saved != flag {
         usage(&format!(
             "--resume {}: written under --timing-model {}, and this run is under {}",
             path.display(),
-            said(saved),
-            said(flag)
+            saved.name(),
+            flag.name()
         ));
     }
 }
@@ -4707,7 +4667,7 @@ fn resume_engine<E: Engine>(
     }
     refuse_color_tv(path, e.machine().color_tv.is_some(), color_tv.fitted());
     refuse_rtc(path, e.machine().rtc, rtc);
-    if geometry.ethernet() {
+    if geometry.quux() {
         refuse_ethernet_host(path, e.machine().ethernet.host, asked);
     }
     let m = e.machine();
@@ -4716,7 +4676,7 @@ fn resume_engine<E: Engine>(
     } else {
         format!("{} memory boards", m.memory_boards())
     };
-    // `ns` is in the machine's units, 0.5 ns on revision 15: the line says
+    // `ns` is in the machine's units, 0.5 ns on QUUX: the line says
     // nanoseconds, with ".5" where the instant is odd.
     eprintln!(
         "resumed: {} at {} microcycles, {} ns, {memory}",
@@ -5591,14 +5551,12 @@ fn time_chip(
 /// checkpoint the other one wrote. `netlists` are the boards `--chip`
 /// builds, which only `cadr` takes and so only `cadr` passes.
 ///
-/// `quux` is revision 13 unless `MUIR_QUUX_REVISION` says 14
-/// ([`quux_revision`]), read here once, so that everything after it ---
-/// the start's lines, a resume's refusal, the machine --- is the
-/// revision's.
+/// `quux` refuses a set `MUIR_QUUX_REVISION` other than its revision
+/// ([`check_quux_revision`]).
 pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     let exe = executable_of(geometry);
     let _ = EXECUTABLE.set(exe);
-    let geometry = quux_revision(geometry);
+    check_quux_revision(geometry);
     let mut which: Option<Which> = None;
     let mut packs: Vec<Pack> = Vec::new();
     // The glass TTYs asked for, in the order the flags came. Bound after
@@ -5639,12 +5597,8 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     let mut video_size: Option<(usize, usize)> = None;
     let mut timing_model = TimingModel::Cadr;
     let mut timing_given = false;
-    let mut sync_cycle_ticks: Option<u8> = None;
     let mut cache: Option<crate::cache::CacheConfig> = None;
-    // Revision 14's TLB, `--tlb` (A14.4).
-    let mut tlb: Option<usize> = None;
-    let mut memory_timing: Option<crate::cache::MemoryTiming> = None;
-    // Revision 15's: the period, `--microcycle-ns`, in units of 0.5 ns,
+    // QUUX's: the period, `--microcycle-ns`, in units of 0.5 ns,
     // and the port's timing with its occupancy (MP2b rulings Q6, Q15, Q17).
     let mut microcycle: Option<u64> = None;
     let mut port_timing: Option<crate::pipeline::PortTiming> = None;
@@ -5653,7 +5607,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     let mut rtc = crate::machine::Rtc::Host;
     // QUUX's file device's folders (contract Q9).
     let mut file_roots = crate::file_device::Mounts::default();
-    // Revision 16's Ethernet device (QUUX's Ethernet contract, §3): what
+    // QUUX's Ethernet device (QUUX's Ethernet contract, §3): what
     // sits behind it, the MAC address its filter takes, and the trace. The
     // socket is connected after the flags are read.
     let mut ethernet_socket: Option<crate::ethernet_socket::Socket> = None;
@@ -5809,7 +5763,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 | "--chaos-udp"
                 | "--chaos-udp-peer"
                 | "--chaos-udp-default-peer"),
-            ) if !geometry.chaos() => usage(&format!("{flag}: QUUX has no Chaosnet interface")),
+            ) if geometry.quux() => usage(&format!("{flag}: QUUX has no Chaosnet interface")),
             (None, "--chaos-address") => {
                 // One address: this machine's sixteen switches, in octal
                 // or subnet:host. The file and time host's is not muir's
@@ -5895,72 +5849,38 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 Some("model") => tv = false,
                 _ => usage("--tv wants netlist or model"),
             },
-            // The CADR's delay lines or muir-fpga's grid under them;
-            // QUUX's `sync` is `quux`'s own, and its ticks the flag's.
-            (None, "--timing-model") => match args.next().as_deref() {
-                Some("sync") => usage("--timing-model wants cadr or fpga: sync is quux's timing"),
-                model => match model.and_then(TimingModel::parse) {
-                    Some(model) => {
-                        timing_model = model;
-                        timing_given = true;
-                    }
-                    None => usage("--timing-model wants cadr or fpga"),
-                },
+            // The CADR's delay lines or muir-fpga's grid under them.
+            (None, "--timing-model") => match args.next().as_deref().and_then(TimingModel::parse) {
+                Some(model) => {
+                    timing_model = model;
+                    timing_given = true;
+                }
+                None => usage("--timing-model wants cadr or fpga"),
             },
             (None, "--cache") => match args.next().as_deref().and_then(|v| v.parse::<u32>().ok()) {
                 Some(words) => {
-                    // As the memory port fits it, its line 8 words.
+                    // As the pipeline's port fits it, its line 8 words.
                     let c = crate::cache::CacheConfig::with_words(words);
-                    if let Err(e) = crate::memory_port::fitted(c).check() {
+                    let fitted = crate::cache::CacheConfig {
+                        line_words: crate::pipeline::port::LINE_WORDS,
+                        ..c
+                    };
+                    if let Err(e) = fitted.check() {
                         usage(&format!("--cache: {e}"));
                     }
                     cache = Some(c);
                 }
                 None => usage("--cache wants its size in words, a power of two"),
             },
-            (None, "--tlb") => match args.next().as_deref().and_then(|v| v.parse::<usize>().ok()) {
-                Some(n)
-                    if n.is_power_of_two()
-                        && (crate::tlb::MIN_ENTRIES..=crate::tlb::MAX_ENTRIES).contains(&n) =>
-                {
-                    tlb = Some(n)
-                }
-                _ => usage("--tlb wants its entries, a power of two from 1024 to 32768"),
-            },
-            (None, "--memory-timing") if geometry.extended() => {
-                // Revision 15's port: three numbers, the occupancy third, or
+            (None, "--memory-timing") => {
+                // The port's timing: three numbers, the occupancy third, or
                 // a board's preset (MP2b rulings Q6, Q17).
                 let t = args.next();
                 port_timing = t.as_deref().and_then(crate::pipeline::PortTiming::parse);
                 if port_timing.is_none() {
                     usage(
-                        "--memory-timing wants <read>,<write>,<occupancy> in ns, or kria, arty or de25, on QUUX revision 15",
+                        "--memory-timing wants <read>,<write>,<occupancy> in ns, or kria, arty or de25",
                     );
-                }
-            }
-            (None, "--memory-timing") => {
-                let t = args.next();
-                if t.as_deref() == Some("kria")
-                    || t.as_deref().is_some_and(|v| v.split(',').count() == 3)
-                {
-                    usage(&format!(
-                        "--memory-timing {} is QUUX revision 15's, with its occupancy: MUIR_QUUX_REVISION=15",
-                        t.as_deref().unwrap_or_default()
-                    ));
-                }
-                memory_timing = match t.as_deref() {
-                    Some("arty") => Some(crate::cache::MemoryTiming::ARTY_Z7_20),
-                    Some("de25") => Some(crate::cache::MemoryTiming::DE25_NANO),
-                    Some(v) => v.split_once(',').and_then(|(r, w)| {
-                        Some(crate::cache::MemoryTiming {
-                            read_ns: r.parse().ok().filter(|&n| n > 0)?,
-                            write_ns: w.parse().ok().filter(|&n| n > 0)?,
-                        })
-                    }),
-                    None => None,
-                };
-                if memory_timing.is_none() {
-                    usage("--memory-timing wants <read>,<write> in ns, arty or de25");
                 }
             }
             (None, "--rtc") => {
@@ -5979,15 +5899,8 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                     None => usage(WANTS),
                 };
             }
-            // The Ethernet device's flags, revision 16's alone: the CADR
-            // refuses them as quux's, above.
-            (
-                None,
-                flag @ ("--ethernet-socket" | "--ethernet-mac" | "--ethernet-trace"
-                | "--ip-address" | "--ip-gateway"),
-            ) if !geometry.ethernet() => {
-                usage(&format!("{flag} is QUUX revision 16's: MUIR_QUUX_REVISION=16"))
-            }
+            // The Ethernet device's flags: the CADR refuses them as quux's,
+            // above.
             (None, "--ethernet-socket") => {
                 match crate::ethernet_socket::parse_socket(&args.next().unwrap_or_default()) {
                     Ok(socket) => ethernet_socket = Some(socket),
@@ -6016,23 +5929,9 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 }
             }
             (None, "--microcycle-ns") => {
-                if !geometry.extended() {
-                    usage("--microcycle-ns is QUUX revision 15's: MUIR_QUUX_REVISION=15");
-                }
                 microcycle = args.next().as_deref().and_then(crate::clock::parse_microcycle_ns);
                 if microcycle.is_none() {
                     usage("--microcycle-ns wants the period in ns, 5 to 63.5 in steps of 0.5");
-                }
-            }
-            (None, "--sync-cycle-ticks") if geometry.extended() => {
-                usage(
-                    "--sync-cycle-ticks is refused on QUUX revision 15, whose clock is --microcycle-ns's",
-                );
-            }
-            (None, "--sync-cycle-ticks") => {
-                match args.next().as_deref().and_then(|v| v.parse::<u8>().ok()).filter(|&k| k > 0) {
-                    Some(k) => sync_cycle_ticks = Some(k),
-                    None => usage("--sync-cycle-ticks wants a count of 10 ns ticks, 1 to 255"),
                 }
             }
             // The CADR's two boards; the video controller is QUUX's
@@ -6267,14 +6166,14 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         }
     }
 
-    // Revision 16's 253-257 (QUUX's Ethernet contract, §3, "Flags"): the
+    // Words 253-257 (QUUX's Ethernet contract, §3, "Flags"): the
     // flags', or their defaults, with the gateway, given or not, held to
     // the address's subnet.
     let ethernet_host = {
         let d = crate::ethernet_device::Host::default();
         let (address, netmask) = ip_address.unwrap_or((d.address, d.netmask));
         let gateway = ip_gateway.unwrap_or(d.gateway);
-        if geometry.ethernet() {
+        if geometry.quux() {
             crate::ethernet_socket::check_gateway(address, netmask, gateway, ip_gateway.is_none())
                 .unwrap_or_else(|e| usage(&e));
         }
@@ -6316,30 +6215,17 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     } else {
         TvBoard::Video
     });
-    // The grid is muir-fpga's, and it is `rtl`'s references its fabric is
-    // held to; `micro` and `chip` keep the board's time.
-    // QUUX drops the delay lines: its timing is `sync`, always, of the
-    // ticks `--sync-cycle-ticks` gives, both flags being their own
-    // machine's alone.
-    if geometry != crate::machine::Geometry::CADR {
-        let cycle_ticks = sync_cycle_ticks.unwrap_or(crate::clock::SYNC_CYCLE_TICKS);
-        timing_model = TimingModel::Sync { cycle_ticks, ilong_ticks: 0 };
-    }
     // QUUX's disk is block-disk and nothing else: muir-sys's PROM,
     // microcode and band for QUUX address the disk by block. The CADR's
     // is MIT's controller, `--disk-controller` choosing its netlist or its
     // model, which is `cadr`'s alone.
     let block_disk = geometry != crate::machine::Geometry::CADR;
     // QUUX's main memory is on its own port and `rtl` times it.
-    if (memory_timing.is_some() || port_timing.is_some()) && which != Which::Rtl {
+    if port_timing.is_some() && which != Which::Rtl {
         usage(&format!(
             "--memory-timing is rtl's, and this run is {}",
             if which == Which::Micro { "micro" } else { "chip" }
         ));
-    }
-    // The TLB is revision 14's.
-    if tlb.is_some() && !geometry.paged() {
-        usage("--tlb is QUUX revision 14's: MUIR_QUUX_REVISION=14");
     }
     // The memory cache is QUUX's, and `rtl` is what times it.
     if cache.is_some() && which != Which::Rtl {
@@ -6587,8 +6473,8 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         (path, c)
     });
     if let Some(r) = &resume {
+        refuse_earlier_revision(r);
         refuse_other_executable(r, exe);
-        refuse_other_revision(r, geometry);
     }
     if let Some((path, c)) = &resume {
         if boards_given && boards != c.memory_boards {
@@ -6808,7 +6694,7 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
     });
     // The Ethernet device's socket (QUUX's Ethernet contract, §3),
     // connected here for the same reason: a peer that is not there stops
-    // the run. The machine's units are revision 16's, 0.5 ns. A clocked
+    // the run. The machine's units are QUUX's, 0.5 ns. A clocked
     // socket's machine waits for its peer between microcycles, where the
     // run loop looks at ^C while it does ([`Clocked`]).
     let clocked =
@@ -6872,7 +6758,12 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             }
         }
         writeln!(s, "engine: {engine}").unwrap();
-        writeln!(s, "prom: {}", prom_shown(prom_file.as_deref(), &prom, geometry)).unwrap();
+        writeln!(
+            s,
+            "prom: {}",
+            prom_shown(prom_file.as_deref(), &prom, geometry, resume.is_some())
+        )
+        .unwrap();
         let memory_kind = match which {
             Which::Chip if main_memory_model => ", model",
             Which::Chip => ", netlist boards on the Xbus",
@@ -6921,12 +6812,10 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
             .unwrap();
         }
         // QUUX's main memory is behind its own port, through its cache
-        // (contract Q6): `rtl` times both.
-        let quux_rtl = geometry.machine_id.is_some() && which == Which::Rtl;
-        let rtl_15 = quux_rtl && geometry.extended();
-        if rtl_15 {
-            // Revision 15's port, in ns and in clocks of the period (MP2b
-            // ruling Q17).
+        // (contract Q6): `rtl`, the pipeline, times both.
+        if geometry.quux() && which == Which::Rtl {
+            // The port, in ns and in clocks of the period (MP2b ruling
+            // Q17).
             let t = port_timing.unwrap_or(crate::pipeline::PortTiming::KRIA);
             let period = microcycle.unwrap_or(crate::clock::PERIOD_15);
             let c = t.clocks(crate::clock::TimeBase::half_ns(period));
@@ -6950,33 +6839,16 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 crate::pipeline::port::LINE_WORDS
             )
             .unwrap();
-        } else if quux_rtl {
-            let t = memory_timing.unwrap_or(crate::cache::MemoryTiming::NOMINAL);
-            writeln!(s, "memory port: a line fill in {} ns, a write in {}", t.read_ns, t.write_ns)
-                .unwrap();
         }
-        // The cache the memory port fits: QUUX keeps its 8-word line
-        // whatever `--cache` asks for.
-        if let Some(c) = cache
-            .or(quux_rtl.then_some(crate::cache::CacheConfig::QUUX))
-            .filter(|_| !rtl_15 && !geometry.extended())
-        {
-            let c = if quux_rtl { crate::memory_port::fitted(c) } else { c };
+        if geometry.quux() {
             writeln!(
                 s,
-                "cache: {} words, lines of {}, {}-way, a hit in {} ns",
-                c.words, c.line_words, c.ways, c.hit_ns
+                "machine: quux: a 40-bit word, the tag <39:32> over the field <31:0>; 32-bit virtual addresses, the device window at 34000000000 and the physical memory window at 36000000000, a page table walked by hardware behind a direct-mapped TLB of {} entries, a 34-bit location counter; a 64-bit microinstruction, MIT's 48 bits and an extension, the OA registers read through a word's OA select, and its own .mcr; a dispatch memory of 4,096 entries; a 16K-word PDL buffer, MUL and DIV in one instruction each, a microsecond clock in the processor, its boot PROM at control store 36000, main memory and the frame buffer on its own port, its devices reached by their registers, a real-time clock, a file device, three interval timers and reset devices, the register page at 35777777400 with block-disk, the video controller and the Ethernet device at words 240-257 on it, its interrupt word 100 <8>, and the fused return; rtl is its four-stage pipeline",
+                crate::tlb::DEFAULT_ENTRIES
             )
             .unwrap();
         }
-        if geometry.revision() == Some(16) {
-            writeln!(
-                s,
-                "machine: quux, revision 16: revision 15 with the Ethernet device at register-page words 240-257, its interrupt word 100 <8>; rtl is its four-stage pipeline"
-            )
-            .unwrap();
-        }
-        if geometry.ethernet() {
+        if geometry.quux() {
             let behind = match &ethernet_socket {
                 Some(socket) => {
                     format!("socket {}, {} mode", shown(&socket.path), socket.mode.name())
@@ -6991,28 +6863,6 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 crate::ethernet_socket::prefix_length(ethernet_host.netmask),
                 crate::ethernet_socket::ipv4_text(ethernet_host.gateway),
                 if ethernet_trace { "; traced" } else { "" }
-            )
-            .unwrap();
-        }
-        if geometry.revision() == Some(15) {
-            writeln!(
-                s,
-                "machine: quux, revision 15: revision 14 with a 64-bit microinstruction, MIT's 48 bits and an extension, the OA registers read through a word's OA select in place of IMOD, and its own .mcr; rtl is its four-stage pipeline"
-            )
-            .unwrap();
-        }
-        if geometry.revision() == Some(14) {
-            writeln!(
-                s,
-                "machine: quux, revision 14: revision 13 with 32-bit virtual addresses, the device window at 34000000000 and the physical memory window at 36000000000, a page table walked by hardware behind a direct-mapped TLB of {} entries, a 34-bit location counter, and the register page at 35777777400",
-                tlb.unwrap_or(crate::tlb::DEFAULT_ENTRIES)
-            )
-            .unwrap();
-        }
-        if geometry.revision() == Some(13) {
-            writeln!(
-                s,
-                "machine: quux, revision 13: a 40-bit word, the tag <39:32> over the field <31:0>; a map of two levels over 1024-word pages, 28-bit virtual and physical addresses; a dispatch memory of 4,096 entries; a 16K-word PDL buffer, MUL and DIV in one instruction each, a microsecond clock in the processor, its boot PROM at control store 36000, main memory and the frame buffer on its own port, the memory cache's lines of 8 words, its devices reached by their registers, a real-time clock, a file device, three interval timers and reset devices, the frame buffer window at 1760000000 and the register page at 1777777400 with block-disk and the video controller on it, and the fused return"
             )
             .unwrap();
         }
@@ -7073,11 +6923,11 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         // to nobody however its switches read. A machine with no Chaosnet
         // interface has neither, and prints neither line (QUUX's Ethernet
         // contract, §8 R4), as one with no Ethernet prints no ethernet line.
-        if geometry.chaos() {
+        if !geometry.quux() {
             writeln!(s, "chaosnet: {:o}", chaos.address).unwrap();
         }
         match &chaos.udp {
-            _ if !geometry.chaos() => {}
+            _ if geometry.quux() => {}
             None => {
                 writeln!(s, "chaosnet over udp: disabled; --chaos-udp is the cable").unwrap();
             }
@@ -7214,13 +7064,13 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
         if let Some(pc) = stop_at_prom {
             stops.push(format!("at PC {pc:o} in the PROM"));
         }
-        // What a microcycle takes: the board's delay lines on the CADR,
-        // muir-fpga's grid under them, or QUUX's `sync`, which has none.
-        if geometry.extended() {
+        // What a microcycle takes: the board's delay lines on the CADR or
+        // muir-fpga's grid under them, or QUUX's clock.
+        if geometry.quux() {
             let period = microcycle.unwrap_or(crate::clock::PERIOD_15);
             writeln!(
                 s,
-                "timing: revision 15's clock, {} ns a microcycle ({period} units of 0.5 ns)",
+                "timing: {} ns a microcycle ({period} units of 0.5 ns)",
                 crate::clock::microcycle_ns_text(period)
             )
             .unwrap();
@@ -7233,9 +7083,6 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 TimingModel::Fpga => format!(
                     "fpga, the board's delay lines on muir-fpga's 10 ns grid, {per} ns a microcycle at normal speed"
                 ),
-                TimingModel::Sync { cycle_ticks, .. } => {
-                    format!("sync, {cycle_ticks} ticks of 10 ns, {per} ns a microcycle")
-                }
             };
             writeln!(s, "timing: {timing}").unwrap();
         }
@@ -7254,8 +7101,8 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 if which == Which::Chip {
                     "the machine's own speed; chip is far slower than that, so nothing waits"
                         .to_string()
-                } else if geometry.extended() {
-                    // Revision 15's clock, the period, not a timing model's.
+                } else if geometry.quux() {
+                    // QUUX's clock, the period, not a timing model's.
                     let period = microcycle.unwrap_or(crate::clock::PERIOD_15);
                     format!(
                         "the machine's own speed, {} ns a microcycle; the run waits when it is ahead",
@@ -7328,19 +7175,14 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 color_tv,
                 (geometry, block_disk, rtc, &file_roots),
             );
-            if let Some(n) = tlb {
-                m.set_tlb_entries(n);
-            }
             fit_ethernet(&mut m, (ethernet_host, ethernet_trace), ethernet_peer.take());
             m.chaos = chaos.clone();
             m.plug_chaos(0);
             let mut e = Micro::new(m);
-            // QUUX's microcycle is `sync`'s ticks, on this engine's clock too;
-            // revision 15's is its period (MP2b ruling Q15).
-            if geometry.extended() {
+            // QUUX's microcycle is its period, on this engine's clock too
+            // (MP2b ruling Q15).
+            if geometry.quux() {
                 e.period = microcycle.unwrap_or(crate::clock::PERIOD_15);
-            } else if let TimingModel::Sync { cycle_ticks, .. } = timing_model {
-                e.sync_cycle_ns = cycle_ticks as u64 * crate::clock::GRID_NS;
             }
             if auto_boot {
                 e.boot();
@@ -7387,9 +7229,9 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 );
             }
         }
-        Which::Rtl if geometry.extended() => {
-            // Revision 15's `rtl` is its pipeline (contract G3 revision 15,
-            // §12.1): the default period, 10 ns, and the Kria's memory timing
+        Which::Rtl if geometry.quux() => {
+            // QUUX's `rtl` is its pipeline (contract G3 revision 15, §12.1):
+            // the default period, 10 ns, and the Kria's memory timing
             // and cache unless the flags say otherwise (MP2b ruling Q14).
             let mut m = machine(
                 &prom,
@@ -7399,9 +7241,6 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 color_tv,
                 (geometry, block_disk, rtc, &file_roots),
             );
-            if let Some(n) = tlb {
-                m.set_tlb_entries(n);
-            }
             fit_ethernet(&mut m, (ethernet_host, ethernet_trace), ethernet_peer.take());
             m.chaos = chaos.clone();
             m.plug_chaos(0);
@@ -7465,21 +7304,12 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 color_tv,
                 (geometry, block_disk, rtc, &file_roots),
             );
-            if let Some(n) = tlb {
-                m.set_tlb_entries(n);
-            }
             // The Chaosnet, as under chip: the interface on the I/O board
             // and, if a link was bound, the network on its cable.
             m.chaos = chaos.clone();
             m.plug_chaos(0);
             let mut e = Rtl::new(m);
             e.set_timing_model(timing_model);
-            if cache.is_some() {
-                e.set_cache(cache);
-            }
-            if memory_timing.is_some() {
-                e.set_memory_timing(memory_timing);
-            }
             if auto_boot {
                 e.boot();
             }
@@ -7505,9 +7335,6 @@ pub fn run(geometry: crate::machine::Geometry, netlists: Option<&Netlists>) {
                 mb.plug_chaos(0);
                 let mut b = Rtl::new(mb);
                 b.set_timing_model(timing_model);
-                if cache.is_some() {
-                    b.set_cache(cache);
-                }
                 b.boot();
                 time_lashup(
                     Lashup::new(e, b),
@@ -7944,7 +7771,7 @@ mod tests {
     #[test]
     fn the_pace_counts_revision_15_s_units() {
         let t = Instant::now();
-        let mut m = Machine::with_geometry(crate::machine::Geometry::QUUX_16, 1);
+        let mut m = Machine::with_geometry(crate::machine::Geometry::QUUX, 1);
         m.ns = 1_000;
         let mut pace = Pace::of_machine(t, &m);
         assert_eq!(pace.owed(t, 1_000 + 4_000_000), Some(Duration::from_millis(2)));

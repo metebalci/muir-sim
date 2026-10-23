@@ -58,7 +58,6 @@
 //! `Rtl::after_memack` the two delays.
 
 use crate::busint::{self, Busint, Responder};
-use crate::memory_port::MemoryPort;
 
 /// How long after `-MEMACK` `READ IN PROGRESS` falls, and with it `-HANG`.
 ///
@@ -104,194 +103,12 @@ enum Stall {
     Wait,
     /// `-HANG`: both clocks stop.
     Hang,
-    /// QUUX's wait for `MD`, in place of `-HANG`
-    /// ([`Geometry::hangs`](crate::machine::Geometry)): the master clock
-    /// runs on and the cpu clock waits, as for `-WAIT`, but a single step
-    /// does not pass it, the instruction needing the word.
-    Hold,
 }
 use crate::clock::{Speed, TimingModel};
 use crate::engine::Engine;
 use crate::machine::{Halt, IMEM_WORDS, Machine, Word};
-use crate::muldiv;
 use crate::spy;
 use crate::ttl;
-
-/// What the processor's cycles go through: the CADR's bus interface, or
-/// QUUX's memory port ([`crate::memory_port`], contract Q6), which has no
-/// Unibus, no debug cable and nothing to arbitrate. The debug cable's
-/// questions answer nothing on QUUX; its actions are the CADR's alone.
-#[derive(Clone)]
-enum Bus {
-    Cadr(Box<Busint>),
-    Quux(Box<MemoryPort>),
-}
-
-impl Bus {
-    fn for_machine(m: &Machine, model: TimingModel) -> Bus {
-        if m.geometry.unibus {
-            Bus::Cadr(Box::new(Busint::with_timing_model(m.memory_boards(), model)))
-        } else {
-            let mut p = MemoryPort::for_geometry(&m.geometry);
-            p.keep_timing_model(model);
-            Bus::Quux(Box::new(p))
-        }
-    }
-
-    fn cadr(&self) -> Option<&Busint> {
-        match self {
-            Bus::Cadr(b) => Some(b),
-            Bus::Quux(_) => None,
-        }
-    }
-
-    fn cable(&mut self) -> &mut Busint {
-        match self {
-            Bus::Cadr(b) => b,
-            Bus::Quux(_) => panic!("QUUX has no debug cable: it is a Unibus master"),
-        }
-    }
-
-    fn request_at(&mut self, write: bool, phys: u32) {
-        match self {
-            Bus::Cadr(b) => b.request_at(write, phys),
-            Bus::Quux(p) => p.request_at(write, phys),
-        }
-    }
-    fn mclk_edge(&mut self, now: u64, responder: Responder) {
-        match self {
-            Bus::Cadr(b) => b.mclk_edge(now, responder),
-            Bus::Quux(p) => p.mclk_edge(now, responder),
-        }
-    }
-    fn poll(&mut self, now: u64, responder: Responder) -> Option<busint::Ack> {
-        match self {
-            Bus::Cadr(b) => b.poll(now, responder),
-            Bus::Quux(p) => p.poll(now, responder),
-        }
-    }
-    /// QUUX's processor holds a memory start in the microcycle right after
-    /// another ([`Rtl::stall`]); the CADR's does not.
-    fn holds_a_start_after_a_start(&self) -> bool {
-        matches!(self, Bus::Quux(_))
-    }
-    fn released(&mut self, at: u64) {
-        if let Bus::Cadr(b) = self {
-            b.released(at);
-        }
-    }
-    fn finish(&mut self) {
-        match self {
-            Bus::Cadr(b) => b.finish(),
-            Bus::Quux(p) => p.finish(),
-        }
-    }
-    fn granted(&self) -> bool {
-        match self {
-            Bus::Cadr(b) => b.granted(),
-            Bus::Quux(p) => p.granted(),
-        }
-    }
-    fn busy(&self) -> bool {
-        match self {
-            Bus::Cadr(b) => b.busy(),
-            Bus::Quux(p) => p.busy(),
-        }
-    }
-    fn ack_at(&self) -> Option<u64> {
-        match self {
-            Bus::Cadr(b) => b.ack_at(),
-            Bus::Quux(p) => p.ack_at(),
-        }
-    }
-    fn answered_at(&self) -> Option<u64> {
-        match self {
-            Bus::Cadr(b) => b.answered_at(),
-            Bus::Quux(p) => p.answered_at(),
-        }
-    }
-    fn invalidate_cache(&mut self) {
-        match self {
-            Bus::Cadr(b) => b.invalidate_cache(),
-            Bus::Quux(p) => p.invalidate_cache(),
-        }
-    }
-    /// When QUUX's write buffer is next empty; the CADR has none of its
-    /// own to wait for.
-    fn write_buffer_empty_at(&self) -> u64 {
-        match self {
-            Bus::Cadr(_) => 0,
-            Bus::Quux(p) => p.write_buffer_empty_at(),
-        }
-    }
-    fn cache(&self) -> Option<&crate::cache::Cache> {
-        match self {
-            Bus::Cadr(b) => b.cache(),
-            Bus::Quux(p) => Some(p.cache()),
-        }
-    }
-    fn memory_timing(&self) -> Option<crate::cache::MemoryTiming> {
-        match self {
-            Bus::Cadr(b) => b.memory_timing(),
-            Bus::Quux(p) => Some(p.memory_timing()),
-        }
-    }
-    fn keep_timing_model(&mut self, model: TimingModel) {
-        match self {
-            Bus::Cadr(b) => b.keep_timing_model(model),
-            Bus::Quux(p) => p.keep_timing_model(model),
-        }
-    }
-    fn unibus_reset(&mut self, now: u64, on: bool) {
-        if let Bus::Cadr(b) = self {
-            b.unibus_reset(now, on);
-        }
-    }
-    fn debug_advance(&mut self, now: u64) {
-        if let Bus::Cadr(b) = self {
-            b.debug_advance(now);
-        }
-    }
-    fn debug_modifier(&self) -> u16 {
-        self.cadr().map_or(0, Busint::debug_modifier)
-    }
-    fn debug_last_request(&self) -> Option<busint::DebugRequest> {
-        self.cadr()?.debug_last_request()
-    }
-    fn debug_pending(&self) -> Option<busint::DebugRequest> {
-        self.cadr()?.debug_pending()
-    }
-    fn debug_answered_at(&self) -> Option<u64> {
-        self.cadr()?.debug_answered_at()
-    }
-    fn debug_ack_at(&self) -> Option<u64> {
-        self.cadr()?.debug_ack_at()
-    }
-    fn debug_strobe_until(&self) -> Option<u64> {
-        self.cadr()?.debug_strobe_until()
-    }
-    fn debug_master(&self) -> bool {
-        self.cadr().is_some_and(Busint::debug_master)
-    }
-    fn debug_in_promise(&self, now: u64) -> u64 {
-        self.cadr().map_or(u64::MAX, |b| b.debug_in_promise(now))
-    }
-    fn debug_out_promise(&self, now: u64) -> u64 {
-        self.cadr().map_or(u64::MAX, |b| b.debug_out_promise(now))
-    }
-    fn debug_out_take(&mut self) -> Option<busint::DebugOut> {
-        match self {
-            Bus::Cadr(b) => b.debug_out_take(),
-            Bus::Quux(_) => None,
-        }
-    }
-    fn debug_unibus_address(&self) -> u32 {
-        self.cadr().map_or(0, Busint::debug_unibus_address)
-    }
-    fn debug_responder(&self) -> Responder {
-        self.cadr().map_or(Responder::NoXbus, Busint::debug_responder)
-    }
-}
 
 pub struct Rtl {
     pub m: Machine,
@@ -326,8 +143,7 @@ pub struct Rtl {
     lpc: u16,
 
     // --- LC 1A26-2C05 74S169 counters.  The byte-mode flags are FLAG's, on
-    // --- page FLAG, and not bits of this counter. Revision 14's 34 bits
-    // --- (A14.11).
+    // --- page FLAG, and not bits of this counter.
     lc: u64,
 
     // --- PDLCTL 4C11 74S175 on CLK4F ---
@@ -365,9 +181,10 @@ pub struct Rtl {
     srun: bool,
     sstep: bool,
     ssdone: bool,
-    /// When QUUX's divider's count started for the instruction standing in
-    /// `IR`: the edge that clocked it in, moved on to the end of each
-    /// generator cycle the MD interlock holds it, [`Rtl::dividing`].
+    /// The edge that clocked the instruction standing in `IR` in, moved on
+    /// to the end of each generator cycle the MD interlock holds it: QUUX's
+    /// divider's count started there. The CADR has no divider; the
+    /// instant is kept in its checkpoint's format.
     div_from_ns: u64,
     /// This microcycle's write pulse has fired already: a `-HANG` holding
     /// it fires the pulse before the hold ([`Rtl::step`]).
@@ -399,12 +216,12 @@ pub struct Rtl {
     mbusy: bool,
     rdcyc: bool,
     wrcyc: bool,
-    /// The bus interface at the far end of the cables on the CADR, QUUX's
-    /// memory port (contract Q6) on QUUX, and the cycle it is running: the
+    /// The bus interface at the far end of the cables, and the cycle it is
+    /// running: the
     /// address and the word are held by it for the whole cycle, which is
     /// why they are captured when `MBUSY` rises rather than read again when
     /// the answer comes back.
-    bus: Bus,
+    bus: Box<Busint>,
     /// `MBUSY.SYNC`, the second flip flop of the 74S175 at VCTL1 1E20:
     /// `MEMRQ` registered on `MCLK1A`. "Since you must wait during the first
     /// half of a clock cycle, the busy condition (MEMRQ) must be
@@ -572,24 +389,9 @@ pub struct Rtl {
     /// next in sequence. For the profile harness; not in a checkpoint,
     /// being cleared every microcycle.
     fetch_started: Option<bool>,
-    /// `MEMSTART`'s cycle is the stream's macroinstruction fetch, for QUUX's
-    /// prefetch (`crate::memory_port`): registered with `MEMSTART`, and
-    /// kept in a checkpoint as it is.
+    /// `MEMSTART`'s cycle is the stream's macroinstruction fetch:
+    /// registered with `MEMSTART`, and kept in a checkpoint as it is.
     memstart_fetch: bool,
-    /// Revision 14: the address each port, A and B, has looked the TLB up
-    /// at in this microcycle, and walked for on a miss: a microcycle held
-    /// for another reason as well does not look the same address up again
-    /// ([`Rtl::tlb_hold`]), and port B looks up again when `MD` has
-    /// changed meanwhile. Cleared at the edge; not in a checkpoint, a
-    /// resume starting between two.
-    looked: [Option<u32>; 2],
-    /// Revision 14: port A walked in this microcycle, so the walk has just
-    /// read the page entry for this microcycle's reference, and its
-    /// write-back writes at once (A14.6). Cleared at the edge.
-    walked_a: bool,
-    /// Revision 14: the redirect's held microcycle has been taken for the
-    /// start translated in this one (A14.7). Cleared at the edge.
-    redirect_held: bool,
 }
 
 /// The combinational network during the read phase.
@@ -599,21 +401,6 @@ pub struct Rtl {
 /// nets it actually needs.
 struct Read {
     nop: bool,
-    /// A fused return (`machine::macro_dispatch`): `npc` is the MACRO
-    /// DISPATCH MEMORY's handler.
-    fused: bool,
-    /// The operand address the fused return arms, which the edge ending
-    /// the next microcycle loads into PDL-INDEX.
-    operand: Option<crate::machine::Operand>,
-    /// The prefetched word a fused return on the fetch path takes into
-    /// M 31 (`crate::memory_port`, contract H8a §3.5).
-    prefetch_m31: Option<Word>,
-    /// A return that would have fused on the prefetched word but for
-    /// condition 6 (0) or a store starting (1): for the counts.
-    prefetch_refused: Option<usize>,
-    /// QUUX's destination 5, 6 or 7, the MACRO-DISPATCH register and the
-    /// MACRO DISPATCH MEMORY's index and entry, written at the edge.
-    macro_write: Option<u32>,
     irdisp: bool,
     /// `-HALT`: misc function 1 decoded from `IR<11:10>`, unless nopped.
     halt: bool,
@@ -624,14 +411,8 @@ struct Read {
     a: Word,
     m: Word,
     alu: u64,
-    /// `<39:32>` of the ALU's output on a 40-bit word, in place: M's, or a
-    /// logical function's ([`ttl::alu_tag`]); 0 on a 32-bit one.
-    alu_tag: Word,
     r: Word,
     ob: Word,
-    /// Revision 13's fixnum overflow flag as an executed ALU-class word
-    /// loads it at the edge, or `None` when this word leaves it (A1.3).
-    overflow: Option<bool>,
 
     n: bool,
     npc: u16,
@@ -677,16 +458,6 @@ struct Read {
     vmas: Word,
     vmaenb: bool,
     vmo: u32,
-    /// Revision 14: the instruction looks up port B, `MAP(MD)` or a
-    /// dispatch on map bits of a pointer-typed `MD` (A14.5), so a miss
-    /// there walks before it runs ([`Rtl::tlb_hold`]).
-    port_b: bool,
-    /// Revision 14: `LC<33:32>` as a write of the location counter takes
-    /// them, the word's or LC's adder's (A14.11).
-    lc_high: u64,
-    /// Revision 14: the PDL buffer redirect the start being translated
-    /// takes (A14.7).
-    redirect: Option<crate::tlb::Redirect>,
 
     /// `ILONG` is `IR<45>`, suppressed when the cycle is nopped by a jump or
     /// the console but not by the trap: `-ILONG` is `NAND(IR45, -NOPA)` at
@@ -710,10 +481,6 @@ struct Read {
     newlc_in: bool,
     qs1: bool,
     qs0: bool,
-    /// QUUX's multiply and divide: the ALU-class instruction is one of
-    /// them, and what it leaves in `Q`, whatever `IR<1:0>` says.
-    muldiv: Option<muldiv::Op>,
-    muldiv_q: u32,
     iwrite: bool,
     vmaok: bool,
     machrun: bool,
@@ -730,28 +497,18 @@ fn bit(v: u64, n: u32) -> bool {
     (v >> n) & 1 != 0
 }
 
-/// Revision 13's shifter: `<39:0>` of `v` rotated left by `n` mod 40
-/// (contract G2 §2.3, appendix A1.2).
-fn ring_40(v: Word, n: u32) -> Word {
-    const RING: Word = (1 << 40) - 1;
-    let n = n % 40;
-    let v = v & RING;
-    if n == 0 { v } else { ((v << n) | (v >> (40 - n))) & RING }
-}
-
 fn field(v: u64, hi: u32, lo: u32) -> u32 {
     ((v >> lo) & ((1u64 << (hi - lo + 1)) - 1)) as u32
 }
 
 impl Rtl {
     pub fn new(m: Machine) -> Self {
-        // Revision 15's model is `micro`'s alone: this engine is the
-        // single-edge machine, and revision 15's is pipelined.
-        assert!(!m.geometry.extended(), "rtl does not run QUUX revision 15");
-        let on_quux = m.geometry.machine_id.is_some();
+        // QUUX's `rtl` is the pipeline (`crate::pipeline`): this engine is
+        // the CADR's single-edge machine.
+        assert!(!m.geometry.quux(), "rtl runs the CADR; QUUX's rtl is the pipeline");
         let lvmo_at_power_on = m.geometry.lvmo_at_power_on();
-        let m_bus = Bus::for_machine(&m, TimingModel::Cadr);
-        let mut r = Rtl {
+        let m_bus = Box::new(Busint::with_timing_model(m.memory_boards(), TimingModel::Cadr));
+        Rtl {
             m,
             trace: [0; 12],
             flags: [0; 12],
@@ -832,19 +589,7 @@ impl Rtl {
             executed: None,
             fetch_started: None,
             memstart_fetch: false,
-            looked: [None; 2],
-            walked_a: false,
-            redirect_held: false,
-        };
-        // QUUX drops the delay lines: `sync`, four ticks, unless `muir`
-        // sets `--sync-cycle-ticks`'.
-        if on_quux {
-            r.set_timing_model(TimingModel::Sync {
-                cycle_ticks: crate::clock::SYNC_CYCLE_TICKS,
-                ilong_ticks: 0,
-            });
         }
-        r
     }
 
     /// `-RESET`: what the 74S37 at OLORD2 1A06 clears, of what this engine
@@ -857,16 +602,6 @@ impl Rtl {
     /// the interface has a reset of its own and this is not it.
     pub fn reset(&mut self) {
         self.m.reset_console_registers();
-        // QUUX's interval timers: `-RESET` puts every one in its reset
-        // state (contract Q11).
-        self.m.timers = crate::machine::Timers::new();
-        // And QUUX's MACRO-DISPATCH enable, and an armed operand address
-        // (contract H8a), and the prefetch's word.
-        self.m.macro_dispatch.reset();
-        self.drop_prefetched(crate::memory_port::Drop::Reset);
-        // Revision 14's TLB swept, starts waiting N ticks for it, and the
-        // memory system's words cleared (A14.4, A14.9).
-        self.m.reset_memory_system(self.ns);
         // CONTRL 3D26
         self.inop = false;
         self.spushd = false;
@@ -978,49 +713,32 @@ impl Rtl {
     /// boots.
     pub fn set_timing_model(&mut self, model: TimingModel) {
         assert_eq!(self.ns, 0, "a timing model is chosen before the machine runs");
-        assert!(
-            self.m.geometry.machine_id.is_none() || matches!(model, TimingModel::Sync { .. }),
-            "QUUX drops the delay lines: its timing is sync, not {}",
-            model.name()
-        );
         self.timing = model;
-        match &mut self.bus {
-            // The CADR's bus interface keeps the model's time in its
-            // boards' twins, and is built for it.
-            Bus::Cadr(b) => {
-                let cache = b.cache().map(|c| c.config);
-                let memory = b.memory_timing();
-                let mut n = Busint::with_timing_model(self.m.memory_boards(), model);
-                n.set_cache(cache);
-                n.set_memory_timing(memory);
-                **b = n;
-            }
-            Bus::Quux(p) => p.keep_timing_model(model),
-        }
+        // The bus interface keeps the model's time in its boards' twins,
+        // and is built for it.
+        let cache = self.bus.cache().map(|c| c.config);
+        let memory = self.bus.memory_timing();
+        let mut n = Busint::with_timing_model(self.m.memory_boards(), model);
+        n.set_cache(cache);
+        n.set_memory_timing(memory);
+        *self.bus = n;
         self.m.disk.set_timing_model(model);
     }
 
-    /// Another shape of QUUX's memory cache ([`crate::cache`]), which is
-    /// always fitted there (contract Q6): chosen before the machine runs,
-    /// like the timing model. On the CADR, a cache in front of its memory
-    /// boards, or none: a measurement's, not the machine's.
+    /// A cache in front of the memory boards ([`crate::cache`]), or none:
+    /// a measurement's, not the machine's. Chosen before the machine runs,
+    /// like the timing model.
     pub fn set_cache(&mut self, config: Option<crate::cache::CacheConfig>) {
         assert_eq!(self.ns, 0, "a cache is fitted before the machine runs");
-        match &mut self.bus {
-            Bus::Cadr(b) => b.set_cache(config),
-            Bus::Quux(p) => p.set_cache(config.expect("QUUX always has its cache")),
-        }
+        self.bus.set_cache(config);
     }
 
-    /// Other figures for QUUX's main memory ([`crate::cache::MemoryTiming`],
-    /// [`crate::cache::MemoryTiming::NOMINAL`] unless set): chosen before
-    /// the machine runs. On the CADR, its boards timed so instead, or not.
+    /// The memory boards timed by other figures
+    /// ([`crate::cache::MemoryTiming`]), or not: chosen before the machine
+    /// runs.
     pub fn set_memory_timing(&mut self, timing: Option<crate::cache::MemoryTiming>) {
         assert_eq!(self.ns, 0, "a memory is fitted before the machine runs");
-        match &mut self.bus {
-            Bus::Cadr(b) => b.set_memory_timing(timing),
-            Bus::Quux(p) => p.set_memory_timing(timing.expect("QUUX's memory has a timing")),
-        }
+        self.bus.set_memory_timing(timing);
     }
 
     /// When the cycle running was answered, if it has been: the slave took
@@ -1030,66 +748,25 @@ impl Rtl {
     }
 
     /// When the cycle running is or was acknowledged, `-MEMACK`, if it has
-    /// been granted: on the CADR the bus interface's, on QUUX the memory
-    /// port's --- as it is answered for main memory and an empty address, a
-    /// microcycle after it for a device register.
+    /// been granted: the bus interface's.
     pub fn bus_ack_at(&self) -> Option<u64> {
         self.bus.ack_at()
     }
 
     /// Whether the processor holds a granted cycle, `-MEMGRANT` low: from
     /// the grant until the processor lets the cycle go, acknowledged or
-    /// not, on the CADR's bus interface or QUUX's memory port (which grants
-    /// at the edge that takes the request).
+    /// not.
     pub fn bus_granted(&self) -> bool {
         self.bus.granted()
     }
 
-    /// The memory cache, if the machine has one: always on QUUX.
+    /// The memory cache, if one is fitted ([`Rtl::set_cache`]).
     pub fn cache(&self) -> Option<&crate::cache::Cache> {
         self.bus.cache()
     }
 
-    /// QUUX's cache-only prefetch fitted with another reach, or taken out
-    /// (`crate::memory_port`, contract H8a §3.5), for a measurement: QUUX
-    /// has [`crate::memory_port::Reach::Page`] from the start, and the CADR
-    /// has none. Kept across a restore.
-    pub fn set_prefetch(&mut self, prefetch: Option<crate::memory_port::Reach>) {
-        match &mut self.bus {
-            Bus::Quux(p) => p.set_prefetch(prefetch),
-            Bus::Cadr(_) => assert!(prefetch.is_none(), "the prefetch is QUUX's"),
-        }
-    }
-
-    /// The prefetch's reach, its word and its counts, on QUUX.
-    pub fn prefetch(&self) -> Option<crate::memory_port::Reach> {
-        match &self.bus {
-            Bus::Quux(p) => p.prefetch(),
-            Bus::Cadr(_) => None,
-        }
-    }
-
-    pub fn prefetched(&self) -> Option<crate::memory_port::Prefetched> {
-        match &self.bus {
-            Bus::Quux(p) => p.prefetched(),
-            Bus::Cadr(_) => None,
-        }
-    }
-
-    pub fn prefetch_counts(&self) -> Option<crate::memory_port::PrefetchCounts> {
-        match &self.bus {
-            Bus::Quux(p) => Some(p.prefetch_counts),
-            Bus::Cadr(_) => None,
-        }
-    }
-
-    fn drop_prefetched(&mut self, why: crate::memory_port::Drop) {
-        if let Bus::Quux(p) = &mut self.bus {
-            p.drop_prefetched(why);
-        }
-    }
-
-    /// Main memory's own timing, if it has one: always on QUUX.
+    /// The memory boards' own timing, if they have one
+    /// ([`Rtl::set_memory_timing`]).
     pub fn memory_timing(&self) -> Option<crate::cache::MemoryTiming> {
         self.bus.memory_timing()
     }
@@ -1180,78 +857,15 @@ impl Rtl {
         (adr0, adr1)
     }
 
-    /// `MAPI` as a word: `VMA` while `MEMSTART` is up and `MD` otherwise,
-    /// `<31:0>` of it, which revision 13's map looks up whole (A1.7).
-    fn mapi(&self) -> u32 {
-        (if self.memstart { self.m.vma } else { self.m.md }) as u32
-    }
-
-    /// The word address a fetch takes from `LC`: `LC<25:2>`, and on
-    /// revision 13 `LC<29:2>` (A1.6).
-    /// On revision 14 `LC<33:2>`, any 32-bit address (A14.11).
+    /// The word address a fetch takes from `LC`: `LC<25:2>`.
     fn fetch_mask(&self) -> u64 {
-        self.m.geometry.lc_counter() >> 2
-    }
-
-    /// **Revision 13's LC byte mode** (contract G2 §2.3, appendix A1.2):
-    /// the rotate `rotate` plus an addend the location counter `lc` gives,
-    /// mod 40. In halfword mode `LC<1>` = 1 adds 0 and `LC<1>` = 0 adds 24;
-    /// in byte mode `LC<1:0>` = 1, 2, 3 and 0 add 0, 32, 24 and 16, the
-    /// word's bytes 0 to 3 in stream order.
-    fn lc_rotation_13(&self, lc: u64, rotate: u32) -> u32 {
-        let add = match (self.lc_byte_mode, bit(lc, 1), bit(lc, 0)) {
-            (false, true, _) => 0,
-            (false, false, _) => 24,
-            (true, false, true) => 0,
-            (true, true, false) => 32,
-            (true, true, true) => 24,
-            (true, false, false) => 16,
-        };
-        (rotate + add) % 40
-    }
-
-    /// **Revision 13's rotator and masker** for the word in `IR`
-    /// (contract G2 §2.3, appendix A1.1-A1.2): M rotated left in a ring of
-    /// 40, and the mask. A BYTE word rotates by `IR<5:0>` --- an LDB with
-    /// `IR<24>` by LC byte mode's rotation --- and masks `IR<11:6>` + 1
-    /// bits; a JUMP or DISPATCH rotates by `{IR<47>, IR<4:0>}`, by LC byte
-    /// mode's rotation under `IR<11:10>` = 3; an ALU word, whose output
-    /// select 0 is the masker as a DPB, by `IR<5:0>` with `IR<9:6>` + 1 bits
-    /// and no LC byte mode. The mask starts at the rotate where page
-    /// SMCTL's `MR` is up, as today (a selective deposit and a DPB, and
-    /// every class but BYTE), at 0 otherwise, and is empty for a byte that
-    /// does not fit in bits 0-39: the rule at 32 bits, where the mask is
-    /// empty whenever its left end passes bit 31.
-    fn rotate_and_mask_13(&self, ir: u64, m: Word) -> (Word, Word) {
-        let class = field(ir, 44, 43);
-        let byte = class == 3;
-        let (rotate, n, lc_mode) = match class {
-            // BYTE
-            3 => (field(ir, 5, 0), field(ir, 11, 6), field(ir, 13, 12) == 1 && bit(ir, 24)),
-            // JUMP, DISPATCH
-            1 | 2 => (
-                (bit(ir, 47) as u32) << 5 | field(ir, 4, 0),
-                field(ir, 9, 6),
-                field(ir, 11, 10) == 3,
-            ),
-            // ALU
-            _ => (field(ir, 5, 0), field(ir, 9, 6), false),
-        };
-        let shift = if lc_mode { self.lc_rotation_13(self.lc, rotate) } else { rotate };
-        let mr = !byte || bit(ir, 13);
-        let sr = !byte || bit(ir, 12);
-        let right = if mr { rotate } else { 0 };
-        let msk = if right + n > 39 { 0 } else { ((1 << (n + 1)) - 1) << right };
-        (if sr { ring_40(m, shift) } else { m }, msk)
+        u64::from(crate::machine::LC_COUNTER) >> 2
     }
 
     /// The whole combinational network, once, with `CLK` high.
     #[allow(clippy::nonminimal_bool)]
     fn read_phase(&self) -> Read {
         let ir = self.ir;
-        // Revision 13 (contract G2, appendix A1): its fields, rotator,
-        // conditions, dispatch memory, location counter and map.
-        let wide = self.m.geometry.wide();
 
         // page TRAP, CONTRL.  `-NOPA` is the open-collector 74S08 at CONTRL
         // 3E14, `AND(-NOP11, -INOP)`, `-INOP` being the 74S175's own `-Q` at
@@ -1274,9 +888,7 @@ impl Rtl {
                 _ => (true, false, false, false),
             }
         };
-        // Revision 13's BYTE words decode no misc function: `IR<11:10>` are
-        // length bits there (A1.1).
-        let funct: u8 = if nop || (wide && irbyte) { 0 } else { 1 << field(ir, 11, 10) };
+        let funct: u8 = if nop { 0 } else { 1 << field(ir, 11, 10) };
 
         let src = field(ir, 28, 26);
         let group_a = bit(ir, 31) && !bit(ir, 29);
@@ -1305,13 +917,7 @@ impl Rtl {
         let low_group = destm && !bit(ir, 23) && !bit(ir, 22);
         let destlc = low_group && d19 == 1;
         let destintctl = low_group && d19 == 2;
-        // The low group decodes no 3 or 4, on the CADR and on QUUX
-        // (contract Q11), and only M is written. QUUX decodes 5 to 7: the
-        // MACRO-DISPATCH register and the MACRO DISPATCH MEMORY's index and
-        // entry (`machine::macro_dispatch`); on the CADR only M is written
-        // there too.
-        let macro_write =
-            (low_group && (5..=7).contains(&d19) && self.m.geometry.macro_dispatch).then_some(d19);
+        // The low group decodes no 3 to 7: only M is written.
         let mid_group = destm && !bit(ir, 23) && bit(ir, 22);
         let destpdltop = mid_group && d19 == 0;
         let destpdl_p = mid_group && d19 == 1;
@@ -1360,50 +966,15 @@ impl Rtl {
         let ifetch = needfetch && lcinc;
         let newlc_in = have_wrong_word && !lcinc;
 
-        // pages VMAS, VMEM0 and VMEM1; on revision 13 its two levels, with
-        // block `177` for an address whose `<31:28>` is not zero (A1.7).
-        // Revision 14 (A14.4-A14.5): port A, `VMA` at a start, for the
-        // cycle and its fault bits; port B, `MD`, for `MAP(MD)` and a
-        // dispatch on map bits, which looks up only for a pointer type and
-        // reads not oldspace, not extra PDL otherwise. A miss has walked
-        // already ([`Rtl::tlb_hold`]).
-        let paged = self.m.geometry.paged();
-        let mut redirect = None;
-        let map_dispatch = irdisp && (bit(ir, 8) || bit(ir, 9));
-        let port_b = paged
-            && ((srcmap && !nop) || (map_dispatch && self.m.memory_words.pointer_type(self.m.md)));
-        let vmo_b = if !paged {
-            0
-        } else if srcmap || (map_dispatch && self.m.memory_words.pointer_type(self.m.md)) {
-            self.m.entry_14(self.m.md as u32)
-        } else {
-            3 << 22
-        };
-        let (mut vmap, mut vmo) = if paged {
-            if self.memstart {
-                // The redirect (A14.7): the cycle proceeds as if the access
-                // code were `11`.
-                let va = self.m.vma as u32;
-                let (e, red) = self.m.redirect_14(va, self.m.entry_14(va), self.wrcyc);
-                redirect = red;
-                (0, e)
-            } else {
-                (0, self.lvmo)
-            }
-        } else if wide {
-            let mapi = self.mapi();
-            let vmap = self.m.map_level_1_13(mapi);
-            (vmap, self.m.l2_map[crate::machine::map_level_2_index_13(vmap, mapi)])
-        } else {
+        // pages VMAS, VMEM0 and VMEM1.
+        let (mut vmap, mut vmo) = {
             let (adr0, adr1) = self.map_address();
             (self.m.l1_map[adr0 as usize], self.m.l2_map[adr1 as usize])
         };
-        // A map store's write lands in this microcycle's write pulse. On
-        // the CADR the word the edge registers is the one the RAM shows
-        // after it, as `chip` has it; QUUX defines the one from before,
-        // which the read phase has read already (QUUX has no hung
-        // microcycle to read it again after the pulse).
-        if self.wmapd && !self.m.geometry.old_word_while_written {
+        // A map store's write lands in this microcycle's write pulse: the
+        // word the edge registers is the one the RAM shows after it, as
+        // `chip` has it.
+        if self.wmapd {
             if bit(self.m.vma, 26) {
                 vmap = self.m.geometry.l1_from_vma(self.m.vma as u32);
             }
@@ -1424,24 +995,12 @@ impl Rtl {
         //     VCTL2 1D26  74S04A  -PFR = NOT(-LVMO23)
         //     VCTL1 1D17  74S00   -PFW = NAND(-LVMO22, WRCYC)
         //     VCTL1 1D17  74S00O  -VMAOK = NAND(-PFR, -PFW)
-        // Revision 13's access bits are the entry's `<27:26>` (A1.7).
-        let access = if wide { 27 } else { 23 };
-        let pfr = bit(lvmo as u64, access);
-        let pfw = !(!bit(lvmo as u64, access - 1) && self.wrcyc);
+        let pfr = bit(lvmo as u64, 23);
+        let pfw = !(!bit(lvmo as u64, 22) && self.wrcyc);
         let vmaok = pfr && pfw;
 
         // mux MF
-        let mf: Word = if srclc && wide {
-            // Revision 13's location counter as read (A1.6): NEED-FETCH in
-            // `<39>`, the four flags in `<37:34>`, the counter in `<29:0>`.
-            (needfetch as Word) << 39
-                | (self.lc_byte_mode as Word) << 37
-                | (self.prog_unibus_reset as Word) << 36
-                | (self.int_enable as Word) << 35
-                | (self.sequence_break as Word) << 34
-                | (self.lc & self.m.geometry.lc_counter() & !1)
-                | lc0b as Word
-        } else if srclc {
+        let mf: Word = if srclc {
             ((needfetch as u32) << 31
                 | (self.lc_byte_mode as u32) << 29
                 | (self.prog_unibus_reset as u32) << 28
@@ -1466,16 +1025,6 @@ impl Rtl {
             self.m.md
         } else if srcvma {
             self.m.vma
-        } else if srcmap && paged {
-            // Revision 14's MAP(MD) (A14.5): `<39:32>` 0, the fault bits,
-            // and port B's entry in `<29:0>`.
-            Word::from((!pfw as u32) << 31 | (!pfr as u32) << 30 | vmo_b)
-        } else if srcmap && wide {
-            // Revision 13's MAP(MD) (A1.7): the level-1 entry in `<38:32>`,
-            // the fault bits in `<31:30>`, the level-2 entry in `<27:0>`.
-            (vmap as Word & 0o177) << 32
-                | Word::from((!pfw as u32) << 31 | (!pfr as u32) << 30)
-                | Word::from(vmo & crate::machine::MAP_LEVEL_2_13)
         } else if srcmap {
             // Bit 29 is **zero**, not one. VMEMDR 1A01 puts `-PFW`, `-PFR`,
             // `HI12` and `-VMAP<4:0>` onto `MF<31:24>` through a 74S240,
@@ -1487,20 +1036,13 @@ impl Rtl {
                 | (vmap & self.m.geometry.l1_mask()) << 24
                 | (vmo & 0o77777777))
                 .into()
-        } else if let (true, 6, Some(id)) = (group_b, src, self.m.geometry.machine_id) {
-            // QUUX's MACHINE-ID in source 16 (`Geometry::QUUX`).
-            id.into()
-        } else if group_b && src == 5 && self.m.geometry.tick {
-            // QUUX's microsecond clock in source 15 (`machine::Timers`).
-            crate::machine::Timers::microseconds(self.ns).into()
         } else {
             // Functional sources 0o15, 0o16 and 0o17: the 74S138 that decodes
             // `IR<28:26>` under `IR<31>` and `IR<29>` has those three outputs
             // unconnected, so nothing on page MF drives the bus, and an
             // undriven TTL bus reads high. No instruction means to read
             // them; a control-store word being written back does, for the
-            // nopped microcycle its `IR` holds it, and `chip` shows the ones:
-            // the word's bits, 32 on the CADR and 40 on QUUX.
+            // nopped microcycle its `IR` holds it, and `chip` shows the ones.
             self.m.geometry.word_mask()
         };
 
@@ -1558,85 +1100,40 @@ impl Rtl {
         let mskl = mskr.wrapping_add(field(ir, 9, 5)) & 0o37;
 
         // page SHIFT0-1: a 32-bit rotate left by `shift`, of `M<31:0>`;
-        // page MSKG4. Revision 13's are [`Rtl::rotate_and_mask_13`].
-        let (r, msk) = if wide {
-            self.rotate_and_mask_13(ir, m)
-        } else {
-            (
-                Word::from((m as u32).rotate_left(shift)),
-                Word::from((!0u32 >> (31 - mskl)) & (!0u32 << mskr)),
-            )
-        };
+        // page MSKG4.
+        let r = Word::from((m as u32).rotate_left(shift));
+        let msk = Word::from((!0u32 >> (31 - mskl)) & (!0u32 << mskr));
 
         // page ALU0-1 / ALUC4
         let ctl = ttl::alu_control(ir, bit(self.m.q, 0), bit(a, 31), iralu, irjump);
         let alu_out = ttl::alu(m as u32, a as u32, ctl.aluf, ctl.alumode, ctl.cin);
         let alu = alu_out.f;
         let aeqm = alu_out.aeqm;
-        // A 40-bit word's `<39:32>`: M's, or a logical function's of both
-        // (contract G2 §2.2). The shifts, the steps and the rotator act on
-        // `<31:0>`.
-        let mtag = m & !LOW;
-        let tag =
-            if self.m.geometry.wide() { ttl::alu_tag(m, a, ctl.aluf, ctl.alumode) } else { 0 };
-
-        // QUUX's multiply and divide, [`muldiv`]: they drive the output bus
-        // and load `Q` whatever `IR<13:12>` and `IR<1:0>` say, on `<31:0>`.
-        let op = if iralu && self.m.geometry.muldiv { muldiv::decode(ir) } else { None };
-        let (muldiv_ob, muldiv_q) =
-            op.map_or((0, 0), |op| muldiv::run(op, m as u32, a as u32, self.m.q as u32));
 
         // page MO
         let mo = (msk & r) | (a & !msk);
         let osel = (bit(ir, 13) && iralu) as u32 * 2 + (bit(ir, 12) && iralu) as u32;
         let ob = match osel {
-            _ if op.is_some() => mtag | Word::from(muldiv_ob),
             0 => mo,
-            1 => (alu & LOW) | tag,
-            2 => mtag | ((alu >> 1) & LOW),
-            _ => mtag | Word::from(((alu << 1) as u32 & !1) | (self.m.q as u32 >> 31)),
+            1 => alu & LOW,
+            2 => (alu >> 1) & LOW,
+            _ => Word::from(((alu << 1) as u32 & !1) | (self.m.q as u32 >> 31)),
         };
 
-        // Revision 14's LC adder (A14.11): an arithmetic function, not
-        // QUUX's multiply or divide, through the ALU or the left shift.
-        let lc_high = if paged && op.is_none() && !ctl.alumode && (osel == 1 || osel == 3) {
-            ttl::lc_high(m, a as u32, ctl.aluf, ctl.cin, osel == 3)
-        } else {
-            ob >> 32 & 3
-        };
-
-        // Revision 13's fixnum overflow flag (A1.3): an executed ALU-class
-        // word loads it, 1 for an arithmetic function (`IR<8:3>` 20-37)
-        // whose 33-bit result has bit 32 unlike bit 31.
-        let overflow =
-            (wide && iralu).then(|| field(ir, 8, 3) & 0o60 == 0o20 && bit(alu, 32) != bit(alu, 31));
-
-        // page FLAG. On revision 13 `AEQM` is the fields' equality, which
-        // M < A takes; M = A is all 40 bits (A1.3).
+        // page FLAG.
         let aluneg = !aeqm && bit(alu, 32);
         let sint = self.sintr && self.int_enable;
         let pgf_or_int = !vmaok || sint;
         let pgf_or_int_or_sb = pgf_or_int || self.sequence_break;
-        // Revision 13 decodes `IR<4:0>`: 10 the overflow flag, 11 M < A
-        // on the fields unsigned, every other number as its `IR<2:0>`.
-        let conds = match (bit(ir, 5), wide, field(ir, 4, 0)) {
-            (false, ..) => 0,
-            (true, true, c @ (0o10 | 0o11)) => c,
-            // Revision 14's condition 12 (A14.10).
-            (true, true, 0o12) if paged => 0o12,
-            (true, ..) => field(ir, 2, 0),
-        };
+        let conds = if bit(ir, 5) { field(ir, 2, 0) } else { 0 };
         let jcond = match conds {
             0 => bit(r, 0),
             1 => aluneg,
             2 => bit(alu, 32),
-            3 => aeqm && (!wide || m >> 32 == a >> 32),
+            3 => aeqm,
             4 => !vmaok,
             5 => pgf_or_int,
             6 => pgf_or_int_or_sb,
-            0o10 => self.m.overflow,
-            0o11 => (m as u32) < (a as u32),
-            0o12 => (m as u32) <= (a as u32),
             _ => true,
         };
 
@@ -1654,29 +1151,19 @@ impl Rtl {
         // `TRANSPORT` is `Q-DATA-TYPE-PLUS-ONE-BIT` for exactly this reason:
         // the field is one bit wider than the type so that the type lands at
         // `DADR<5:1>` and the map bit has bit 0 to itself.
-        //
-        // Revision 13's address is `IR<23:12>`, into 4,096 entries, and its
-        // map bits the entry's `<22>` and `<23>` (A1.4, A1.7).
         let len = field(ir, 7, 5);
         let dmask = (1u32 << len) - 1;
         let map = bit(ir, 8) || bit(ir, 9);
-        let meta = if wide { 22 } else { 18 };
-        let bits = if paged { vmo_b } else { vmo };
-        let daddr0 = (bit(ir, 8) && bit(bits as u64, meta))
-            || (bit(ir, 9) && bit(bits as u64, meta + 1))
+        let daddr0 = (bit(ir, 8) && bit(vmo as u64, 18))
+            || (bit(ir, 9) && bit(vmo as u64, 19))
             || (!map && (dmask & 1 != 0) && bit(r, 0))
             || bit(ir, 12);
-        let dhigh = if wide { field(ir, 23, 13) } else { field(ir, 22, 13) };
+        let dhigh = field(ir, 22, 13);
         let dadr = (((dhigh << 1) | daddr0 as u32) | (dmask & r as u32 & 0o176)) as u16;
         let dispwr = irdisp && (funct & 4) != 0;
-        // A dispatch memory write with `POPJ` reads the word it writes: on
-        // the CADR the one written, as `chip` has it, and on QUUX the one
-        // from before, which the RAM still holds in the read phase.
-        let dram_q = if dispwr && !self.m.geometry.old_word_while_written {
-            a as u32 & 0o377777
-        } else {
-            self.m.dmem[dadr as usize]
-        };
+        // A dispatch memory write with `POPJ` reads the word it writes: the
+        // one written, as `chip` has it.
+        let dram_q = if dispwr { a as u32 & 0o377777 } else { self.m.dmem[dadr as usize] };
 
         // page CONTRL --- sequencing
         let dr = bit(dram_q as u64, 16);
@@ -1704,92 +1191,7 @@ impl Rtl {
             || (dispenb && dp && !dr)
             || (irjump && !bit(ir, 6) && bit(ir, 8) && jcond);
 
-        // QUUX's fused return (`machine::macro_dispatch`): a return pop of
-        // the main loop's word where `SPCMUNG` would send it to the main
-        // loop's dispatch, no fetch needed, with nothing in this
-        // microinstruction that changes what the dispatch would see --- no
-        // push, no pop by the functional source, no write of M 31 or
-        // INTERRUPT-CONTROL, no step of the counter now (`LCINC`) --- goes
-        // to the MACRO DISPATCH MEMORY's handler for the halfword M 31 gives
-        // under the counter as `LCINC` steps it at the next edge, page
-        // SMCTL's gates on the stepped counter. M 31 is read as M is, with
-        // the pass-around from `L`. A jump's return fuses only while
-        // `JUMP_RETURNS_FUSE` says so.
-        let jump_pop = (jret && !bit(ir, 6) && jcond) || (jretf && !jcond);
-        // With QUUX's cache-only prefetch (`crate::memory_port`), a
-        // return that needs the next word in sequence fuses on the word in
-        // the buffer when it is that word (`LC<29:2>`, the address the
-        // stream's fetch will take) and condition 6 is false (the main
-        // loop's test on the fetch path, taken here instead of at `QMLP`).
-        // A transfer that has written main memory since the last cycle
-        // started counts as having dropped it.
-        let buffered = match &self.bus {
-            Bus::Quux(p) if needfetch && !have_wrong_word && !self.m.dma_written => {
-                p.prefetched().filter(|w| u64::from(w.vaddr) == (self.lc >> 2) & self.fetch_mask())
-            }
-            _ => None,
-        };
-        let refused = if buffered.is_none() {
-            None
-        } else if pgf_or_int_or_sb {
-            Some(0)
-        } else if self.memstart && self.wrcyc {
-            // A store started in the microcycle before, whose cycle, and
-            // its compare with the buffered word's physical address, goes
-            // out at this microcycle's edge.
-            Some(1)
-        } else {
-            None
-        };
-        let fusable = if self.m.geometry.macro_dispatch
-            && spop
-            && (crate::machine::macro_dispatch::JUMP_RETURNS_FUSE || !jump_pop)
-            && !srcspcpopreal
-            && !spush
-            && !trap
-            && !self.iwrited
-            && !lcinc
-            && (!needfetch || buffered.is_some())
-            && bit(spc as u64, 14)
-            && !(destm && wadr_in & 0o37 == 0o31)
-            && !destintctl
-        {
-            let inc = if self.lc_byte_mode { 1 } else { 2 };
-            let counter = self.m.geometry.lc_counter();
-            let lcs = self.lc.wrapping_add(inc) & counter;
-            let lcs32 = lcs as u32;
-            let index_rotate = crate::machine::macro_dispatch::index_rotate(wide);
-            let rotate = index_rotate as u64;
-            let lc0b = bit(lcs, 0) && self.lc_byte_mode;
-            let left = !(bit(lcs, 1) ^ lc0b);
-            let sh4 = !(left ^ !bit(rotate, 4));
-            let sh3 = !(!bit(rotate, 3) ^ (!bit(lcs32 as u64, 0) && self.lc_byte_mode));
-            let shift = (sh4 as u32) << 4 | (sh3 as u32) << 3 | (rotate as u32 & 7);
-            let m31 = if let Some(w) = buffered {
-                w.word
-            } else if self.destmd && self.wadr & 0o37 == 0o31 {
-                self.l
-            } else {
-                self.m.mmem[0o31]
-            };
-            let rotated = if wide {
-                ring_40(m31, self.lc_rotation_13(lcs, index_rotate))
-            } else {
-                Word::from((m31 as u32).rotate_left(shift))
-            };
-            self.m.macro_dispatch.fused_return(spc, rotated, index_rotate)
-        } else {
-            None
-        };
-        // A refusal is counted where the return would have fused on the
-        // buffered word.
-        let prefetch_refused = refused.filter(|_| fusable.is_some());
-        let fused = fusable.filter(|_| refused.is_none());
-        let prefetch_m31 = buffered.filter(|_| fused.is_some()).map(|w| w.word);
         let next_instr = spop && (!srcspcpopreal && bit(spc as u64, 14));
-        // The popped word stays, as the main loop's push would put it back,
-        // unless the entry's N would have nopped that push.
-        let spop = spop && !fused.is_some_and(|f| f.keep);
         let spcnt = spush | spop;
 
         let n = trap
@@ -1814,8 +1216,6 @@ impl Rtl {
         let spc_target = ((spc as u16) & 0o37774) | (spc1a as u16) << 1 | (spc as u16 & 1);
         let npc = if trap {
             self.m.reset_pc()
-        } else if let Some(f) = fused {
-            f.handler
         } else {
             match (pcs1 as u8) * 2 + pcs0 as u8 {
                 0 => spc_target,
@@ -1848,20 +1248,12 @@ impl Rtl {
         let idebug = self.m.clock_control.idebug;
         // `BOTTOM.1K` at PCTL 1D18 is the top four PC bits all clear:
         // `crate::machine::PROM_WORDS` says how the 1K is decoded.
-        // On QUUX the PROM has addresses of its own and no disable
-        // (`Geometry::prom_base`).
-        let (in_prom, prom_at) = match self.m.geometry.prom_base {
-            Some(base) => (self.pc >= base, self.pc.wrapping_sub(base) as usize),
-            None => (
-                (self.pc as usize) < crate::machine::PROM_WORDS && !self.promdisabled,
-                self.pc as usize,
-            ),
-        };
+        let in_prom = (self.pc as usize) < crate::machine::PROM_WORDS && !self.promdisabled;
         let promenable = in_prom && !self.iwrited && !idebug;
         let i = if idebug {
             self.m.debug_ir
         } else if promenable {
-            self.m.prom[prom_at].raw()
+            self.m.prom[self.pc as usize].raw()
         } else if self.iwrited {
             self.iwr & 0xffff_ffff_ffff
         } else {
@@ -1881,21 +1273,14 @@ impl Rtl {
 
         Read {
             nop,
-            fused: fused.is_some(),
-            operand: fused.and_then(|f| f.operand),
-            prefetch_m31,
-            prefetch_refused,
-            macro_write,
             irdisp,
             halt: funct & 2 != 0,
             i,
             a,
             m,
             alu,
-            alu_tag: tag,
             r,
             ob,
-            overflow,
             n,
             npc,
             dest,
@@ -1931,9 +1316,6 @@ impl Rtl {
             vmas,
             vmaenb,
             vmo,
-            port_b,
-            lc_high,
-            redirect,
             ilong: bit(ir, 45) && !nopa,
             statbit: bit(ir, 46) && !nopa,
             imod: destimod0 || destimod1 || self.iwrited || idebug,
@@ -1944,8 +1326,6 @@ impl Rtl {
             newlc_in,
             qs1: bit(ir, 1) && iralu,
             qs0: bit(ir, 0) && iralu,
-            muldiv: op,
-            muldiv_q,
             iwrite,
             vmaok,
             machrun,
@@ -1959,13 +1339,14 @@ impl Rtl {
     /// Everything written here belongs to the *previous* instruction, and
     /// every enable is a registered one.
     fn write_phase(&mut self, r: &Read) {
-        // QUUX's copies of `A-LOCALP` and `M-AP` take the word where the
+        // The copies of `A-LOCALP` and `M-AP` take the word where the
         // MACRO-DISPATCH register names its address, with the write pulse
-        // (`machine::macro_dispatch`).
+        // (`machine::macro_dispatch`), as on every engine: the CADR has no
+        // register, and its copies follow A and M location 0, which its
+        // checkpoint keeps.
         if self.destd {
             self.m.amem[self.wadr as usize] = self.l;
             self.m.macro_dispatch.a_written(self.wadr as usize, self.l);
-            self.m.a_written_14(self.wadr as usize, self.l);
         }
         if self.destmd {
             self.m.mmem[(self.wadr & 0o37) as usize] = self.l;
@@ -1985,18 +1366,7 @@ impl Rtl {
         if r.dispwr {
             self.m.dmem[r.dadr as usize] = r.a as u32 & 0o377777;
         }
-        if self.wmapd && self.m.geometry.paged() {
-            // Revision 14's `WRITE-MAP` operation (A14.4), `VMA`'s word at
-            // `MD`'s address; an operation drops the prefetch's word.
-            if self.m.write_map_14(self.m.vma, self.m.md, self.ns) {
-                self.drop_prefetched(crate::memory_port::Drop::MapWrite);
-            }
-        } else if self.wmapd && self.m.geometry.wide() {
-            // Revision 13's map write (A1.7), at the address on `MAPI` as
-            // on every machine.
-            let mapi = self.mapi();
-            self.m.write_map_13(self.m.vma, mapi);
-        } else if self.wmapd {
+        if self.wmapd {
             // `MAPWR0D` is `WMAPD AND VMA26` and `MAPWR1D` is `WMAPD AND
             // VMA25` at VCTL2 1C15, and both pulses are `-WP1`, so the two
             // levels are written in the same write phase.  Address and data
@@ -2066,11 +1436,6 @@ impl Rtl {
                 };
             }
             self.loadmd_at = ack.loadmd_at;
-            // QUUX's prefetch looks at the next word once a fetch is
-            // answered (`crate::memory_port`).
-            if let Bus::Quux(p) = &mut self.bus {
-                p.read_answered(&self.m.main);
-            }
         }
         // A debug cycle the other machine never answered: this interface's
         // own `NXM TIMEOUT` sets `UB NXM ERROR` in the 74276 at REQERR 0B02
@@ -2088,15 +1453,7 @@ impl Rtl {
         // `-RDFINISH` is a pulse off every acknowledgement, and the first
         // to reach a `READ IN PROGRESS` still up clears it: a write's
         // acknowledgement, behind a read whose own pulse is already on its
-        // way down the delay line, does not put the read's off. On QUUX,
-        // whose processor holds a start right after a start, that is a
-        // register read and then a register write started in the next
-        // microcycle: the read's `READ IN PROGRESS` falls between two
-        // edges, and the write is acknowledged at the second, which this
-        // engine handles before it lets the fall take effect there
-        // ([`Rtl::after_memack`])
-        // (`a_register_write_right_after_a_register_read_holds_md_no_longer`,
-        // `tests/quux_device_registers.rs`).
+        // way down the delay line, does not put the read's off.
         let (finish, release) = if ack.cached { (0, 0) } else { (RD_FINISH_NS, MFINISHD_NS) };
         let finish_at = ack.at + finish;
         self.rd_finish_at =
@@ -2136,9 +1493,6 @@ impl Rtl {
         }
         if now >= at {
             self.m.ns = at;
-            // When the write buffer is empty, for the file device's producer
-            // index (contract Q9).
-            self.m.write_buffer_empty_at = self.bus.write_buffer_empty_at();
             let data = if mode { self.bus_data & !Word::from(pulses) } else { self.bus_data };
             self.m.bus_write(self.bus_addr, data);
             self.bus_written = true;
@@ -2356,157 +1710,26 @@ impl Rtl {
     /// for nothing more, and the first is lost ([`Rtl::start_bus_cycle`]).
     /// The board does exactly that
     /// (`on_the_board_a_start_right_after_a_start_loses_the_first`,
-    /// `tests/chip.rs`). **QUUX holds it** instead, a `-WAIT` term of its
-    /// own, `MEMSTART AND MEMOP`: the first cycle goes out at the next
-    /// master clock edge, `MBUSY.SYNC` then holds the second start until
-    /// that cycle ends, and both land as written, as `micro` has them,
-    /// a read's word with the second's kept beside it (`Micro::pend_md`;
-    /// `a_start_right_after_a_start_waits_for_it`,
-    /// `tests/quux_device_registers.rs`). **Unverified** that muir-fpga's
-    /// fabric holds it the same way.
+    /// `tests/chip.rs`).
     fn stall(&self, r: &Read) -> Option<Stall> {
         let wait = (r.destmem && self.mbusy_sync)
-            || (r.memop && self.memstart && self.bus.holds_a_start_after_a_start())
             || (r.use_md && self.mbusy && !self.bus.granted())
-            || (r.lcinc && r.needfetch && self.mbusy_sync)
-            || (self.dividing(r) && !self.md_interlock(r));
+            || (r.lcinc && r.needfetch && self.mbusy_sync);
         if wait {
             return Some(Stall::Wait);
         }
         if r.use_md && self.rd_in_progress {
-            return Some(if self.m.geometry.hangs { Stall::Hang } else { Stall::Hold });
+            return Some(Stall::Hang);
         }
         None
-    }
-
-    /// **Revision 14's hold for the TLB** (A14.4-A14.6), before the
-    /// microcycle whose read phase looks it up: port A when a start's
-    /// `MEMSTART` is up, port B for `MAP(MD)` or a dispatch on a pointer
-    /// type's map bits. While a sweep runs, they wait for its end. A miss
-    /// walks: [`Machine::tlb_fill`] reads the tables and loads what it
-    /// found, and the processor is held while the memory port reads the
-    /// directory entry and the page entry through the cache, no earlier
-    /// than the acknowledgement of the processor's cycle in flight
-    /// ([`MemoryPort::walk_taken_at`]), a hit in the cache's hit time and a
-    /// miss a line fill when main memory is free.
-    /// The hold is whole microcycles, the master clock and the bus running
-    /// on. A port looks an address up once a microcycle, and port B again
-    /// when `MD` changes while the microcycle waits, a miss then walking as
-    /// any other. Whether it held, the read phase to be taken again.
-    fn tlb_hold(&mut self, r: &Read) -> bool {
-        if !self.memstart && !r.port_b {
-            return false;
-        }
-        let mut until = self.ns;
-        if self.m.tlb.sweep_until > self.ns {
-            until = self.m.tlb.sweep_until;
-        } else {
-            let ports =
-                [self.memstart.then_some(self.m.vma as u32), r.port_b.then_some(self.m.md as u32)];
-            let mut missed = [None; 2];
-            let md_wait = r.port_b && self.md_interlock(r);
-            for (port, va) in ports.into_iter().enumerate() {
-                let Some(va) = va.filter(|&va| self.looked[port] != Some(va)) else { continue };
-                self.looked[port] = Some(va);
-                let which = [crate::tlb::Port::A, crate::tlb::Port::B][port];
-                let Some(walk) = self.m.tlb_fill(va, which) else { continue };
-                if port == 0 {
-                    self.walked_a = true;
-                }
-                missed[port] = Some(self.m.tlb.index(va));
-                if port == 1 && md_wait {
-                    self.m.tlb.walks_waiting_md += 1;
-                }
-                if let Bus::Quux(p) = &mut self.bus {
-                    // The profile's meter: a walk behind the cycle in flight.
-                    let taken = p.walk_taken_at(until);
-                    if walk.reads.iter().flatten().next().is_some() && taken > until {
-                        self.m.tlb.walks_waited[port] += 1;
-                        self.m.tlb.walks_waited_ns[port] += taken - until;
-                    }
-                    for phys in walk.reads.into_iter().flatten() {
-                        until = p.walk_read(until, phys);
-                    }
-                }
-            }
-            if let [Some(a), Some(b)] = missed
-                && a == b
-            {
-                self.m.tlb.double_misses += 1;
-            }
-        }
-        let cycle = self.timing.cycle_ns(self.speed, r.ilong) as u64;
-        // The redirect inside the buffer holds the microcycle after the
-        // start one microcycle, the port using the PDL buffer's (A14.7).
-        if until <= self.ns
-            && self.memstart
-            && !self.redirect_held
-            && matches!(r.redirect, Some(crate::tlb::Redirect::Inside(_)))
-        {
-            self.redirect_held = true;
-            until = self.ns + cycle;
-        }
-        if until <= self.ns {
-            return false;
-        }
-        let held = (until - self.ns).div_ceil(cycle) * cycle;
-        for _ in 0..held / cycle {
-            self.ns += cycle;
-            self.bus_cycle(self.ns);
-            self.after_memack(self.ns);
-        }
-        self.m.tlb.held_ns += held;
-        self.stalled_ns += held;
-        true
-    }
-
-    /// **Revision 14's write-back** (A14.6, A14.8) of the cycle going out
-    /// now, `write` its direction, with `MD` the word it writes: the bits
-    /// [`Machine::write_back`] sets, and the port's time for them, which
-    /// the cycle waits behind. The directory entry and the page entry are
-    /// read again through the cache, after a TLB hit too, unless port A's
-    /// walk in this microcycle has just read them for this reference, and
-    /// the page entry is written through the write buffer.
-    fn write_back(&mut self, write: bool) {
-        let va = self.m.vma as u32;
-        let Some(wb) = self.m.write_back(va, self.lvmo, write, self.m.md) else { return };
-        let Bus::Quux(p) = &mut self.bus else { return };
-        let mut t = self.ns;
-        if !self.walked_a {
-            for phys in wb.reads.into_iter().flatten() {
-                t = p.write_back_read(t, phys);
-            }
-        }
-        if let Some(phys) = wb.write {
-            t = p.walk_write(t, phys);
-        }
-        p.write_back_until(t);
     }
 
     /// The MD interlock: the instruction reads `MD` while a read is in
     /// progress, and waits for its word --- `-WAIT`'s `USE.MD AND MBUSY AND
     /// -MEMGRANT` before the grant, `-HANG`'s `RD.IN.PROGRESS AND USE.MD`
-    /// (or QUUX's hold) after it, [`Rtl::stall`].
+    /// after it, [`Rtl::stall`].
     fn md_interlock(&self, r: &Read) -> bool {
         r.use_md && ((self.mbusy && !self.bus.granted()) || self.rd_in_progress)
-    }
-
-    /// QUUX's divider is busy: a `DIV` stands in `IR`, not nopped, and
-    /// [`muldiv::DIV_CYCLES`] generator cycles have not passed since its
-    /// operands were ready --- since the edge that clocked it into `IR`, or
-    /// for a `DIV` of `MD` since the MD interlock let it go
-    /// ([`Rtl::div_from_ns`]), QUUX's rule. It is a
-    /// `-WAIT` term of QUUX's own, so the master clock runs on, the
-    /// microcycle starts at the first master clock edge after the divider
-    /// is done, and a single step does not wait for it. The count starts
-    /// after the MD interlock and not after `-WAIT`'s other terms, which
-    /// hold the instruction and not its operands: the rule counts from
-    /// when the operands are ready. **Unverified** that muir-fpga's fabric
-    /// overlaps those other waits with the count the same way; a `DIV`
-    /// writing a memory destination while a cycle is busy would settle it.
-    fn dividing(&self, r: &Read) -> bool {
-        let cycle = self.timing.cycle_ns(self.speed, r.ilong) as u64;
-        r.muldiv == Some(muldiv::Op::Div) && self.ns < self.div_from_ns + muldiv::DIV_CYCLES * cycle
     }
 
     /// Holds the microcycle off until the bus has moved on.
@@ -2525,7 +1748,7 @@ impl Rtl {
             // The generator cycle the cpu sits out is as long as the
             // instruction standing in `IR` asks: `-ILONG` is `NAND(IR45,
             // -NOPA)`, and the waiting instruction is not nopped.
-            Stall::Wait | Stall::Hold => {
+            Stall::Wait => {
                 self.master_clock_cycle(r);
             }
             // Both clocks stop. The Xbus cycle is already running and
@@ -2671,23 +1894,14 @@ impl Rtl {
     /// (`on_the_board_a_start_right_after_a_start_loses_the_first`,
     /// `a_start_right_after_a_start_goes_out_as_the_second`,
     /// `a_fetch_right_after_a_write_loses_the_write`, `tests/chip.rs`).
-    /// QUUX never gets here: it holds the second start ([`Rtl::stall`]).
     /// The bus interface keeps the responder it decoded for the first
     /// address; **unverified** what the board does when the second start's
     /// address is on another responder, which a start on main memory then
     /// one on the Unibus would settle.
     /// The cycle's physical address, from the latched map word and `VMA`:
-    /// the page `VMO<13:0>` and `VMA<7:0>`, and on revision 13 the page
-    /// `<17:0>` and `VMA<9:0>`, 1024-word pages (contract G2 §2.6, A1.7).
+    /// the page `VMO<13:0>` and `VMA<7:0>`.
     fn physical(&self) -> u32 {
-        if self.m.geometry.paged() {
-            // Revision 14's 29-bit bus address (A14.1).
-            crate::tlb::bus_address(self.m.vma as u32, self.lvmo)
-        } else if self.m.geometry.wide() {
-            (self.lvmo & 0o777777) << 10 | (self.m.vma as u32 & 0o1777)
-        } else {
-            (self.lvmo & 0x3fff) << 8 | (self.m.vma as u32 & 0xff)
-        }
+        (self.lvmo & 0x3fff) << 8 | (self.m.vma as u32 & 0xff)
     }
 
     fn start_bus_cycle(&mut self, r: &Read, wrcyc: bool) {
@@ -2702,21 +1916,7 @@ impl Rtl {
                         self.rd_finish_at = u64::MAX;
                     }
                 }
-            } else if let (true, Some(crate::tlb::Redirect::Inside(i))) = (r.vmaok, r.redirect) {
-                // Revision 14's redirect inside the PDL buffer (A14.7): no
-                // memory cycle and no write-back. A read's word is in `MD`
-                // from the next microcycle; a write puts the word `MD` holds
-                // now, the microcycle after the start's, in the buffer.
-                self.m.tlb.redirects[0] += 1;
-                if wrcyc {
-                    self.m.pdl[i as usize] = self.m.md;
-                } else {
-                    self.m.md = self.m.pdl[i as usize];
-                }
             } else if r.vmaok {
-                if r.redirect == Some(crate::tlb::Redirect::Outside) {
-                    self.m.tlb.redirects[1] += 1;
-                }
                 self.mbusy = true;
                 // The bus interface holds the address and, on a write, the
                 // word, until the cycle ends: `xspec.text.3` requires the
@@ -2731,44 +1931,20 @@ impl Rtl {
                 // `tests/chip.rs`).
                 self.bus_addr = self.physical();
                 self.bus_data = self.m.md;
-                self.bus_responder = if self.m.geometry.has_register_page() {
-                    // QUUX: its frame buffer window on the memory bus with
-                    // main memory, through the cache (contract Q7); the
-                    // register page's device registers; nothing else, no
-                    // Unibus window among it (contracts Q5, Q13).
-                    let decode = if self.m.geometry.paged() {
-                        busint::decode_quux_14
-                    } else {
-                        busint::decode_quux_13
-                    };
-                    decode(self.bus_addr, self.m.main.len(), self.m.tv.buffer_words())
-                } else {
-                    busint::decode_for(
-                        self.bus_addr,
-                        self.m.main.len(),
-                        self.m.color_tv.is_some(),
-                        self.m.tv.buffer_words(),
-                        self.m.tv.control_registers(),
-                    )
-                };
+                self.bus_responder = busint::decode_for(
+                    self.bus_addr,
+                    self.m.main.len(),
+                    self.m.color_tv.is_some(),
+                    self.m.tv.buffer_words(),
+                    self.m.tv.control_registers(),
+                );
                 if std::mem::take(&mut self.m.dma_written) {
                     self.bus.invalidate_cache();
                 }
-                if self.m.geometry.paged() {
-                    self.write_back(wrcyc);
-                }
                 self.bus.request_at(wrcyc, self.bus_addr);
-                if self.memstart_fetch
-                    && let Bus::Quux(p) = &mut self.bus
-                {
-                    p.mark_fetch(self.m.vma as u32);
-                }
                 self.bus_cycles += 1;
                 self.bus_written = false;
-                // Revision 13 has no Unibus window (`Machine::bus_read`).
-                self.bus_spy = busint::unibus_address(self.bus_addr)
-                    .and_then(spy::register)
-                    .filter(|_| !self.m.geometry.wide());
+                self.bus_spy = busint::unibus_address(self.bus_addr).and_then(spy::register);
                 self.bus_sampled = false;
                 self.bus_pulsed = false;
                 // `READ IN PROGRESS` comes up on the same edge, for a read,
@@ -2850,29 +2026,6 @@ impl Rtl {
         self.destmd = r.destm;
         // page L
         self.l = r.ob;
-        // The cache-only prefetch's word for a fused return on the fetch
-        // path (`crate::memory_port`, contract H8a §3.5): M 31 is a
-        // register beside M memory, which reads of A and M address 31 take,
-        // loaded at the edge ending the next microcycle,
-        // [`crate::machine::MacroDispatch::m31`], as the operand address
-        // is: that microcycle reads the old word, as it does on the path
-        // the return skips, and the handler the new one. Taken at the start
-        // of this edge so that it is the word armed by the microcycle
-        // before.
-        let m31_armed = self.m.macro_dispatch.m31.take();
-        if let (Some(word), Bus::Quux(p)) = (r.prefetch_m31, &mut self.bus) {
-            p.prefetch_counts.used += 1;
-            self.m.macro_dispatch.m31 = Some(word);
-        }
-        if let (Some(k), Bus::Quux(p)) = (r.prefetch_refused, &mut self.bus) {
-            p.prefetch_counts.refused[k] += 1;
-        }
-        if let Some(word) = m31_armed {
-            self.m.mmem[0o31] = word;
-            self.m.amem[0o31] = word;
-            self.m.macro_dispatch.a_written(0o31, word);
-            self.m.macro_dispatch.m_written(0o31, word);
-        }
         // page PDLCTL
         self.pwidx = r.destpdl_x;
         self.pdlwrited = r.pdlwrite;
@@ -2930,50 +2083,24 @@ impl Rtl {
         self.div_from_ns = self.ns;
 
         // page LC
-        // Revision 13's counter is `LC<29:0>` (A1.6).
-        // Revision 14's is `LC<33:0>`, `<33:32>` from the read phase: the
-        // word's, or LC's adder's (A14.11).
         let counter = self.m.geometry.lc_counter();
         if r.destlc {
-            let value = if self.m.geometry.paged() { r.ob & LOW | r.lc_high << 32 } else { r.ob };
-            self.lc = value & counter;
-            self.drop_prefetched(crate::memory_port::Drop::LcWrite);
+            self.lc = r.ob & counter;
         } else {
             let inc = (r.lcinc && !self.lc_byte_mode) as u64 + r.lcinc as u64;
             self.lc = (self.lc & counter).wrapping_add(inc) & counter;
         }
-        // Revision 13's fixnum overflow flag (A1.3).
-        if let Some(v) = r.overflow {
-            self.m.overflow = v;
-        }
-        // QUUX's MACRO-DISPATCH register and MACRO DISPATCH MEMORY
-        // (`machine::macro_dispatch`).
-        if let Some(code) = r.macro_write {
-            self.m.macro_dispatch.write(code, r.ob as u32);
-        }
-        if r.fused {
-            self.m.macro_dispatch.fused += 1;
-        }
         // page FLAG
-        if r.destintctl && self.m.geometry.wide() {
-            // Revision 13 takes the flags from `<37:34>` (A1.6).
-            self.lc_byte_mode = bit(r.ob, 37);
-            self.prog_unibus_reset = bit(r.ob, 36);
-            self.int_enable = bit(r.ob, 35);
-            self.sequence_break = bit(r.ob, 34);
-        } else if r.destintctl {
+        if r.destintctl {
             self.lc_byte_mode = bit(r.ob, 29);
             let reset = bit(r.ob, 28);
             if reset != self.prog_unibus_reset {
                 // The interface puts it on the backplane as `-XBUS INIT`
                 // and `-UB INIT`: the memory boards are held by it, and the
                 // model I/O boards clear what their reset pins clear,
-                // `Machine::bus_reset`. QUUX has no `PROG.UNIBUS.RESET`
-                // (contract Q11): the bit is kept and read back, and drives
-                // nothing; its devices are reset by the register page's
-                // word 104.
+                // `Machine::bus_reset`.
                 self.bus.unibus_reset(self.ns, reset);
-                if reset && self.m.geometry.unibus {
+                if reset {
                     self.m.bus_reset();
                 }
             }
@@ -2988,13 +2115,11 @@ impl Rtl {
         // function.
         let q_high = self.m.q & !LOW;
         let q_low = self.m.q as u32;
-        if r.muldiv.is_some() {
-            self.m.q = q_high | Word::from(r.muldiv_q);
-        } else if r.qs1 || r.qs0 {
+        if r.qs1 || r.qs0 {
             self.m.q = match (r.qs1 as u8) * 2 + r.qs0 as u8 {
                 1 => q_high | Word::from((q_low << 1) | (!bit(r.alu, 31)) as u32),
                 2 => q_high | Word::from(((r.alu as u32 & 1) << 31) | (q_low >> 1)),
-                _ => (r.alu & LOW) | r.alu_tag,
+                _ => r.alu & LOW,
             };
         }
 
@@ -3011,15 +2136,6 @@ impl Rtl {
         if r.destpdlx {
             self.m.pdl_index = r.ob as u16 & self.m.geometry.pdl_mask();
         }
-        // QUUX's operand address (`machine::macro_dispatch`): armed at the
-        // edge ending a fused return, loaded at the edge ending the
-        // microcycle after it, over anything that microcycle wrote there,
-        // from the base copies as its write pulse has left them.
-        if let Some(o) = self.m.macro_dispatch.operand.take() {
-            let adr = self.m.macro_dispatch.operand_address(o);
-            self.m.pdl_index = adr as u16 & self.m.geometry.pdl_mask();
-        }
-        self.m.macro_dispatch.operand = r.operand;
         if r.destpdlp {
             self.m.pdl_pointer = r.ob as u16 & self.m.geometry.pdl_mask();
         } else if r.pdlcnt {
@@ -3039,26 +2155,12 @@ impl Rtl {
         if r.vmaenb {
             self.m.vma = r.vmas;
         }
-        // The prefetch's word is dropped by a map write, which lands in the
-        // next microcycle's write pulse, and by a transfer that has written
-        // main memory. A store to it drops it when its cycle goes out
-        // ([`MemoryPort::request_at`]), and the read phase takes no word
-        // while a store's start stands before that.
-        if r.wmap && !self.m.geometry.paged() {
-            self.drop_prefetched(crate::memory_port::Drop::MapWrite);
-        } else if self.m.dma_written {
-            self.drop_prefetched(crate::memory_port::Drop::Dma);
-        }
-
         // page VCTL1: the memory cycle.  MEMPREPARE is the write phase's
         // level, MEMSTART its registered copy, so a cycle prepared here runs
         // over the next microcycle. The bus is given `WRCYC` as this edge
         // leaves it, below: a cycle going out at the edge that starts
         // another takes the new one's direction.
         self.start_bus_cycle(r, if r.memop { r.memwr } else { self.wrcyc });
-        self.looked = [None; 2];
-        self.walked_a = false;
-        self.redirect_held = false;
         // `WRCYC` and `RDCYC` are one flip-flop: 1C23's 74S175 on `CLK2A`,
         // whose D comes off the 74S51 at 1D16 as
         // `NOT((MEMPREPARE AND -MEMWR) OR (-MEMPREPARE AND RDCYC))`.  With
@@ -3111,24 +2213,12 @@ impl Rtl {
     /// acknowledgement lands no earlier than 80 ns in and a mode register it
     /// loads is seen by the next cycle's edge and not this one's.
     /// `SPEEDCLK`'s instant in this generator cycle, which writes are
-    /// carried to so that the speed synchronizer sees a new mode: none
-    /// under `sync`, whose microcycle is shorter than the 60 ns it comes at
-    /// and which has no synchronizer, QUUX having no speed bits. A write
-    /// lands at the edge instead, as every write does.
+    /// carried to so that the speed synchronizer sees a new mode.
     fn speedclk_at(&self) -> Option<u64> {
-        match self.timing {
-            TimingModel::Sync { .. } => None,
-            _ => Some(self.ns + SPEEDCLK_NS),
-        }
+        Some(self.ns + SPEEDCLK_NS)
     }
 
     fn speedclk(&mut self) {
-        // QUUX runs at one rate, the CADR's normal until its own timing
-        // model says otherwise; it has no speed bits to synchronize.
-        if !self.m.geometry.speed_bits {
-            (self.speed, self.speed_a) = (Speed::Normal, Speed::Normal);
-            return;
-        }
         self.speed = self.speed_a;
         self.speed_a = match (self.m.mode.speed1, self.m.mode.speed0) {
             (false, false) => Speed::ExtraSlow,
@@ -3178,10 +2268,9 @@ impl Rtl {
 impl Rtl {
     /// The bus interface as this engine has it: what a far end built beside
     /// a resumed board must be given, because the interface keeps state
-    /// between cycles --- it holds the Unibus once it has had it. QUUX has
-    /// none (contract Q6).
+    /// between cycles --- it holds the Unibus once it has had it.
     pub fn busint(&self) -> Option<&Busint> {
-        self.bus.cadr()
+        Some(&self.bus)
     }
 
     /// Sets the clock before the machine has run: the instant it is powered
@@ -3257,7 +2346,7 @@ impl Rtl {
         // A register strobe is acknowledged the instant it is made, the
         // 74S10 at DBGIN 0A14, and the debugger may be told so at once.
         self.debug_answer = (req.strobe != busint::DEBUG_CYCLE).then_some((at, self.debug_word));
-        self.bus.cable().debug_request(at, req, responder);
+        self.bus.debug_request(at, req, responder);
         Ok(())
     }
 
@@ -3280,7 +2369,7 @@ impl Rtl {
     /// as [`Rtl::try_debug_request`] refuses a request.
     pub fn try_debug_release(&mut self, at: u64) -> Result<(), String> {
         let at = Self::recent(at, self.ns, "release")?;
-        self.bus.cable().debug_release(at);
+        self.bus.debug_release(at);
         Ok(())
     }
 
@@ -3314,7 +2403,7 @@ impl Rtl {
     /// machine's `DEBUG ACK`, [`Rtl::debug_out_answer`], instead of the
     /// pull-up's.
     pub fn attach_debug_cable(&mut self) {
-        self.bus.cable().attach_debug_cable();
+        self.bus.attach_debug_cable();
     }
 
     /// The event this machine's DBGOUT has put on the cable, if one is
@@ -3348,7 +2437,7 @@ impl Rtl {
     /// whether this interface was still waiting for it; after its own
     /// timeout it is not.
     pub fn debug_out_answer(&mut self, ack_at: u64, word: Option<u16>) -> bool {
-        if !self.bus.cable().debug_out_answer(ack_at) {
+        if !self.bus.debug_out_answer(ack_at) {
             return false;
         }
         self.debug_out_word = word.unwrap_or(0xffff);
@@ -3448,21 +2537,12 @@ impl Rtl {
             d.advance(self.ns);
         }
         self.m.ioboard.advance(self.ns);
-        // QUUX's file device completes what is due by this edge, before the
-        // microcycle begins (contract Q9); what it wrote in main memory
-        // invalidates the cache before the next bus cycle's lookup.
-        self.m.advance_file_device();
         // A stall resolves within the bus timeout, `busint::TIMEOUT_NS`, so a
         // microcycle that never starts is a bug in this engine rather than
         // something the board would do. Say so loudly.
         let mut stalls = 0;
         loop {
             let r = self.read_phase();
-            // Revision 14: a start or a port-B lookup waits for a sweep, and
-            // a miss walks, before the microcycle runs (A14.4, A14.6).
-            if r.machrun && self.m.geometry.paged() && self.tlb_hold(&r) {
-                continue;
-            }
             self.trace = [
                 self.pc as u64,
                 self.ir,
@@ -3731,9 +2811,6 @@ impl Engine for Rtl {
             // Cleared every microcycle, and only the profile reads it.
             fetch_started: _,
             memstart_fetch,
-            looked: _,
-            walked_a: _,
-            redirect_held: _,
         } = self;
         m.save(w);
         w.u64s(trace);
@@ -3777,16 +2854,9 @@ impl Engine for Rtl {
         w.bool(*mbusy);
         w.bool(*rdcyc);
         w.bool(*wrcyc);
-        match bus {
-            Bus::Cadr(b) => {
-                w.u8(0);
-                b.save(w);
-            }
-            Bus::Quux(p) => {
-                w.u8(1);
-                p.save(w);
-            }
-        }
+        // The bus's kind, 0 the bus interface's, as the format has it.
+        w.u8(0);
+        bus.save(w);
         w.bool(*mbusy_sync);
         w.u32(*bus_addr);
         w.word(*bus_data);
@@ -3827,21 +2897,12 @@ impl Engine for Rtl {
         match *timing {
             TimingModel::Cadr => w.u8(0),
             TimingModel::Fpga => w.u8(1),
-            TimingModel::Sync { cycle_ticks, ilong_ticks } => {
-                w.u8(2);
-                w.u8(cycle_ticks);
-                w.u8(ilong_ticks);
-            }
         }
         w.u64(*ns);
         w.word(*busint_bus);
         w.u64(*loadmd_at);
         w.opt(*executed, crate::checkpoint::Writer::u16);
         w.bool(*memstart_fetch);
-        // Revision 14's counter's `<33:32>` (A14.14).
-        if m.geometry.paged() {
-            w.u8((*lc >> 32) as u8);
-        }
     }
 
     fn load(&mut self, r: &mut crate::checkpoint::Reader) -> std::io::Result<()> {
@@ -3892,15 +2953,7 @@ impl Engine for Rtl {
             0 => {
                 let mut b = Busint::with_timing_model(self.m.memory_boards(), self.timing);
                 b.load(r)?;
-                Bus::Cadr(Box::new(b))
-            }
-            1 => {
-                // The prefetch's reach is this engine's setting; its word
-                // is the checkpoint's.
-                let mut p = MemoryPort::for_geometry(&self.m.geometry);
-                p.set_prefetch(self.prefetch());
-                p.load(r)?;
-                Bus::Quux(Box::new(p))
+                Box::new(b)
             }
             k => return Err(crate::checkpoint::bad(format!("bus kind {k}"))),
         };
@@ -3941,7 +2994,6 @@ impl Engine for Rtl {
         self.timing = match r.u8()? {
             0 => TimingModel::Cadr,
             1 => TimingModel::Fpga,
-            2 => TimingModel::Sync { cycle_ticks: r.u8()?, ilong_ticks: r.u8()? },
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -3954,12 +3006,6 @@ impl Engine for Rtl {
         self.loadmd_at = r.u64()?;
         self.executed = r.opt(Reader::u16)?;
         self.memstart_fetch = r.bool()?;
-        // Revision 14: the counter's `<33:32>`, and the TLB, which is not
-        // kept, swept from the resume's instant (A14.14).
-        if self.m.geometry.paged() {
-            self.lc |= u64::from(r.u8()? & 3) << 32;
-            self.m.sweep_tlb(self.ns);
-        }
         self.bus.keep_timing_model(self.timing);
         self.m.disk.set_timing_model(self.timing);
         Ok(())

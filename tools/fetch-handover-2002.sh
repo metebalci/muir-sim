@@ -45,7 +45,8 @@
 # names another place to download from. Before anything is decompressed or
 # copied, the sources must unpack to one `release-2NNN-*/` directory, a
 # QUUX system's number, and each disk must be a dynamic VHD holding a GPT
-# (the same check as tools/fetch-system-for-quux.sh's) laid out as QUUX's
+# (`conectix` in its last 512 bytes, `EFI PART` at the start of its sector
+# 1, found through the VHD's block table) laid out as QUUX's
 # release disk is: 853,359 blocks of 1024 bytes, a PAGE partition of
 # 655,360 blocks (128MW), microcode 2002 in the current MCR1,
 # "MCR1 UCADR 2002", and the band in the current LOD1, "LOD1 System 2002".
@@ -116,8 +117,14 @@ le() {
 }
 
 # Whether file $1 is a dynamic VHD whose disk holds a GPT, saying why not
-# on stderr: tools/fetch-system-for-quux.sh's check, which cites Microsoft's
-# VHD specification and UEFI for each field.
+# on stderr. Microsoft's VHD specification (October 2006), every field
+# big-endian: the footer is the file's last 512 bytes, cookie `conectix` at
+# 0, the dynamic header's offset at 16, the disk type at 60 (3, dynamic);
+# the dynamic header has cookie `cxsparse` at 0, the block table's offset at
+# 16 and the block size at 32; a table entry is the sector where a block's
+# sector bitmap begins, the block's data after the bitmap, or FFFFFFFF for a
+# block not allocated, which reads as zeros. The GPT's header is the disk's
+# sector 1 (UEFI 2.10, 5.3.1), in block 0.
 vhd_holds_gpt() {
     name=${1#"$muir"/}
     size=$(wc -c < "$1")

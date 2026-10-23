@@ -25,27 +25,10 @@
 //! The main-memory section's size field is not a count of words in the
 //! file; the note under [`parse`] says what it is.
 //!
-//! **QUUX's `.mcr` is in partition order** (contract Q8): the same sections
-//! with the two 16-bit halves of every 32-bit word swapped, so that each
-//! word is stored little-endian, as it lies in a microcode partition and as
-//! block-disk reads it, and a whole number of 1024-byte blocks, so that
-//! `dd` writes the file into a partition with no conversion. muir-sys's
-//! writer, `sys/sys/qwmcr.lisp` at its commit `7749360`, makes it for both
-//! the microcode and the boot PROM. [`parse_partition_order`] reads it;
-//! [`swap_halves`] turns either order into the other. The CADR's `.mcr`
-//! stays MIT's.
+//! [`swap_halves`] turns MIT's order into partition order, the two 16-bit
+//! halves of every 32-bit word swapped (contract Q8), and back.
 //!
-//! **QUUX revision 13's `.mcr`** (contract G2 appendix A1.4, A1.12) has a
-//! dispatch memory section of `10000` entries and A memory as section 5,
-//! 40-bit words, each location two 32-bit words: `<31:0>`, then `<39:32>`
-//! in `<7:0>`.
-//!
-//! **QUUX revision 14's `.mcr`** (contract G3 revision 14, appendix A14.13)
-//! opens with section 6, microcode and boot PROM alike: code 6, start 0,
-//! count 1, then one 32-bit word, the hardware revision, 14.
-//! [`Mcr::check_revision`] holds a file to the machine it is loaded on.
-//!
-//! **QUUX revision 15's `.mcr`** (contract G3 revision 15, appendix
+//! **QUUX's `.mcr`** (contract G3 revision 15, appendix
 //! A15b.7) is self-describing: little-endian 32-bit words, a file header
 //! of two words, the format word [`FORMAT_WORD`] and the number of
 //! sections, then each section an 8-word header --- the type, the number of
@@ -300,74 +283,42 @@ impl Mcr {
         self.amem.get(i).map(|&w| w as u32 & 0o77777777)
     }
 
-    /// Whether the file is for a machine of `geometry`'s revision, by its
-    /// section 6 (contract G3 revision 14, appendix A14.13). A file with
-    /// section 6 is revision 14's: below 14, and on the CADR, no boot PROM
-    /// reads section 6 (PROM 2001 halts at ERROR-BAD-SECTION-TYPE), and on
-    /// revision 14 its word must be 14. On revision 16 it must be 15, the
-    /// microinstruction's revision. A `microcode` file without one is
-    /// revision 13's, which revision 14's PROM 2002 refuses; a boot PROM
-    /// without one is not refused here.
+    /// Whether the file is for a machine of `geometry`, by its format and
+    /// its section 6 (contract G3 revision 14, appendix A14.13; A15b.1).
+    /// QUUX reads the format word's files, the CADR MIT's sections. Section
+    /// 6 names the microinstruction's revision: on QUUX it must be 15, the
+    /// revision of its 64-bit microinstruction (QUUX's Ethernet contract,
+    /// §10); the CADR reads no section 6. A `microcode` file without one is refused on QUUX; a boot
+    /// PROM without one is not refused here.
     pub fn check_revision(
         &self,
         geometry: crate::machine::Geometry,
         microcode: bool,
     ) -> Result<(), String> {
-        // Revision 15's format and MIT's sections are each one machine's
-        // (A15b.1): the format named with the revision.
-        match (self.format, geometry.extended()) {
-            (Some(_), false) => {
-                return Err(format!(
-                    "a revision-15 .mcr, format word {FORMAT_WORD:08x}, for hardware revision {}, and this is {}, which reads MIT's sections",
-                    self.hardware_revision.unwrap_or(0),
-                    match geometry.revision() {
-                        Some(r) => format!("revision {r}"),
-                        None => "the CADR".to_string(),
-                    }
-                ));
-            }
-            (None, true) => {
-                return Err(format!(
-                    "MIT's sections, a file for {}, and this is revision 15, which reads the format word {FORMAT_WORD:08x}'s",
-                    match self.hardware_revision {
-                        Some(r) => format!("hardware revision {r}"),
-                        None => "revision 13 or below".to_string(),
-                    }
-                ));
-            }
-            _ => {}
+        if self.format.is_some() && !geometry.quux() {
+            return Err(format!(
+                "a QUUX .mcr, format word {FORMAT_WORD:08x}, and this is the CADR, which reads MIT's sections"
+            ));
         }
-        // Section 6 names the microinstruction's revision, so revision 16,
-        // revision 15's microinstruction with the Ethernet device, loads
-        // revision 15's files: one microcode runs on both (QUUX's
-        // Ethernet contract, §10).
-        let says = |ours: u32| if ours >= 16 { 15 } else { ours };
-        match (self.hardware_revision, geometry.revision()) {
-            (Some(r), None) => Err(format!(
+        match (self.hardware_revision, geometry.quux()) {
+            (Some(r), false) => Err(format!(
                 "section 6 says hardware revision {r}, and the CADR reads no section 6"
             )),
-            (Some(r), Some(ours)) if ours < 14 => Err(format!(
-                "section 6 says hardware revision {r}, and this is revision {ours}, \
-                 which reads no section 6"
+            (Some(r), true) if r != SECTION_6_QUUX => Err(format!(
+                "section 6 says hardware revision {r}, and QUUX loads files whose section 6 says {SECTION_6_QUUX}"
             )),
-            (Some(r), Some(ours)) if r != says(ours) => Err(if ours == says(ours) {
-                format!("section 6 says hardware revision {r}, and this is revision {ours}")
-            } else {
-                format!(
-                    "section 6 says hardware revision {r}, and this is revision {ours}, \
-                     which loads revision {}'s",
-                    says(ours)
-                )
-            }),
-            (None, Some(ours)) if ours >= 14 && microcode => Err(format!(
-                "no section 6 first: microcode for revision 13 or below, \
-                 and revision {ours} loads microcode whose section 6 says {}",
-                says(ours)
+            (None, true) if microcode => Err(format!(
+                "no section 6 first, and QUUX loads microcode whose section 6 says {SECTION_6_QUUX}"
             )),
             _ => Ok(()),
         }
     }
 }
+
+/// What section 6 of QUUX's `.mcr` says: 15, the revision of the 64-bit
+/// microinstruction (A15b.1, A15b.7), which QUUX's boot PROM takes and
+/// nothing else.
+pub const SECTION_6_QUUX: u32 = 15;
 
 impl Mcr {
     /// Whether revision 15's symbol area (A15b.7) lies in a main memory of
@@ -536,9 +487,8 @@ pub fn parse(bytes: &[u8]) -> Result<Mcr, String> {
     Ok(mcr)
 }
 
-/// A QUUX microcode file, in partition order or revision 15's format
-/// ([`parse_quux`]), refused unless it is for a machine of `geometry`'s
-/// revision ([`Mcr::check_revision`]).
+/// A QUUX microcode file ([`parse_quux`]), refused unless it is for a
+/// machine of `geometry` ([`Mcr::check_revision`]).
 pub fn parse_quux_microcode(
     bytes: &[u8],
     geometry: crate::machine::Geometry,
@@ -546,30 +496,22 @@ pub fn parse_quux_microcode(
     parse_for(bytes, geometry, Holds::Microcode)
 }
 
-/// A QUUX `.mcr` of either format, as its first word says: revision 15's
-/// ([`parse_15`]) when it opens with the format word, MIT's sections in
-/// partition order ([`parse_partition_order`]) otherwise. Which machine it
-/// is for is [`Mcr::check_revision`]'s to judge.
+/// A QUUX `.mcr` ([`parse_15`]): a file without the format word, MIT's
+/// sections among them, is refused naming the word it has. Which machine
+/// it is for is [`Mcr::check_revision`]'s to judge.
 pub fn parse_quux(bytes: &[u8], holds: Holds) -> Result<Mcr, String> {
-    if has_format_word(bytes) { parse_15(bytes, holds) } else { parse_partition_order(bytes) }
+    parse_15(bytes, holds)
 }
 
-/// A QUUX `.mcr` for a machine of `geometry`, in the format its revision
-/// reads, with [`Mcr::check_revision`]'s judgement: on revision 15 a file
-/// that is not MIT's sections is read as revision 15's, so a damaged format
-/// word is refused as that; a file of MIT's sections is refused by its
-/// revision, as a revision-15 file is below revision 15.
+/// A QUUX `.mcr` for a machine of `geometry`, with
+/// [`Mcr::check_revision`]'s judgement: QUUX's own on QUUX, and refused by
+/// the CADR.
 pub fn parse_for(
     bytes: &[u8],
     geometry: crate::machine::Geometry,
     holds: Holds,
 ) -> Result<Mcr, String> {
-    let mcr = match parse_quux(bytes, holds) {
-        Err(e) if geometry.extended() && !has_format_word(bytes) => {
-            return Err(parse_15(bytes, holds).err().unwrap_or(e));
-        }
-        r => r?,
-    };
+    let mcr = parse_quux(bytes, holds)?;
     mcr.check_revision(geometry, holds == Holds::Microcode)?;
     Ok(mcr)
 }
@@ -582,21 +524,4 @@ pub fn swap_halves(bytes: &[u8]) -> Result<Vec<u8>, String> {
         return Err(format!("{} bytes, not a whole number of 32-bit words", bytes.len()));
     }
     Ok(bytes.as_chunks::<4>().0.iter().flat_map(|w| [w[2], w[3], w[0], w[1]]).collect())
-}
-
-/// Parses an MCR file in QUUX's partition order ([module docs](self)).
-///
-/// A file that reads in MIT's order and not in partition order is refused
-/// saying so: it is the CADR's kind of file, or QUUX's from before Q8.
-pub fn parse_partition_order(bytes: &[u8]) -> Result<Mcr, String> {
-    let swapped = swap_halves(bytes)?;
-    parse(&swapped).map_err(|e| {
-        if parse(bytes).is_ok() {
-            "the file is in MIT's order; QUUX's .mcr is in partition order, \
-             the two 16-bit halves of every word swapped"
-                .to_string()
-        } else {
-            e
-        }
-    })
 }

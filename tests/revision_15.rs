@@ -28,7 +28,7 @@ use muir::micro::Micro;
 mod support;
 
 /// Revision 16, which runs the 64-bit microinstruction.
-const REV16: Geometry = Geometry::QUUX_16;
+const REV16: Geometry = Geometry::QUUX;
 
 /// A memory's constants: 0, 1.
 const ZERO: u64 = 0o40;
@@ -237,16 +237,13 @@ fn feature_words_0_and_25_say_revision_15_and_its_period() {
     }
     u.run(16);
     expect(u.machine(), &[(0o21, 127, "word 25 at 63.5 ns, the longest")]);
-    let m = run_on(&p, Geometry::QUUX_14, &|_| {}).ok().unwrap();
-    expect(m.machine(), &[(0o20, 0x5155_00e4, "revision 14"), (0o21, 0, "no word 25")]);
 }
 
 /// **Register-page word 225** (A15b.1, A15b.5): the posted writes answered
 /// with an error, read, and cleared by a write; `-RESET` clears it, as word
-/// 224. `micro` posts nothing, so a count is planted after the boot. On
-/// revision 14 word 225 is reserved and reads 0 whatever the count (the
-/// control). **Fails** a word 225 that does not read the count, or that a
-/// write leaves.
+/// 224. `micro` posts nothing, so a count is planted after the boot.
+/// **Fails** a word 225 that does not read the count, or that a write
+/// leaves.
 #[test]
 fn word_225_reads_the_errors_and_a_write_clears_it() {
     let mut p = Prog::default();
@@ -255,8 +252,6 @@ fn word_225_reads_the_errors_and_a_write_clears_it() {
     let plant = |m: &mut Machine| m.posted_write_errors = 3;
     let u = run_on(&p, REV16, &plant).ok().unwrap();
     expect(u.machine(), &[(0o20, 3, "the count"), (0o21, 0, "cleared by a write")]);
-    let u = run_on(&p, Geometry::QUUX_14, &plant).ok().unwrap();
-    expect(u.machine(), &[(0o20, 0, "reserved on 14")]);
     let mut u = Micro::new(machine(&p, REV16, &|_| {}));
     u.machine_mut().posted_write_errors = 3;
     u.boot();
@@ -413,17 +408,15 @@ fn write_i_mem_writes_64_bits_and_no_tag() {
     p.fill(2);
     p.stop();
     let u = run_on(&p, REV16, &|_| {}).ok().unwrap();
-    assert_eq!(u.machine().imem[0o700].raw(), 0x2301_4567_89ab_cdef, "revision 15");
-    let u = run_on(&p, Geometry::QUUX_14, &|_| {}).ok().unwrap();
-    assert_eq!(u.machine().imem[0o700].raw(), 0x4567_89ab_cdef, "revision 14");
+    assert_eq!(u.machine().imem[0o700].raw(), 0x2301_4567_89ab_cdef, "64 bits");
 }
 
 // --- the checkpoint (A15b.13) ---------------------------------------------------
 
 /// **A checkpoint records its revision, 16, and keeps the control store's
 /// 64 bits** (A15b.13), word 225 and the extension of the words in the
-/// pipeline; a revision-14 one records 14. **Fails** a checkpoint that
-/// records revision 15 as 14, or truncates a word to 48 bits.
+/// pipeline. **Fails** a checkpoint that records another revision, or
+/// truncates a word to 48 bits.
 #[test]
 fn a_checkpoint_records_revision_15_and_keeps_64_bits() {
     let mut p = Prog::default();
@@ -442,12 +435,6 @@ fn a_checkpoint_records_revision_15_and_keeps_64_bits() {
     v.load(&mut muir::checkpoint::Reader::for_word_bits(&body, 40)).unwrap();
     assert_eq!(v.machine().imem[0o700].raw(), 0xc123_4567_89ab_cdef, "64 bits");
     assert_eq!(v.machine().posted_write_errors, 7, "word 225");
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX_14;
-    let mut wr = muir::checkpoint::Writer::new();
-    m.save(&mut wr);
-    let g = Machine::checkpointed_geometry_at(&wr.finish(), 40).unwrap();
-    assert_eq!(g.revision(), Some(14), "revision 14's");
 }
 
 // --- the `.mcr` (A15b.7) -------------------------------------------------------
@@ -646,136 +633,44 @@ fn every_mcr_refusal_on_a_planted_file() {
     refused(&b, Microcode, "runs past the file's end");
 }
 
-/// **The format names the revision** (A15b.1): a revision-15 file is
-/// refused on revisions 13 and 14 and on the CADR's PROM path, and MIT's
-/// sections --- revision 14's microcode with section 6, PROM 2001 without
-/// one --- on revision 15, each refusal naming the format and the revision.
-/// The controls: each file is taken by its own machine. **Fails** a reader
-/// that reads one format on the other's machine, or refuses without naming
-/// them.
+/// **The format is the machine's** (A15b.1): QUUX's `.mcr`, opening with
+/// the format word, is refused on the CADR, and MIT's sections --- a file
+/// in partition order with section 6 first saying 14, and MIT's own
+/// `promh.mcr` in either order --- are refused on QUUX, each refusal
+/// naming the format word the file lacks.
+/// The controls: QUUX takes its own, and the CADR's PROM path takes MIT's
+/// `promh.mcr`. **Fails** a reader that reads one format on the other's
+/// machine, or refuses without naming it.
 #[test]
-fn each_format_is_refused_on_the_other_s_revisions() {
+fn each_format_is_refused_on_the_other_machine() {
     let r15 = file(&microcode_sections(), None);
-    for (g, n) in [(Geometry::QUUX, 13), (Geometry::QUUX_14, 14)] {
-        let e = mcr::parse_quux_microcode(&r15, g).unwrap_err();
-        assert!(
-            e.contains("a revision-15 .mcr, format word 51550001, for hardware revision 15")
-                && e.contains(&format!("this is revision {n}, which reads MIT's sections")),
-            "{e}"
-        );
-        let e = muir::prom::parse_quux_mcr(&file(&prom_sections(), None), g).unwrap_err();
-        assert!(e.contains(&format!("this is revision {n}")), "{e}");
-    }
-    // Revision 14's microcode: MIT's sections in partition order, section 6
-    // first saying 14, then a control store word.
+    let e = mcr::parse_quux_microcode(&r15, Geometry::CADR).unwrap_err();
+    assert!(
+        e.contains(
+            "a QUUX .mcr, format word 51550001, and this is the CADR, which reads MIT's sections"
+        ),
+        "{e}"
+    );
+    // MIT's sections in partition order, section 6 first saying 14, then a
+    // control store word.
     let mut w14: Vec<u32> = vec![6, 0, 1, 14, 1, 0, 1, 0, 0, 4, 0o40, 1, 5];
     w14.resize(256, 0);
     let swap = |w: &[u32]| -> Vec<u8> { w.iter().flat_map(|x| x.to_le_bytes()).collect() };
     let b14 = swap(&w14);
-    assert!(mcr::parse_quux_microcode(&b14, Geometry::QUUX_14).is_ok(), "14 takes its own");
     let e = mcr::parse_quux_microcode(&b14, REV16).unwrap_err();
-    assert!(
-        e.contains("MIT's sections, a file for hardware revision 14, and this is revision 15"),
-        "{e}"
-    );
-    let e =
-        muir::prom::parse_quux_mcr(include_bytes!("../data/quux-promh.mcr"), REV16).unwrap_err();
-    assert!(
-        e.contains("MIT's sections, a file for revision 13 or below, and this is revision 15"),
-        "{e}"
-    );
-    assert!(mcr::parse_quux_microcode(&r15, REV16).is_ok(), "15 takes its own");
-}
-
-// --- the switch (A15b.1) ---------------------------------------------------------
-
-/// The revision-15 PROM of [`prom_sections`] in a scratch file.
-fn prom_file(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("prom-15.mcr");
-    std::fs::write(&path, file(&prom_sections(), None)).unwrap();
-    path
-}
-
-/// **`MUIR_QUUX_REVISION=15` runs revision 15 on `micro`** with a
-/// revision-15 PROM: the start names it, and the checkpoint records it; and
-/// on `rtl`, its pipeline. Refused: a run without `--prom`, since no
-/// revision-15 PROM is built in and PROM 2001 is MIT's sections. **Fails**
-/// a switch that builds revision 14, or an `rtl` that is not the pipeline.
-#[test]
-fn the_switch_runs_revision_15_on_both_engines() {
-    use support::{Run, quux, scratch, text};
-    let dir = scratch("revision-15");
-    let prom = prom_file(&dir);
-    let chk = dir.join("micro.chk");
-    let out = quux()
-        .env("MUIR_QUUX_REVISION", "15")
-        .args(["--micro", "--stop-after", "10", "--prom"])
-        .arg(&prom)
-        .arg("--checkpoint")
-        .arg(&chk)
-        .run();
-    let t = text(&out);
-    assert!(out.status.success(), "the run failed:\n{t}");
-    assert!(t.contains("machine: quux, revision 15: "), "{t}");
-    let c = muir::checkpoint::read(&chk).unwrap();
-    let g = Machine::checkpointed_geometry_at(&c.body, c.word_bits).unwrap();
-    assert_eq!(g, Geometry::QUUX_15);
-    // `rtl` runs it too: its pipeline (MP2b).
-    let out = quux()
-        .env("MUIR_QUUX_REVISION", "15")
-        .args(["--rtl", "--stop-after", "10", "--prom"])
-        .arg(&prom)
-        .run();
-    let t = text(&out);
-    assert!(out.status.success(), "the rtl run failed:\n{t}");
-    assert!(t.contains("rtl is its four-stage pipeline"), "{t}");
-    let out = quux().env("MUIR_QUUX_REVISION", "15").args(["--micro", "--stop-after", "10"]).run();
-    let t = text(&out);
-    assert_eq!(out.status.code(), Some(2), "{t}");
-    assert!(t.contains("QUUX revision 15 has no built-in boot PROM"), "{t}");
-}
-
-/// **Revision 15 refuses revisions 13's and 14's checkpoints, and they
-/// refuse its** (A15b.1, A15b.13), naming the revision that wrote each; each
-/// resumes its own. **Fails** a checkpoint that does not say 15, or a
-/// refusal that lets 14 resume it.
-#[test]
-fn revision_15_and_the_others_refuse_each_other_s_checkpoints() {
-    use support::{Run, quux, scratch, text};
-    let dir = scratch("revision-15-checkpoint");
-    let prom = prom_file(&dir);
-    let chk = |r: &str| dir.join(format!("{r}.chk"));
-    // A resume takes the checkpoint's PROM, so only a start names one.
-    let start = |r: &str, fresh: bool| {
-        let mut c = quux();
-        c.env("MUIR_QUUX_REVISION", r).arg("--micro");
-        if r == "15" && fresh {
-            c.arg("--prom").arg(&prom);
-        }
-        c
-    };
-    for r in ["13", "14", "15"] {
-        let out = start(r, true).args(["--stop-after", "100", "--checkpoint"]).arg(chk(r)).run();
-        assert!(out.status.success(), "{r}: {}", text(&out));
-        // Revision 15's file is version 56 (MP4 ruling Q3), the others' 55.
-        let version = muir::checkpoint::read(&chk(r)).unwrap().version;
-        assert_eq!(version, if r == "15" { 56 } else { 55 }, "{r}: the version");
+    assert!(e.contains("format word 00000006, not 51550001"), "{e}");
+    let mit = include_bytes!("../mit/sys/ubin/promh.mcr");
+    for (order, bytes) in [("MIT's", mit.to_vec()), ("partition", swap_halves(mit))] {
+        let e = muir::prom::parse_quux_mcr(&bytes, REV16).unwrap_err();
+        assert!(e.contains("not 51550001"), "{order} order: {e}");
     }
-    for (ours, theirs) in [("15", "13"), ("15", "14"), ("13", "15"), ("14", "15")] {
-        let c = chk(theirs);
-        let out = start(ours, false).args(["--stop-after", "10", "--resume"]).arg(&c).run();
-        let t = text(&out);
-        let p = c.display();
-        assert_eq!(out.status.code(), Some(2), "{ours} resumed {theirs}:\n{t}");
-        assert!(
-            t.contains(&format!(
-                "--resume {p} is revision {theirs}'s, and this is revision {ours}: MUIR_QUUX_REVISION={theirs} quux --resume {p}"
-            )),
-            "{t}"
-        );
-    }
-    let out = start("15", false).args(["--stop-after", "10", "--resume"]).arg(chk("15")).run();
-    assert!(out.status.success(), "15 resumes 15: {}", text(&out));
+    assert!(muir::prom::parse_mcr(mit).is_ok(), "the CADR takes MIT's");
+    assert!(mcr::parse_quux_microcode(&r15, REV16).is_ok(), "QUUX takes its own");
+}
+
+/// MIT's file in partition order, its 16-bit halves swapped.
+fn swap_halves(b: &[u8]) -> Vec<u8> {
+    mcr::swap_halves(b).unwrap()
 }
 
 // --- the OA registers and selects (A15b.15) -----------------------------------------
@@ -811,11 +706,11 @@ fn run_checked(p: &Prog, geometry: Geometry, check: bool) -> (Micro, Option<Halt
 }
 
 /// **An OA write followed by a word without a select runs that word
-/// unmodified** (A15b.15): on revision 15 OA-REG-LOW's `<18:14>` leaves the
-/// next word's M destination alone, where revision 14's IMOD ORs it in and
-/// writes M 25 for M 20. The shadow check is off: the pair is the breach it
-/// halts on (`the_shadow_check_halts_on_each_breach`). **Fails** a revision
-/// 15 that keeps IMOD.
+/// unmodified** (A15b.15): OA-REG-LOW's `<18:14>` leaves the next word's M
+/// destination alone, where IMOD would OR it in and write M 25 for M 20.
+/// The shadow check is off: the pair is the breach it halts on
+/// (`the_shadow_check_halts_on_each_breach`). **Fails** a QUUX that keeps
+/// IMOD.
 #[test]
 fn an_oa_write_leaves_a_word_without_a_select_alone() {
     let mut p = Prog::default();
@@ -824,10 +719,7 @@ fn an_oa_write_leaves_a_word_without_a_select_alone() {
     p.stop();
     let (u, halt) = run_checked(&p, REV16, false);
     assert_eq!(halt, None);
-    expect(u.machine(), &[(0o20, 1, "revision 15: M 20"), (0o25, 0, "revision 15: not M 25")]);
-    let (u, halt) = run_checked(&p, Geometry::QUUX_14, false);
-    assert_eq!(halt, None);
-    expect(u.machine(), &[(0o20, 0, "revision 14: not M 20"), (0o25, 1, "revision 14: M 25")]);
+    expect(u.machine(), &[(0o20, 1, "M 20"), (0o25, 0, "not M 25")]);
 }
 
 /// **Each of the nine fields is taken through its select** (A15b.15), each
@@ -952,23 +844,19 @@ fn oa_outside_fields_fires_on_a_bit_outside_and_not_on_one_in_the_word() {
     assert_eq!(halt, None, "into an M-memory source");
 }
 
-/// **`-RESET` clears both registers** on revision 15 (A15b.15); on revision
-/// 14 the boot drops IMOD's pending flags and leaves the registers (the
-/// control). **Fails** a reset that leaves revision 15's registers.
+/// **`-RESET` clears both registers** (A15b.15). **Fails** a reset that
+/// leaves them.
 #[test]
 fn reset_clears_the_oa_registers() {
     let mut p = Prog::default();
     p.oa(false, 0o5 << 14).op(ALU | SETA | a_src(ONE) | m_dest(0o10) | SL);
     p.oa(true, 0o7).op(ALU | SETM | m_src(0o20) | m_dest(0o11) | SH);
     p.stop();
-    for (g, kept) in [(REV16, false), (Geometry::QUUX_14, true)] {
-        let (mut u, halt) = run_checked(&p, g, g == REV16);
-        assert_eq!(halt, None);
-        assert_eq!(u.oa_registers(), (0o5 << 14, 0o7), "{g:?}: loaded");
-        u.boot();
-        let want = if kept { (0o5 << 14, 0o7) } else { (0, 0) };
-        assert_eq!(u.oa_registers(), want, "{g:?}: after the boot's -RESET");
-    }
+    let (mut u, halt) = run_checked(&p, REV16, true);
+    assert_eq!(halt, None);
+    assert_eq!(u.oa_registers(), (0o5 << 14, 0o7), "loaded");
+    u.boot();
+    assert_eq!(u.oa_registers(), (0, 0), "after the boot's -RESET");
 }
 
 /// **A halt and a checkpoint taken between a writer and its consuming word
@@ -1372,16 +1260,18 @@ fn d_dispatches_a_return_that_needs_a_fetch() {
     assert_eq!(d_state(&with), d_state(&without), "the main loop's state");
 }
 
-/// **D's enable clear is revision 14, microcycle for microcycle** (A15.2's
+/// **D's enable clear is D held off, microcycle for microcycle** (A15.2's
 /// checks): the same program executes the same addresses in the same order
-/// on revision 15 with `<30>` clear and on revision 14, which keeps no
-/// `<30>`, written or not. **Fails** a D that acts on `<31>` alone.
+/// with `<30>` clear and with `<30>` written but never kept, D's switch
+/// off (`MUIR_D=off`, [`muir::machine::DSwitch::Off`]). **Fails** a D that
+/// acts on `<31>` alone.
 #[test]
-fn d_s_enable_clear_is_revision_14_microcycle_for_microcycle() {
-    let (_, r15, _) = d_run(d_machine(REV16, d_register(false), &ONES, CODE, false, false));
-    let (_, r14, _) =
-        d_run(d_machine(Geometry::QUUX_14, d_register(true), &ONES, CODE, false, false));
-    assert_eq!(r15, r14);
+fn d_s_enable_clear_is_d_held_off_microcycle_for_microcycle() {
+    let (_, clear, _) = d_run(d_machine(REV16, d_register(false), &ONES, CODE, false, false));
+    let mut m = d_machine(REV16, d_register(true), &ONES, CODE, false, false);
+    m.macro_dispatch.d = muir::machine::DSwitch::Off;
+    let (_, off, _) = d_run(m);
+    assert_eq!(clear, off);
 }
 
 /// **Condition 6 true, a fetch that faults, and an entry with P go to the
@@ -1579,11 +1469,11 @@ fn digest_of(path: &std::path::Path, period: u64) -> (u64, u64) {
 /// default's 20 never are.
 const AT_8_5: [&str; 2] = ["--microcycle-ns", "8.5"];
 
-/// `quux` on revision 15 with `engine`, its other flags `args`; a fresh
-/// run with 2MW of main memory, which keeps the digests quick.
+/// `quux` with `engine`, its other flags `args`; a fresh run with 2MW of
+/// main memory, which keeps the digests quick.
 fn quux_15(engine: &str, args: &[&std::ffi::OsStr]) -> std::process::Command {
     let mut c = support::quux();
-    c.env("MUIR_QUUX_REVISION", "16").arg(format!("--{engine}")).args(args);
+    c.arg(format!("--{engine}")).args(args);
     if !args.iter().any(|a| *a == "--resume") {
         c.args(["--main-memory-size", "2MW"]);
     }
@@ -1860,7 +1750,7 @@ fn pace_on_revision_15_says_its_period() {
     }
 }
 
-/// **With no period flag, revisions 15 and 16 run at 10 ns**, muir's
+/// **With no period flag, QUUX runs at 10 ns**, muir's
 /// default (contract G3 revision 15, §12.1; MP2b ruling Q14), on both
 /// engines: the start's timing line and the `--pace` line say 10 ns, 20
 /// units of 0.5 ns, and the checkpoint the run writes records that period,
@@ -1868,44 +1758,40 @@ fn pace_on_revision_15_says_its_period() {
 /// a default of 8.5 ns, and an engine run at another period than the
 /// default.
 #[test]
-fn with_no_period_flag_revisions_15_and_16_run_at_10_ns() {
+fn with_no_period_flag_quux_runs_at_10_ns() {
     use support::{Run, scratch, text};
-    let dir = scratch("revision-15-default-period");
+    let dir = scratch("quux-default-period");
     let prom = memory_loop_prom(&dir);
-    for revision in ["15", "16"] {
-        for engine in ["micro", "rtl"] {
-            let what = format!("revision {revision}, {engine}");
-            let chk = dir.join(format!("{revision}-{engine}.chk"));
-            let out = quux_15(engine, &[])
-                .env("MUIR_QUUX_REVISION", revision)
-                .args(["--pace", "--stop-after", "10", "--prom"])
-                .arg(&prom)
-                .arg("--checkpoint")
-                .arg(&chk)
-                .run();
-            let t = text(&out);
-            assert!(out.status.success(), "{what}:\n{t}");
-            for says in [
-                "timing: revision 15's clock, 10 ns a microcycle (20 units of 0.5 ns)",
-                "pace: the machine's own speed, 10 ns a microcycle;",
-            ] {
-                assert!(t.contains(says), "{what}: no `{says}`:\n{t}");
-            }
-            let resume = |ns: &str| {
-                let mut c = support::quux();
-                c.env("MUIR_QUUX_REVISION", revision)
-                    .arg(format!("--{engine}"))
-                    .args(["--microcycle-ns", ns, "--stop-after", "1", "--resume"])
-                    .arg(&chk);
-                c.run()
-            };
-            let out = resume("10");
-            assert!(out.status.success(), "{what}: resumed at 10 ns:\n{}", text(&out));
-            let out = resume("8.5");
-            let t = text(&out);
-            assert!(!out.status.success(), "{what}: resumed at 8.5 ns:\n{t}");
-            assert!(t.contains("a period of 10 ns"), "{what}: the refusal:\n{t}");
+    for engine in ["micro", "rtl"] {
+        let what = engine;
+        let chk = dir.join(format!("{engine}.chk"));
+        let out = quux_15(engine, &[])
+            .args(["--pace", "--stop-after", "10", "--prom"])
+            .arg(&prom)
+            .arg("--checkpoint")
+            .arg(&chk)
+            .run();
+        let t = text(&out);
+        assert!(out.status.success(), "{what}:\n{t}");
+        for says in [
+            "timing: 10 ns a microcycle (20 units of 0.5 ns)",
+            "pace: the machine's own speed, 10 ns a microcycle;",
+        ] {
+            assert!(t.contains(says), "{what}: no `{says}`:\n{t}");
         }
+        let resume = |ns: &str| {
+            let mut c = support::quux();
+            c.arg(format!("--{engine}"))
+                .args(["--microcycle-ns", ns, "--stop-after", "1", "--resume"])
+                .arg(&chk);
+            c.run()
+        };
+        let out = resume("10");
+        assert!(out.status.success(), "{what}: resumed at 10 ns:\n{}", text(&out));
+        let out = resume("8.5");
+        let t = text(&out);
+        assert!(!out.status.success(), "{what}: resumed at 8.5 ns:\n{t}");
+        assert!(t.contains("a period of 10 ns"), "{what}: the refusal:\n{t}");
     }
 }
 

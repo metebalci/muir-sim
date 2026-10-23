@@ -212,7 +212,7 @@ fn the_buffer_may_fill_its_window() {
     m.bus_write(last, 0o707070);
     assert_eq!(m.bus_read(last), UNBOXED_TAG | 0o707070, "the buffer's last word");
     assert_eq!(m.tv.read_buffer(261_887), 0o707070);
-    assert_eq!(m.bus_read(PAGE), Geometry::QUUX_16.machine_id.unwrap().into(), "the page's first");
+    assert_eq!(m.bus_read(PAGE), Geometry::QUUX.machine_id.unwrap().into(), "the page's first");
     assert_eq!(m.bus_error, 0);
 }
 

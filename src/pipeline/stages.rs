@@ -468,12 +468,11 @@ impl Pipeline {
     }
 
     /// Whether a register-page word's write waits for every earlier write:
-    /// the file device's CMD_PROD (A15b.5), and on revision 16 the Ethernet
-    /// device's 244 and 250 (QUUX's Ethernet contract, §2.5).
+    /// the file device's CMD_PROD (A15b.5), and the Ethernet device's 244
+    /// and 250 (QUUX's Ethernet contract, §2.5).
     fn waits_for_writes(&self, off: u32) -> bool {
         off == crate::file_device::CMD_PROD
-            || (self.m.geometry.ethernet()
-                && matches!(off, crate::ethernet_device::TX_PROD | crate::ethernet_device::RX_PROD))
+            || matches!(off, crate::ethernet_device::TX_PROD | crate::ethernet_device::RX_PROD)
     }
 
     /// The devices at the clock's instant, or the microcycle's under
@@ -554,12 +553,7 @@ impl Pipeline {
             Some(0o13) => {
                 // The PDL address field forms the index early (A15b.2),
                 // unless its base is still being written.
-                let early = if self.m.geometry.extended() {
-                    r.word.pdl_field().and_then(|f| self.early_index(f, &c))
-                } else {
-                    None
-                };
-                match early {
+                match r.word.pdl_field().and_then(|f| self.early_index(f, &c)) {
                     Some(i) => push(&mut c, &mut plan, Effect::PdlIndex(i)),
                     None => push(&mut c, &mut plan, Effect::PdlIndexWritten(r.seq)),
                 }
@@ -572,7 +566,7 @@ impl Pipeline {
             Op::Jump => {
                 let (rbit, pbit, nbit) =
                     (field(ir, 9, 1) != 0, field(ir, 8, 1) != 0, field(ir, 7, 1) != 0);
-                let sl = self.m.geometry.extended() && r.word.oa_low_select();
+                let sl = r.word.oa_low_select();
                 let follower = self.follower(r);
                 let ret = if nbit { follower } else { follower + 1 } & 0o37777;
                 if pbit && rbit {
@@ -591,7 +585,7 @@ impl Pipeline {
                         Some(t) => t,
                         None => {
                             plan.ex_resolved = true;
-                            let hint = self.m.geometry.extended() && r.word.hint();
+                            let hint = r.word.hint();
                             let taken = hint != (self.mutation == Mutation::HintInverted);
                             plan.pred_taken = Some(taken);
                             taken
@@ -626,11 +620,7 @@ impl Pipeline {
                     plan.ex_resolved = popj;
                 } else {
                     plan.ex_resolved = true;
-                    let (addr, p, rr) = if self.m.geometry.extended() {
-                        r.word.predicted_target()
-                    } else {
-                        (0, true, true)
-                    };
+                    let (addr, p, rr) = r.word.predicted_target();
                     plan.pred_pr = Some((p, rr));
                     if src.is_some_and(|s| s & 0o17 == 0o14) && rr {
                         push(&mut c, &mut plan, Effect::SpcPop);
@@ -1559,7 +1549,7 @@ impl Pipeline {
         res.seq = e.seq;
         self.b.last_seq = e.seq;
         res.pc = e.pc;
-        if !e.nop && class(ir) == Op::Jump && self.m.geometry.extended() && e.word.oa_low_select() {
+        if !e.nop && class(ir) == Op::Jump && e.word.oa_low_select() {
             self.meters.sl_jumps += 1;
         }
         if !e.nop
@@ -2104,18 +2094,8 @@ impl Pipeline {
         // The OA hold: while a word writing OA-REG-HIGH is in RD or EX, the
         // word that selects it waits in CS, its A address not yet sent
         // (A15b.15: 2, 1 and 0 clocks for a writer 1, 2 and 3 words before).
-        // Revision 14's IMOD: the word after a write of either register,
-        // which takes it, whatever it is.
-        let selects = !self.m.geometry.extended() || c.word.oa_high_select();
-        let writer = |s: &Slot| {
-            let d = dest_code(s.ir);
-            !s.nop
-                && if self.m.geometry.extended() {
-                    d == Some(0o17)
-                } else {
-                    matches!(d, Some(0o16 | 0o17))
-                }
-        };
+        let selects = c.word.oa_high_select();
+        let writer = |s: &Slot| !s.nop && dest_code(s.ir) == Some(0o17);
         let in_rd = self.rd.as_ref().is_some_and(writer);
         let in_ex = self.ex.as_ref().is_some_and(writer);
         let hold = selects
@@ -2147,27 +2127,11 @@ impl Pipeline {
     /// buffer at RD's copy of the pointer or the index, both before this
     /// edge's writes (A15b.3). The word as RD will decode it.
     fn cs_reads(&mut self, oa_high: u64) {
-        let extended = self.m.geometry.extended();
-        let (imod, oa_low, x_oa_high) = (self.x.imod, self.x.oa_low, self.x.oa_high);
         let mut c = self.cs.take().expect("the CS word");
         let mut ir = c.word.low_48().raw();
-        if extended {
-            if c.word.oa_high_select() {
-                let fields = 0o1777 << 32 | if ir >> 31 & 1 == 0 { 0o37 << 26 } else { 0 };
-                ir |= (oa_high << 26) & fields;
-            }
-        } else if self.x.imod_seq == c.seq {
-            // Revision 14's IMOD: the word after an OA write, which the hold
-            // let in only once the write committed; no word after it, which
-            // leaves CS before the flags are spent.
-            c.imod_low = imod[0];
-            c.imod_high = imod[1];
-            if imod[0] {
-                ir |= oa_low;
-            }
-            if imod[1] {
-                ir |= x_oa_high << 26;
-            }
+        if c.word.oa_high_select() {
+            let fields = 0o1777 << 32 | if ir >> 31 & 1 == 0 { 0o37 << 26 } else { 0 };
+            ir |= (oa_high << 26) & fields;
         }
         c.ir = ir & ((1 << 48) - 1);
         c.a_addr = field(c.ir, 32, 10) as u16;
@@ -2400,7 +2364,7 @@ mod tests {
     #[test]
     fn a_walk_keeps_the_address_it_began_with() {
         let entry = |frame: u32| 0b11 << 28 | 0o1460 << 18 | frame;
-        let mut p = Pipeline::new(Machine::with_geometry(Geometry::QUUX_16, 1));
+        let mut p = Pipeline::new(Machine::with_geometry(Geometry::QUUX, 1));
         let (x, y): (u32, u32) = (0o4000, 1 << 20 | 5 << 10);
         let page = |va: u32| (va >> 10 & 0o1777) as usize;
         p.m.memory_words.directory = 8;

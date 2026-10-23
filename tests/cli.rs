@@ -17,14 +17,14 @@ use support::{Run, Scratch, cadr, cadr_default, executable, quux, scratch, text}
 /// `quux` on revision 16, started on a boot PROM of a jump to itself under
 /// `dir`, revision 16 having none built in.
 fn quux_16(dir: &Path) -> std::process::Command {
-    let mut c = support::quux_on_16();
+    let mut c = support::quux();
     c.arg("--prom").arg(support::idle_prom_16(dir));
     c
 }
 
 /// [`refused_saying`] of `quux` on revision 16.
 fn refused_saying_16(args: &[&str], says: &str) {
-    let out = support::quux_on_16().args(args).run();
+    let out = support::quux().args(args).run();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "quux {args:?}: not a usage error:\n{err}");
     assert!(err.contains(says), "quux {args:?}: the refusal says {says:?}:\n{err}");
@@ -494,25 +494,12 @@ fn the_video_controller_is_quux_s() {
     }
 }
 
-/// **QUUX drops the delay lines: its timing is `sync`, always.** A QUUX run
-/// is on `sync` of four 10 ns ticks without asking, on `rtl` and `micro`
-/// alike, and the start says so, the pace too; `--sync-cycle-ticks` sets
-/// the ticks, and is `quux`'s alone; `--timing-model` is the CADR's choice
-/// between its delay lines and muir-fpga's grid, and not a flag of `quux`;
-/// `sync` is no word of it on `cadr`, which keeps its delay lines.
+/// **`--timing-model` is the CADR's**: its choice between its delay lines
+/// and muir-fpga's grid, and not a flag of `quux`, whose clock is its
+/// period; `sync` is no word of it. The CADR's start and pace say its
+/// delay lines.
 #[test]
-fn quux_runs_on_sync_alone() {
-    for engine in ["--rtl", "--micro"] {
-        let out = quux().args([engine, "--pace", "--stop-after", "1"]).run();
-        let t = text(&out);
-        assert!(out.status.success(), "{engine}: {t}");
-        assert!(t.contains("timing: sync, 4 ticks of 10 ns, 40 ns a microcycle"), "{engine}:\n{t}");
-        assert!(t.contains("40 ns a microcycle; the run waits"), "{engine}: the pace:\n{t}");
-    }
-    let out = quux().args(["--rtl", "--sync-cycle-ticks", "3", "--stop-after", "1"]).run();
-    let t = text(&out);
-    assert!(out.status.success(), "{t}");
-    assert!(t.contains("timing: sync, 3 ticks of 10 ns, 30 ns a microcycle"), "{t}");
+fn the_timing_model_is_the_cadr_s() {
     for model in ["sync", "cadr", "fpga"] {
         refused_saying(
             "quux",
@@ -520,13 +507,11 @@ fn quux_runs_on_sync_alone() {
             "--timing-model is cadr's, not quux's",
         );
     }
-    refused_saying("cadr", &["--rtl", "--timing-model", "sync"], "sync is quux's");
     refused_saying(
         "cadr",
-        &["--rtl", "--sync-cycle-ticks", "3"],
-        "--sync-cycle-ticks is quux's, not cadr's",
+        &["--rtl", "--timing-model", "sync"],
+        "--timing-model wants cadr or fpga",
     );
-    refused_saying("quux", &["--rtl", "--sync-cycle-ticks", "0"], "--sync-cycle-ticks wants");
     let out = cadr().args(["--rtl", "--pace", "--stop-after", "1"]).run();
     let t = text(&out);
     assert!(t.contains("timing: cadr, the board's delay lines"), "the CADR's:\n{t}");
@@ -720,9 +705,10 @@ fn quux_s_disk_is_block_disk_only() {
     refused_saying("cadr", &["--rtl", "--disk-controller", "block-disk"], "block-disk is quux's");
 }
 
-/// **QUUX's `--prom` is a PROM assembled at 36000, in partition order**
-/// (contracts Q2 and Q8): its own file is taken and said to be the built-in
-/// word for word, and MIT's, in MIT's order, is refused saying so.
+/// **QUUX's `--prom` is a PROM of its own format, assembled at 36000**
+/// (contract Q2; A15b.7): its own file is taken and said to be the
+/// built-in word for word, and MIT's `.mcr` is refused, naming the format
+/// word it lacks; `cadr` takes MIT's.
 #[test]
 fn quux_s_prom_is_assembled_at_36000() {
     let own = concat!(env!("CARGO_MANIFEST_DIR"), "/data/quux-promh.mcr");
@@ -731,16 +717,19 @@ fn quux_s_prom_is_assembled_at_36000() {
     assert!(out.status.success(), "{t}");
     assert!(t.contains("QUUX's own word for word"), "the start says it:\n{t}");
     let mits = concat!(env!("CARGO_MANIFEST_DIR"), "/mit/sys/ubin/promh.mcr");
-    refused_saying("quux", &["--rtl", "--prom", mits], "the file is in MIT's order");
+    refused_saying("quux", &["--rtl", "--prom", mits], "format word 00010000, not 51550001");
+    let out = cadr().args(["--rtl", "--prom", mits, "--stop-after", "1"]).run();
+    let t = text(&out);
+    assert!(out.status.success(), "the CADR takes MIT's: {t}");
+    assert!(t.contains("MIT's own word for word"), "{t}");
 }
 
 /// A disk QUUX's PROM boots: `data/quux-disk.img`, the GPT disk sgdisk
-/// made, with MIT's microcode 323, `mit/sys/ubin/ucadr.mcr`, in revision
-/// 13's shapes and partition order at its current `MCR1`'s first block, as
-/// `dd` writes it (`support::ucadr_323_at_40_partition_order`). The PROM
-/// finds the microcode through the GPT and does not care whose it is.
+/// made, with [`support::idle_microcode_15`] at its current `MCR1`'s first
+/// block, as `dd` writes it. The PROM finds the microcode through the GPT
+/// and does not care whose it is.
 fn quux_pack(dir: &Path) -> PathBuf {
-    support::quux_gpt_disk(dir, &support::ucadr_323_at_40_partition_order()).0
+    support::quux_gpt_disk(dir, &support::idle_microcode_15()).0
 }
 
 /// The PC a run ended at and after how many microcycles, from its last
@@ -992,8 +981,6 @@ const QUUX_ONLY: &[&str] = &[
     "--memory-timing",
     "--microcycle-ns",
     "--rtc",
-    "--sync-cycle-ticks",
-    "--tlb",
     "--video-size",
 ];
 
@@ -1012,6 +999,10 @@ fn a_flag_of_the_other_executable_says_whose_it_is() {
             );
         }
         refused_saying(exe, &["--no-such-flag"], &format!("--no-such-flag is not a flag of {exe}"));
+        // Flags no machine uses any more: a flag of neither.
+        for flag in ["--tlb", "--sync-cycle-ticks"] {
+            refused_saying(exe, &[flag, "1"], &format!("{flag} is not a flag of {exe}"));
+        }
         refused_saying(exe, &["stray"], &format!("stray is not a flag of {exe}"));
     }
 }
@@ -1309,7 +1300,7 @@ fn each_executable_reads_its_own_file() {
     // The other's file in the run directory is not this one's.
     std::fs::write(here.join(".quuxrc"), format!("--micro\n--stop-after 44\n{prom}\n")).unwrap();
     let on_16 = |exe: &str| match exe {
-        "quux" => support::quux_on_16(),
+        "quux" => support::quux(),
         _ => executable(exe),
     };
     let run = |exe: &str| {

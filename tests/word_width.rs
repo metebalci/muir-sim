@@ -4,7 +4,7 @@
 //! **The word width as a parameter of the engines** (contract G2 §8.1):
 //! `micro`, `rtl`, the machine, main memory and the checkpoint carry a word
 //! of 32 or 40 bits, as [`Geometry::word_bits`] says. The CADR is 32;
-//! QUUX, [`Geometry::QUUX_16`], is 40.
+//! QUUX, [`Geometry::QUUX`], is 40.
 //!
 //! QUUX's geometry runs a hand program that moves words with `<39:32>` set through every
 //! word register G2 §2.1 widens: main memory into `MD`, `MD` into M, M
@@ -35,7 +35,7 @@ use muir::rtl::Rtl;
 mod support;
 
 /// QUUX's 40-bit geometry.
-const WIDE: Geometry = Geometry::QUUX_16;
+const WIDE: Geometry = Geometry::QUUX;
 
 /// The physical memory window, main memory at `VA<27:0>` on QUUX (contract
 /// G3 revision 14, A14.1).
@@ -326,22 +326,19 @@ fn a_40_bit_machine_writes_a_checkpoint_file() {
 
 /// **A 32-bit machine's checkpoint is the bytes it always was**: every
 /// word four bytes, so that a checkpoint written before the width was a
-/// parameter reads the same, and revision 13's is longer by a byte a word,
-/// and by its larger dispatch memory and map and its overflow flag
-/// (contract G2 §2.4, §2.6, §2.2).
+/// parameter reads the same; QUUX's 40-bit word takes five (contract G2
+/// §2.8). Measured as what a 64K-word board more of main memory adds.
+/// **Fails** a CADR body written at another width.
 #[test]
 fn a_32_bit_checkpoint_writes_four_bytes_a_word() {
-    const WIDE: Geometry = Geometry::QUUX;
-    let body = |g: Geometry| {
+    let body = |g: Geometry, boards: usize| {
+        let mut m = Machine::with_geometry(g, boards);
+        m.load_prom(&program());
         let mut w = Writer::new();
-        machine(g).save(&mut w);
+        m.save(&mut w);
         w.finish().len()
     };
-    let words = 1024 + 32 + muir::machine::PDL_WORDS + 3 + muir::machine::MAIN_WORDS;
-    let entries = (4096 - 2048) + (8192 - 2048) + (4096 - 2048);
-    assert_eq!(
-        body(WIDE) - body(Geometry::CADR),
-        words + 1 + 1 + 4 * entries,
-        "a byte a word, the width, the overflow flag, and 4 bytes a new entry"
-    );
+    let board = 1 << 16;
+    assert_eq!(body(Geometry::CADR, 2) - body(Geometry::CADR, 1), 4 * board, "the CADR");
+    assert_eq!(body(WIDE, 32) - body(WIDE, 16), 5 * 16 * board, "QUUX, 1MW more");
 }

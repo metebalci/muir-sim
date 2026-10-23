@@ -34,7 +34,6 @@ impl Pipeline {
         self.tlb_sweep_until = self.clock + self.m.tlb.len() as u64;
         self.x.oa_low = 0;
         self.x.oa_high = 0;
-        self.x.imod = [false; 2];
         self.halted = false;
         self.draining = false;
         self.stepping = false;
@@ -90,10 +89,8 @@ impl Pipeline {
             self.port.drain_now(&mut self.m);
             self.m.reset_memory_system(self.m.ns);
             self.tlb_sweep_until = self.clock + self.m.tlb.len() as u64;
-            if self.m.geometry.extended() {
-                self.x.oa_low = 0;
-                self.x.oa_high = 0;
-            }
+            self.x.oa_low = 0;
+            self.x.oa_high = 0;
         }
         if boot {
             self.m.vmaok = false;
@@ -102,7 +99,6 @@ impl Pipeline {
             self.npc = self.m.reset_pc();
             self.x.npc_prev = self.npc;
             self.trap();
-            self.x.imod = [false; 2];
             self.halted = false;
             self.draining = false;
             self.stepping = false;
@@ -337,7 +333,7 @@ impl Pipeline {
         let half = |v: u64, k: u8| (v >> (16 * k as u32)) as u16;
         match eadr {
             spy::IR_LOW | spy::IR_MED | spy::IR_HIGH => half(next, eadr),
-            spy::IR_EXT if self.m.geometry.extended() => half(next, eadr),
+            spy::IR_EXT => half(next, eadr),
             spy::OPC => self.x.opc[7] & 0x3fff,
             spy::PC => self.pc_15() & 0x3fff,
             spy::FLAG_1 => spy::Flag1 {
@@ -376,12 +372,7 @@ impl Pipeline {
         w.bool(self.d_slot_pending);
         w.u64(self.x.oa_low);
         w.u64(self.x.oa_high);
-        // Revision 14's IMOD flags; revision 15 has no pending OA flag
-        // (A15b.13; MP4 ruling Q3).
-        if !self.m.geometry.extended() {
-            w.bool(self.x.imod[0]);
-            w.bool(self.x.imod[1]);
-        }
+        // No pending OA flag (A15b.13; MP4 ruling Q3).
         w.bool(self.x.next_instr);
         w.bool(self.x.next_instrd);
         w.u32(self.x.lvmo);
@@ -434,14 +425,6 @@ impl Pipeline {
         self.d_slot_pending = r.bool()?;
         self.x.oa_low = r.u64()?;
         self.x.oa_high = r.u64()?;
-        // A revision-15 file of version 50 has revision 14's two flags too,
-        // false on revision 15.
-        self.x.imod =
-            if !self.m.geometry.extended() || r.version() == Some(crate::checkpoint::VERSION_40) {
-                [r.bool()?, r.bool()?]
-            } else {
-                [false; 2]
-            };
         self.x.next_instr = r.bool()?;
         self.x.next_instrd = r.bool()?;
         self.x.lvmo = r.u32()?;
@@ -453,7 +436,7 @@ impl Pipeline {
         self.halted = r.bool()?;
         self.committed = r.u64()?;
         self.x.npc_prev = r.u16()?;
-        self.m.period = if self.m.geometry.extended() { self.period } else { 0 };
+        self.m.period = self.period;
         self.m.tlb.sweep();
         self.tlb_sweep_until = self.clock + self.m.tlb.len() as u64;
         self.restore_copies();

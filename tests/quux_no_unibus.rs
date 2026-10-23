@@ -69,7 +69,7 @@ fn every_unibus_address_is_nothing_on_quux() {
 fn the_space_s_last_page_is_the_register_page() {
     let mut m = quux();
     let page = support::PAGE_16;
-    assert_eq!(m.bus_read(page), Geometry::QUUX_16.machine_id.unwrap().into());
+    assert_eq!(m.bus_read(page), Geometry::QUUX.machine_id.unwrap().into());
     assert_eq!(m.bus_error, 0, "the page answers");
     for nothing in [page - 1, 0o17777400] {
         m.bus_error = 0;
@@ -95,7 +95,7 @@ fn the_cadr_keeps_its_unibus() {
 #[test]
 fn the_unibus_interrupt_does_not_reach_quux() {
     use muir::ioboard::{self, csr};
-    for (geometry, want) in [(Geometry::CADR, true), (Geometry::QUUX_16, false)] {
+    for (geometry, want) in [(Geometry::CADR, true), (Geometry::QUUX, false)] {
         let mut m = Machine::with_geometry(geometry, 32);
         m.interrupt_status |= interrupt_status::ENABLE_UB_INTS;
         m.ioboard.write(ioboard::CSR, csr::CLOCK_INT_ENABLE, 0);

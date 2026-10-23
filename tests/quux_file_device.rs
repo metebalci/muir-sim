@@ -19,7 +19,7 @@ mod support;
 use std::path::{Path, PathBuf};
 
 use muir::file_device::{self, Mounts, op, status};
-use muir::machine::{Geometry, Machine};
+use muir::machine::Machine;
 
 const PAGE: u32 = support::PAGE_16;
 const CONTROL: u32 = PAGE + 0o160;
@@ -1394,7 +1394,6 @@ mod engines {
     };
     use muir::micro::Micro;
     use muir::pipeline::Pipeline;
-    use muir::rtl::Rtl;
 
     const TAG: u32 = 0o4321;
 
@@ -1438,30 +1437,6 @@ mod engines {
         m.mmem[5] = va(PAGE | 0o170);
         m.mmem[6] = va(PAGE | 0o100);
         m.mmem[7] = va(BUF_B);
-        (m, ends)
-    }
-
-    /// [`machine`]'s on revision 13, through its map, for the single-edge
-    /// `rtl`'s cache.
-    fn machine_13(f: &Folder) -> (Machine, [u32; 2]) {
-        // The device set up on revision 16, the machine then revision 13's.
-        let (mut m, ends, prod) = loaded(Dev::new(default_root(f)));
-        m.geometry = Geometry::QUUX;
-        // Virtual pages of 1024 words: 1 the register page's frame, the
-        // page at its word 1400; 2 the command ring; 3 buffer B.
-        let page_13 = muir::machine::REGISTER_PAGE_13;
-        let rw = (1 << 27) | (1 << 26);
-        m.l2_map[1] = rw | (page_13 >> 10);
-        m.l2_map[2] = rw | (CMD_RING >> 10);
-        m.l2_map[3] = rw | (BUF_B >> 10);
-        let page = u64::from((1 << 10) | (page_13 & 0o1777));
-        m.mmem[1] = page | 0o164;
-        m.mmem[2] = u64::from(prod + 1);
-        m.mmem[3] = u64::from((2 << 10) | (8 * prod));
-        m.mmem[4] = u64::from(TAG | op::READ << 16);
-        m.mmem[5] = page | 0o170;
-        m.mmem[6] = page | 0o100;
-        m.mmem[7] = 3 << 10;
         (m, ends)
     }
 
@@ -1561,54 +1536,6 @@ mod engines {
         let mut r = Pipeline::new(m);
         r.boot();
         check("rtl", &mut r, answered, resp, |e| e.machine().ns);
-    }
-
-    /// **A device write never hits stale in the cache** of revisions 13 and
-    /// 14: the single-edge `rtl`'s loop reads B's first word, a hit each
-    /// time once its line is filled, until the READ lands there; the next
-    /// read of it misses, the whole cache having been invalidated before the
-    /// response index moved.
-    #[test]
-    fn a_device_write_invalidates_the_cache() {
-        let f = Folder::new("cache");
-        f.file("data", b"0123456789");
-        let (m, [answered, _]) = machine_13(&f);
-        let mut r = Rtl::new(m);
-        r.boot();
-        let _ = run_to_response(&mut r, answered, Rtl::ns);
-        let misses = r.cache().unwrap().misses;
-        assert_eq!(misses, 1, "B's line filled once before the response");
-        for _ in 0..200 {
-            r.step().unwrap();
-        }
-        assert_eq!(r.cache().unwrap().misses, 2, "and missed once after it");
-        assert_eq!(fixnum(r.machine().amem[0o202]), u32::from_le_bytes(*b"0123"));
-    }
-
-    /// **The producer index is taken once the write buffer is empty**, on
-    /// revision 13's single-edge `rtl` and its one-word buffer: with
-    /// main memory taking 25 us a write, the command entry's word 0 is
-    /// still going in when the producer write lands, and the command's time
-    /// counts from when it is in. (Longer than about 40 us and the loop's
-    /// next read of memory waits past `rtl`'s own limit on a stall.)
-    #[test]
-    fn the_producer_waits_for_the_write_buffer() {
-        use muir::cache::MemoryTiming;
-        let f = Folder::new("drain");
-        f.file("data", b"0123456789");
-        // The command's time in nanoseconds, revision 13's unit.
-        let cost_ns = cost(0, 8) / UNITS_NS;
-        for (write_ns, least, most) in
-            [(25_000u64, 25_000 + cost_ns, 50_000), (290, cost_ns, 25_000)]
-        {
-            let (m, [answered, resp]) = machine_13(&f);
-            let mut r = Rtl::new(m);
-            r.set_memory_timing(Some(MemoryTiming { read_ns: 380, write_ns }));
-            r.boot();
-            let (due, _, _) = run_to_response(&mut r, answered, Rtl::ns);
-            assert!((least..most).contains(&due), "{write_ns} ns a write: due {due}");
-            assert_eq!(r.machine().main[resp as usize] & 0xffff, TAG.into());
-        }
     }
 }
 

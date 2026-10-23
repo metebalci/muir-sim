@@ -71,7 +71,7 @@ fn quux_answers_its_id_in_source_16() {
     let id: u32 = (0x5155 << 16) | (16 << 4) | 4;
     let ones = |g: Geometry| g.word_mask();
     for (geometry, want) in [
-        (Geometry::QUUX_16, [id.into(), id.into(), ones(Geometry::QUUX_16)]),
+        (Geometry::QUUX, [id.into(), id.into(), ones(Geometry::QUUX)]),
         (Geometry::CADR, [0xffff_ffff; 3]),
     ] {
         let (e, r) = both(geometry, &prom, &|_| {}, 30);
@@ -80,7 +80,7 @@ fn quux_answers_its_id_in_source_16() {
             assert_eq!(got, want, "{geometry:?}, {name}");
         }
     }
-    assert_eq!(Geometry::QUUX_16.machine_id, Some(id));
+    assert_eq!(Geometry::QUUX.machine_id, Some(id));
     assert_eq!(Geometry::CADR.machine_id, None);
 }
 
@@ -126,9 +126,9 @@ fn quux_lists_its_sizes_in_its_feature_page() {
             }
         }
     };
-    let id = Geometry::QUUX_16.machine_id.unwrap();
+    let id = Geometry::QUUX.machine_id.unwrap();
     let want = [id, 0, 4096, 16384, 16384, 1024, 4096, 3, 1, 1, 7, 3, 1024, 0];
-    let (e, r) = both(Geometry::QUUX_16, &prom, &set(Geometry::QUUX_16), 400);
+    let (e, r) = both(Geometry::QUUX, &prom, &set(Geometry::QUUX), 400);
     for (name, m) in [("micro", e.machine()), ("rtl", r.machine())] {
         let got: Vec<u32> = (0..words.len()).map(|k| support::low(m.amem[0o200 + k])).collect();
         assert_eq!(got, want, "QUUX, {name}");
@@ -166,11 +166,8 @@ fn quux_s_pdl_buffer_is_4k_or_16k() {
         (14, 0o7777, 0o10000),
         (14, 0o37777, 0),
     ] {
-        let geometry = if bits == 10 {
-            Geometry::CADR
-        } else {
-            Geometry { pdl_bits: bits, ..Geometry::QUUX_16 }
-        };
+        let geometry =
+            if bits == 10 { Geometry::CADR } else { Geometry { pdl_bits: bits, ..Geometry::QUUX } };
         let set = |m: &mut Machine| m.mmem[1] = u64::from(start);
         let (e, r) = both(geometry, &prom, &set, 30);
         for (name, m) in [("micro", e.machine()), ("rtl", r.machine())] {
@@ -232,14 +229,14 @@ fn quux_has_no_speed_bits() {
     let pipeline_ns = |e: &Pipeline| e.machine().ns;
     for bits in [0, 1, 2, 3] {
         for (name, (boot, after)) in [
-            ("micro", eight(Micro::new(make(Geometry::QUUX_16)), Some(bits), micro_ns)),
-            ("rtl", eight(Pipeline::new(make(Geometry::QUUX_16)), Some(bits), pipeline_ns)),
+            ("micro", eight(Micro::new(make(Geometry::QUUX)), Some(bits), micro_ns)),
+            ("rtl", eight(Pipeline::new(make(Geometry::QUUX)), Some(bits), pipeline_ns)),
         ] {
             assert_eq!(boot, after, "{name}, speed bits {bits}: the same rate");
             // QUUX drops the delay lines: its period.
             assert_eq!(boot, 8 * muir::clock::PERIOD_15, "{name}, speed bits {bits}: the rate");
         }
-        let mut m = make(Geometry::QUUX_16);
+        let mut m = make(Geometry::QUUX);
         m.spy_write(spy::MODE, bits);
         assert!(!m.mode.speed0 && !m.mode.speed1, "speed bits {bits} went nowhere");
     }

@@ -1,15 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! **QUUX revision 15's memory side**, as `rtl`'s pipeline times it and
+//! **QUUX's memory side**, as `rtl`'s pipeline times it and
 //! carries its words (contract G3 revision 15, §6, A15b.5 and A15b.6; its
 //! MP2b rulings Q5-Q11 and F1).
 //!
-//! On revision 15 the port carries the words: main memory as the port sees
-//! it lags the processor, a posted write's word reaching it at the write's
-//! response, and the cache holds its lines' words, a write hit updating
-//! them (MP2b ruling F1). Revisions 13 and 14 keep [`crate::memory_port`],
-//! whose cache holds tags and whose words come from the machine at once.
+//! The port carries the words: main memory as the port sees it lags the
+//! processor, a posted write's word reaching it at the write's response,
+//! and the cache holds its lines' words, a write hit updating them (MP2b
+//! ruling F1).
 //!
 //! - **Posted writes.** A write start makes an entry in a queue of
 //!   [`QUEUE`] (A15b.5): the 29-bit bus address and the 40-bit word. The

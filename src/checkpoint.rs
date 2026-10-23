@@ -47,35 +47,29 @@ const MAGIC: &[u8; 16] = b"muir checkpoint\n";
 /// interface, so every format moved; 49, 50, 51 and 53 are refused.
 pub const VERSION: u32 = 54;
 
-/// A 40-bit machine's, QUUX revision 13's (contract G2 appendix A1.13):
-/// every word 5 bytes, `<7:0>` first and the tag last, so that main memory
-/// is G1 §4.1's packed storage; the dispatch memory of 4,096 entries, the
-/// map's 8,192 and 4,096, the overflow flag, and revision 13's location
-/// counter and devices. The version says the width: a resume reads the
-/// body at 40 bits.
+/// A 40-bit machine's of QUUX hardware revisions 13 and 14 (contract G2
+/// appendix A1.13), which this build does not run: every word 5 bytes,
+/// `<7:0>` first and the tag last. Its body is read as far as the machine's
+/// geometry, which says the revision, to refuse it as that revision's.
 pub const VERSION_40: u32 = 55;
 
-/// QUUX revision 15's: a 40-bit machine's, as [`VERSION_40`], whose
-/// pipeline's state has no pending OA flag, revision 14's two IMOD flags
-/// left out (A15b.13; MP4 ruling Q3). A revision-15 file of
-/// [`VERSION_40`], which has them, still loads.
+/// QUUX hardware revision 15's, which this build does not run: a 40-bit
+/// machine's, as [`VERSION_40`]. Read as far as the geometry, as that is.
 pub const VERSION_15: u32 = 56;
 
-/// QUUX revision 16's: revision 15's, with the Ethernet device's state
-/// after it, 253-257 among it (QUUX's Ethernet contract, §2.9), and no
-/// Chaosnet interface on the I/O board (§8 R4). Revision 15 keeps
-/// [`VERSION_15`]. 52 was revision 16's before 253-257 were in it, and 57
+/// QUUX's: every word 5 bytes, `<7:0>` first and the tag last, so that
+/// main memory is G1 §4.1's packed storage (contract G2 appendix A1.13);
+/// the dispatch memory of 4,096 entries, the overflow flag, the location
+/// counter and the devices, the Ethernet device's state among them, 253-257
+/// with it (QUUX's Ethernet contract, §2.9), and no Chaosnet interface on
+/// the I/O board (§8 R4). The version says the width: a resume reads the
+/// body at 40 bits. 52 and 57 were QUUX's before 253-257 were in it and
 /// before it lost the interface; both are refused.
 pub const VERSION_16: u32 = 58;
 
 /// The version a checkpoint of a machine of `geometry` is written at.
 pub fn version_for(geometry: &crate::machine::Geometry) -> u32 {
-    match geometry.word_bits {
-        _ if geometry.ethernet() => VERSION_16,
-        _ if geometry.extended() => VERSION_15,
-        40 => VERSION_40,
-        _ => VERSION,
-    }
+    if geometry.quux() { VERSION_16 } else { VERSION }
 }
 
 /// The shortest run of zero bytes worth a count of its own.
@@ -84,6 +78,14 @@ const MIN_ZERO_RUN: usize = 4;
 /// The error a checkpoint that cannot be read gives.
 pub fn bad(what: impl std::fmt::Display) -> Error {
     Error::new(ErrorKind::InvalidData, format!("checkpoint: {what}"))
+}
+
+/// A checkpoint of a machine this build does not run, an earlier QUUX
+/// hardware revision's: refused as that, of kind
+/// [`ErrorKind::Unsupported`], so that a resume says what runs it rather
+/// than to make the file again.
+pub fn unsupported(what: impl std::fmt::Display) -> Error {
+    Error::new(ErrorKind::Unsupported, format!("checkpoint: {what}"))
 }
 
 /// A word of a 32-bit machine, as a checkpoint has always written it: four
@@ -453,8 +455,8 @@ impl io::Read for Reader<'_> {
 /// A checkpoint read back: what its header says, and its body.
 #[derive(Debug)]
 pub struct Checkpoint {
-    /// The format's version: [`VERSION`], [`VERSION_40`], [`VERSION_15`] or
-    /// [`VERSION_16`].
+    /// The format's version: [`VERSION`] or [`VERSION_16`], or
+    /// [`VERSION_40`] or [`VERSION_15`], which are read only to be refused.
     pub version: u32,
     /// The machine's word, as the version says: 32 or 40 bits.
     pub word_bits: u32,
@@ -486,7 +488,7 @@ pub fn write(
 ) -> io::Result<u64> {
     let version = match word_bits {
         32 => VERSION,
-        40 => VERSION_40,
+        40 => VERSION_16,
         _ => return Err(bad(format!("{word_bits}-bit words are no machine's"))),
     };
     write_version(path, engine, memory_boards, version, body)
@@ -524,7 +526,7 @@ pub fn read(path: &Path) -> io::Result<Checkpoint> {
         VERSION_40 | VERSION_15 | VERSION_16 => 40,
         _ => {
             return Err(bad(format!(
-                "format version {version}; this build reads {VERSION}, {VERSION_40}, {VERSION_15} and {VERSION_16}"
+                "format version {version}; this build reads {VERSION} and {VERSION_16}"
             )));
         }
     };

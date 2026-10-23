@@ -160,7 +160,7 @@ fn the_tick_is_timer_0_on_the_page_and_not_destination_3() {
         Insn::new(JUMP | target(25) | ALWAYS | N),
     ];
     let m = || {
-        let mut m = machine(Geometry::QUUX_16, &prom, 16_667, [TICK_ON, TICK_CLEAR]);
+        let mut m = machine(Geometry::QUUX, &prom, 16_667, [TICK_ON, TICK_CLEAR]);
         assert_eq!(support::quux_va(support::PAGE_16 | 0o110), TIMER_0_CONTROL);
         m.mmem[7] = u64::from(TIMER_0_PERIOD);
         m.mmem[8] = u64::from(TIMER_0_CONTROL);
@@ -221,7 +221,7 @@ fn source_15_counts_microseconds() {
         Insn::new(JUMP | target(0) | ALWAYS | N),
     ];
     let quux = |start: u64| {
-        let mut m = machine(Geometry::QUUX_16, &prom, 0, [0, 0]);
+        let mut m = machine(Geometry::QUUX, &prom, 0, [0, 0]);
         m.ns = start;
         m
     };

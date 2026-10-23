@@ -1509,8 +1509,8 @@ fn wim(n: bool, at: u64) -> u64 {
 /// form, with N, the board nops the word it fetched during the write and
 /// `IWRITED`'s POPJ returns to it, fetched again from the store after the
 /// write, so the new word runs; in CC's form, without N, the word fetched
-/// before the write runs as the slot, the old word. On the CADR and on
-/// revision 14, `micro` as `rtl`, the netlist's engine. **Fails** a `micro`
+/// before the write runs as the slot, the old word. On the CADR, `micro`
+/// as `rtl`, the netlist's engine. **Fails** a `micro`
 /// that runs the word it prefetched after MIT's form.
 #[test]
 fn a_write_i_mem_of_the_word_after_it_runs_as_the_board_runs_it() {
@@ -1520,7 +1520,8 @@ fn a_write_i_mem_of_the_word_after_it_runs_as_the_board_runs_it() {
     let set = ALU | muir::isa::asm::SETA | a_src(0o100) | m_dest(0o20);
     let stop = JUMP | ALWAYS | N | target(WIM_STOP);
     let fil = filler().raw();
-    for g in [Geometry::CADR, Geometry::QUUX_14] {
+    {
+        let g = Geometry::CADR;
         for (n, new) in [(true, 1), (false, 0)] {
             let words = [set, wim(n, WIM_AT + 2), fil, fil, stop, fil];
             let [u, r] = wim_both(g, &words, inc(0o22));
@@ -1534,7 +1535,7 @@ fn a_write_i_mem_of_the_word_after_it_runs_as_the_board_runs_it() {
 /// **A WRITE-I-MEM in a jump's delay slot goes on at the jump's target**
 /// (WRITE-I-MEM ruling): MIT's form pushes the target under N and returns
 /// to it, fetched again after the write; a write of the target runs its new
-/// word. On the CADR and revision 14, `micro` as `rtl`. **Fails** a
+/// word. On the CADR, `micro` as `rtl`. **Fails** a
 /// `micro` that runs the target's word as it prefetched it.
 #[test]
 fn a_write_i_mem_in_a_delay_slot_goes_on_at_the_jump_s_target() {
@@ -1544,7 +1545,8 @@ fn a_write_i_mem_in_a_delay_slot_goes_on_at_the_jump_s_target() {
     let set = ALU | muir::isa::asm::SETA | a_src(0o100) | m_dest(0o20);
     let stop = JUMP | ALWAYS | N | target(WIM_STOP);
     let fil = filler().raw();
-    for g in [Geometry::CADR, Geometry::QUUX_14] {
+    {
+        let g = Geometry::CADR;
         // Another word written, then the target itself.
         for (at, want) in [(WIM_AT + 0o20, [0, 0, 1]), (WIM_AT + 0o10, [0, 1, 0])] {
             let mut words = vec![
@@ -1568,15 +1570,15 @@ fn a_write_i_mem_in_a_delay_slot_goes_on_at_the_jump_s_target() {
 /// **A WRITE-I-MEM costs what it costs on the board** (WRITE-I-MEM ruling,
 /// W5): two nopped microcycles in MIT's form, `IWRITED`'s N after its own,
 /// and one in CC's, without N. Against the same program without the
-/// write, `micro`'s clock moves as `rtl`'s less its stalls, on the CADR and
-/// revision 14.
+/// write, `micro`'s clock moves as `rtl`'s less its stalls, on the CADR.
 #[test]
 fn a_write_i_mem_costs_its_nopped_microcycles_on_micro_as_on_the_board() {
     use muir::machine::Geometry;
     let set = ALU | muir::isa::asm::SETA | a_src(0o100) | m_dest(0o20);
     let stop = JUMP | ALWAYS | N | target(WIM_STOP);
     let fil = filler().raw();
-    for g in [Geometry::CADR, Geometry::QUUX_14] {
+    {
+        let g = Geometry::CADR;
         let base = wim_both(g, &[set, fil, fil, fil, stop, fil], fil);
         for n in [true, false] {
             let with = wim_both(g, &[set, wim(n, WIM_AT + 0o20), fil, fil, stop, fil], fil);

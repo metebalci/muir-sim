@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! QUUX's memory cache, H2: a unified, write-through cache of main memory
-//! in front of the bus, as `rtl` times it.
+//! A memory cache, H2: a unified, write-through cache of main memory in
+//! front of the CADR's bus, as `rtl` times it, a measurement's. QUUX's own
+//! cache is its pipeline's port's (`crate::pipeline::port`).
 //!
 //! It holds tags and nothing else. `rtl` takes a read's word from main
 //! memory when the cycle ends, and a write-through cache never holds a word
@@ -55,11 +56,6 @@ impl MemoryTiming {
     /// most), a write 29 (28 to 58); rounded up, 370 and 290 ns. The line
     /// fill is taken as one tick more, 380 ns, **unverified** likewise.
     pub const DE25_NANO: MemoryTiming = MemoryTiming { read_ns: 380, write_ns: 290 };
-
-    /// QUUX's nominal main memory (contract Q6): the slower board's, so a
-    /// run is never faster than either board. A floor: an access a board
-    /// takes longer over waits, and muir answers at it.
-    pub const NOMINAL: MemoryTiming = MemoryTiming::DE25_NANO;
 }
 
 /// A cache's shape and speed.
@@ -79,9 +75,6 @@ pub struct CacheConfig {
 }
 
 impl CacheConfig {
-    /// QUUX's cache (contract Q6): 4K words, the shape H2 and H8 measured.
-    pub const QUUX: CacheConfig = CacheConfig::with_words(4096);
-
     /// `words` in lines of 4, 2-way, a hit in 20 ns --- two ticks of the
     /// fabric's grid, one for the RAM and one for the tag's compare --- and
     /// a write buffer. The 20 ns is met on the Arty Z7-20 in muir-fpga's

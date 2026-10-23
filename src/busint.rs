@@ -729,7 +729,7 @@ impl IoBoardTiming {
     fn fclk_edge_at_or_after(&self, t: u64) -> u64 {
         let from = match self.timing {
             TimingModel::Cadr => t,
-            TimingModel::Fpga | TimingModel::Sync { .. } => t.saturating_sub(GRID_NS - 1),
+            TimingModel::Fpga => t.saturating_sub(GRID_NS - 1),
         };
         from.div_ceil(IOB_FCLK_NS) * IOB_FCLK_NS
     }
@@ -1127,38 +1127,14 @@ pub fn decode_with(phys: u32, memory_words: usize, color_tv: bool) -> Responder 
     decode_for(phys, memory_words, color_tv, tv::BUFFER_WORDS, 0xff)
 }
 
-/// [`decode_with`] with the main display's buffer `tv_words` long, and
-/// `tv_regs` its control registers that answer, a bit each
-/// (`Tv::control_registers`). QUUX does not decode by this, but by
-/// [`decode_quux_13`].
-/// **QUUX's decode** (contracts Q5, Q7 and Q13; G1 §3.2, G2 §3-§4): 28-bit
-/// physical word addresses. The register page,
-/// [`crate::machine::REGISTER_PAGE_13`], a device; the frame buffer window
-/// from [`crate::machine::WINDOW_13`], `tv_words` of it, on the memory bus
-/// with main memory; main memory from 0 up to `memory_words`, below the
-/// window; and nothing else. An access to nothing fails at once. The
-/// CADR's addresses from `17000000` up, its Unibus window among them, are
-/// main memory's when there is that much of it.
-pub fn decode_quux_13(phys: u32, memory_words: usize, tv_words: u32) -> Responder {
-    use crate::machine::{REGISTER_PAGE_13, WINDOW_13};
-    if phys & !0o377 == REGISTER_PAGE_13 {
-        Responder::Device
-    } else if phys.wrapping_sub(WINDOW_13) < tv_words
-        || (phys < WINDOW_13 && (phys as usize) < memory_words)
-    {
-        Responder::Memory(0)
-    } else {
-        Responder::NoXbus
-    }
-}
-
-/// **Revision 14's decode** (contract G3 revision 14, A14.1) of a 29-bit
-/// bus address ([`crate::tlb::bus_address`]): with `<28>` clear, main
-/// memory up to `memory_words` and nothing past it; with `<28>` set, the
-/// device window at `<27:0>`: the register page at `1777777400`, a device;
-/// frame buffer 0 from the window's base, `tv_words` of it, on the memory
-/// bus with main memory; and nothing else, the reserved slices and pages
-/// included. A memory's window never reaches here: every reference to it
+/// **QUUX's decode** (contracts Q5, Q7 and Q13; contract G3 revision 14,
+/// A14.1) of a 29-bit bus address ([`crate::tlb::bus_address`]): with
+/// `<28>` clear, main memory up to `memory_words` and nothing past it; with
+/// `<28>` set, the device window at `<27:0>`: the register page at
+/// `1777777400`, a device; frame buffer 0 from the window's base,
+/// `tv_words` of it, on the memory bus with main memory; and nothing else,
+/// the reserved slices and pages included. An access to nothing fails at
+/// once. A memory's window never reaches here: every reference to it
 /// faults.
 pub fn decode_quux_14(bus: u32, memory_words: usize, tv_words: u32) -> Responder {
     use crate::tlb::{DEVICE, REGISTER_PAGE_BUS};
@@ -1173,6 +1149,10 @@ pub fn decode_quux_14(bus: u32, memory_words: usize, tv_words: u32) -> Responder
     }
 }
 
+/// [`decode_with`] with the main display's buffer `tv_words` long, and
+/// `tv_regs` its control registers that answer, a bit each
+/// (`Tv::control_registers`). QUUX does not decode by this, but by
+/// [`decode_quux_14`].
 pub fn decode_for(
     phys: u32,
     memory_words: usize,

@@ -201,11 +201,12 @@ fn the_file_names_its_engine_and_refuses_other_files() {
 /// line lifts (`a_checkpoint_anywhere_in_a_frame_resumes_as_the_run_without_it`
 /// in `src/chaos/board.rs`), and 49, 50, 51 and 53 are refused. Version 58
 /// is revision 16's once it lost the Chaosnet interface (QUUX's Ethernet
-/// contract, §8 R4), and 57, its version before, is refused. QUUX
-/// revision 12, retired, wrote the CADR's version, and its checkpoint is
-/// refused by the machine its body records
-/// (`a_revision_12_checkpoint_is_refused_by_its_machine` in
-/// `tests/quux_revision.rs`).
+/// contract, §8 R4), and 57, its version before, is refused. 55 and 56,
+/// QUUX revisions 13 to 15's, are read as far as the machine their body
+/// records, which refuses them by their revision
+/// (`an_earlier_revision_s_checkpoint_is_refused_naming_it_and_the_tag` in
+/// `tests/quux_revision.rs`). QUUX revision 12, retired, wrote the CADR's
+/// version, and its checkpoint is refused by the machine its body records.
 #[test]
 fn the_format_is_version_54_and_another_version_is_refused() {
     assert_eq!(checkpoint::VERSION, 54, "a new version needs its own tests");
@@ -226,7 +227,13 @@ fn the_format_is_version_54_and_another_version_is_refused() {
         std::fs::write(&path, &file).unwrap();
         let err = checkpoint::read(&path).unwrap_err().to_string();
         assert!(err.contains(&format!("format version {other}")), "{err}");
-        assert!(err.contains("reads 54, 55, 56 and 58"), "{err}");
+        assert!(err.contains("reads 54 and 58"), "{err}");
+    }
+    for read in [55u32, 56] {
+        let mut file = good.clone();
+        file[at..at + 4].copy_from_slice(&read.to_le_bytes());
+        std::fs::write(&path, &file).unwrap();
+        assert_eq!(checkpoint::read(&path).unwrap().word_bits, 40, "version {read}");
     }
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -7,7 +7,7 @@
 
 mod support;
 
-use support::{Run, cadr, quux_on_16, scratch, text};
+use support::{Run, cadr, quux, scratch, text};
 
 /// `--checkpoint` writes the machine at the stop, `--resume` starts there:
 /// the microcycle count carries on, the window counts from the resume.
@@ -222,7 +222,7 @@ fn a_resume_has_the_checkpoint_s_machine() {
     let dir = scratch("checkpoint-machine");
     let prom = support::idle_prom_16(&dir);
     let start = || {
-        let mut c = quux_on_16();
+        let mut c = quux();
         c.arg("--prom").arg(&prom);
         c
     };
@@ -235,7 +235,7 @@ fn a_resume_has_the_checkpoint_s_machine() {
         let chk = dir.join(format!("quux-{}.chk", &engine[2..]));
         let out = start().args([engine, "--stop-after", "100", "--checkpoint"]).arg(&chk).run();
         assert!(out.status.success(), "{engine}: the first run failed:\n{}", text(&out));
-        let out = quux_on_16().args([engine, "--stop-after", "10", "--resume"]).arg(&chk).run();
+        let out = quux().args([engine, "--stop-after", "10", "--resume"]).arg(&chk).run();
         assert!(out.status.success(), "{engine}: the resumed run failed:\n{}", text(&out));
         let path = chk.display();
         let says = format!("--resume {path} is quux's, not cadr's: quux --resume {path}");
@@ -250,8 +250,7 @@ fn a_resume_has_the_checkpoint_s_machine() {
         let path = chk.display();
         let says = format!("--resume {path} is cadr's, not quux's: cadr --resume {path}");
         for quux_engine in ["--micro", "--rtl"] {
-            let out =
-                quux_on_16().args([quux_engine, "--stop-after", "10", "--resume"]).arg(&chk).run();
+            let out = quux().args([quux_engine, "--stop-after", "10", "--resume"]).arg(&chk).run();
             refused(out, &says);
         }
     }
@@ -266,7 +265,7 @@ fn a_resume_has_the_checkpoint_s_machine() {
         .run();
     assert!(out.status.success(), "the chip run failed:\n{}", text(&out));
     let path = chk.display();
-    let out = quux_on_16().args(["--rtl", "--stop-after", "10", "--resume"]).arg(&chk).run();
+    let out = quux().args(["--rtl", "--stop-after", "10", "--resume"]).arg(&chk).run();
     refused(out, &format!("--resume {path} is cadr's, not quux's: cadr --resume {path}"));
 }
 
@@ -280,7 +279,7 @@ fn a_resume_has_the_checkpoint_s_rtc() {
     let dir = scratch("checkpoint-rtc");
     let prom = support::idle_prom_16(&dir);
     let start = || {
-        let mut c = quux_on_16();
+        let mut c = quux();
         c.arg("--prom").arg(&prom);
         c
     };
@@ -292,14 +291,14 @@ fn a_resume_has_the_checkpoint_s_rtc() {
             .arg(&chk)
             .run();
         assert!(out.status.success(), "{engine}: the first run failed:\n{}", text(&out));
-        let out = quux_on_16()
+        let out = quux()
             .args([engine])
             .args(["--rtc", "1700000000", "--stop-after", "10", "--resume"])
             .arg(&chk)
             .run();
         assert!(out.status.success(), "{engine}: the resumed run failed:\n{}", text(&out));
         for other in [&["--rtc", "1700000001"][..], &["--rtc", "host"], &[]] {
-            let out = quux_on_16()
+            let out = quux()
                 .args([engine])
                 .args(other)
                 .args(["--stop-after", "10", "--resume"])
@@ -315,10 +314,9 @@ fn a_resume_has_the_checkpoint_s_rtc() {
         let out =
             start().args([engine]).args(["--stop-after", "100", "--checkpoint"]).arg(&chk).run();
         assert!(out.status.success(), "{engine}: the live run failed:\n{}", text(&out));
-        let out =
-            quux_on_16().args([engine]).args(["--stop-after", "10", "--resume"]).arg(&chk).run();
+        let out = quux().args([engine]).args(["--stop-after", "10", "--resume"]).arg(&chk).run();
         assert!(out.status.success(), "{engine}: live resumes live:\n{}", text(&out));
-        let out = quux_on_16()
+        let out = quux()
             .args([engine])
             .args(["--rtc", "5", "--stop-after", "10", "--resume"])
             .arg(&chk)

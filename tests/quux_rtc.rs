@@ -119,11 +119,11 @@ fn the_cadr_has_no_rtc() {
 /// `<2>` (`tests/quux_ethernet.rs`); the CADR has no page.
 #[test]
 fn feature_word_15_announces_it() {
-    assert_eq!(Geometry::QUUX_16.feature_word(PAGE + 0o15), Some(7));
+    assert_eq!(Geometry::QUUX.feature_word(PAGE + 0o15), Some(7));
     assert_eq!(Geometry::CADR.feature_word(PAGE + 0o15), None);
     let mut m = quux();
     assert_eq!(m.bus_read(PAGE + 0o15), 7);
-    let id = Geometry::QUUX_16.machine_id.unwrap();
+    let id = Geometry::QUUX.machine_id.unwrap();
     assert!((id >> 4) & 0o7777 >= 9, "revision 9 or later");
 }
 
@@ -146,7 +146,7 @@ fn a_checkpoint_keeps_the_count() {
         let mut back = quux();
         back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
         assert_eq!(back.rtc, rtc);
-        assert_eq!(back.geometry, Geometry::QUUX_16);
+        assert_eq!(back.geometry, Geometry::QUUX);
         if let Rtc::Counted { .. } = rtc {
             assert_eq!(back.bus_read(RTC), m.bus_read(RTC), "{rtc:?}: the same second");
             back.ns += SECOND;

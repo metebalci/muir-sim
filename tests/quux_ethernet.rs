@@ -58,7 +58,7 @@ fn rev(geometry: Geometry) -> Machine {
 }
 
 fn rev16() -> Machine {
-    rev(Geometry::QUUX_16)
+    rev(Geometry::QUUX)
 }
 
 fn get(m: &mut Machine, w: u32) -> u32 {
@@ -185,18 +185,17 @@ fn counters(m: &mut Machine) -> [u32; 4] {
 
 // --- the page --------------------------------------------------------------
 
-/// **Revision 16 has words 240-257, and revision 15 reserves them** (§2.1,
-/// §2.2, §10): on 16 each reads its power-on value --- 241 quiet, 253-257
-/// the host's MAC address, IPv4 address, netmask and gateway, by default
-/// `02:00:00:00:00:01` and 169.254.100.2/30 by 169.254.100.1, QUUX's side
-/// of `quux0` and the link's other end (§3, "Flags") --- and a write of
-/// all ones to a read-only word changes nothing; on 15 every one reads 0
-/// and a write of any of them changes nothing. Feature word 0 says 16 and
-/// feature word 15 reads 7 there, 3 on 15; every other word of the page
-/// but 140-157, the Chaosnet interface's on 15 alone (§8 R4), reads alike
-/// on both. **Fails** a device on 15, or one missing on 16.
+/// **The page has words 240-257** (§2.1, §2.2, §10): each reads its
+/// power-on value --- 241 quiet, 253-257 the host's MAC address, IPv4
+/// address, netmask and gateway, by default `02:00:00:00:00:01` and
+/// 169.254.100.2/30 by 169.254.100.1, QUUX's side of `quux0` and the
+/// link's other end (§3, "Flags") --- and a write of all ones to a
+/// read-only word changes nothing. Feature word 0 says revision 16 and
+/// feature word 15 reads 7, the Ethernet device's bit with the clock's and
+/// the file device's. **Fails** a device missing a word, or a read-only
+/// word a write moves.
 #[test]
-fn the_page_has_240_to_257_on_revision_16_and_reserves_them_on_15() {
+fn the_page_has_240_to_257() {
     use Class::*;
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum Class {
@@ -231,25 +230,10 @@ fn the_page_has_240_to_257_on_revision_16_and_reserves_them_on_15() {
             assert!(state(&m) == s, "revision 16: word {w:o} is read only");
             assert_eq!(get(&mut m, w), want, "revision 16: word {w:o} after a write");
         }
-        let mut m = rev(Geometry::QUUX_15);
-        assert_eq!(get(&mut m, w), 0, "revision 15: word {w:o} is reserved");
-        let s = state(&m);
-        for v in [!0, 1, 0x101] {
-            put(&mut m, w, v);
-        }
-        assert!(state(&m) == s, "revision 15: a write of word {w:o} changed the machine");
-        assert_eq!(m.bus_error, 0, "revision 15: word {w:o} answered");
     }
-    let (mut a, mut b) = (rev16(), rev(Geometry::QUUX_15));
+    let mut a = rev16();
     assert_eq!(get(&mut a, 0) >> 4 & 0o7777, 16, "MACHINE-ID says revision 16");
-    assert_eq!(get(&mut b, 0) >> 4 & 0o7777, 15);
     assert_eq!(get(&mut a, 0o15), 7, "feature word 15: the clock, the file device, Ethernet");
-    assert_eq!(get(&mut b, 0o15), 3, "revision 15's feature word 15 unchanged");
-    // 140-157, the Chaosnet interface's on 15, are reserved on 16 (§8 R4),
-    // `tests/quux_network.rs`.
-    for w in (1..0o400).filter(|&w| !matches!(w, 0o15 | 0o103 | 0o140..=0o157 | 0o240..=0o257)) {
-        assert_eq!(get(&mut a, w), get(&mut b, w), "word {w:o} alike on 15 and 16");
-    }
 }
 
 /// **The read-only words ignore writes** and the configuration words take
@@ -1016,14 +1000,6 @@ fn word_100_bit_8_is_a_frame_waiting_under_the_interrupt_enable() {
     let mut m = raised();
     m.bus_write(RESET_DEVICES, 1);
     assert_eq!(m.bus_read(INTERRUPTS), 0, "RESET-DEVICES");
-    // Revision 15 has no bit 8.
-    let mut m = rev(Geometry::QUUX_15);
-    m.attach_ethernet_peer(Box::new(Script::default()));
-    for (w, v) in [(0o242, TX_RING), (0o246, RX_RING), (0o240, 0x101), (0o250, 1)] {
-        put(&mut m, w, v);
-    }
-    at(&mut m, 10);
-    assert_eq!(m.bus_read(INTERRUPTS), 0);
 }
 
 // --- time ------------------------------------------------------------------------
@@ -1075,7 +1051,7 @@ fn time_is_on_the_grid() {
 }
 
 /// **Revision 16's time is the file device's rule**: the 20 µs is reckoned
-/// exactly in units of 0.5 ns, at every period of revision 15's range, and
+/// exactly in units of 0.5 ns, at every period of `--microcycle-ns`'s range, and
 /// on a machine of whole nanoseconds it is 20,000 of them.
 #[test]
 fn a_transmit_takes_20_us_at_every_period() {
@@ -1095,9 +1071,8 @@ fn a_transmit_takes_20_us_at_every_period() {
 /// **A checkpoint with transmits waiting resumes and sends them** (§2.9):
 /// it is never refused on the device's account; the registers, the
 /// counters and the due time come back, and the frames go out at the times
-/// an unbroken run sends them. The file is revision 16's version, and
-/// revision 15's stays its own, 56. **Fails** a checkpoint that drops the due time,
-/// or refuses.
+/// an unbroken run sends them. The file is QUUX's version. **Fails** a
+/// checkpoint that drops the due time, or refuses.
 #[test]
 fn a_checkpoint_with_transmits_waiting_resumes_and_sends_them() {
     let run = |checkpoint_at: Option<u64>| {
@@ -1119,7 +1094,7 @@ fn a_checkpoint_with_transmits_waiting_resumes_and_sends_them() {
                 m.save(&mut w);
                 let body = w.finish();
                 let mut r = muir::checkpoint::Reader::for_word_bits(&body, 40);
-                let mut back = Machine::with_geometry(Geometry::QUUX_16, 1);
+                let mut back = Machine::with_geometry(Geometry::QUUX, 1);
                 back.period = PERIOD;
                 back.ethernet.rules = double();
                 back.load(&mut r).unwrap();
@@ -1138,13 +1113,11 @@ fn a_checkpoint_with_transmits_waiting_resumes_and_sends_them() {
     assert_eq!(straight.0.len(), 3, "three sent after the refusal");
     assert_eq!(straight.1, [0, 1, 0, 1]);
     assert_eq!(broken, straight, "resumed, the same frames at the same times");
-    assert_eq!(muir::checkpoint::version_for(&Geometry::QUUX_16), muir::checkpoint::VERSION_16);
-    assert_eq!(muir::checkpoint::version_for(&Geometry::QUUX_15), 56);
-    assert_ne!(muir::checkpoint::VERSION_16, 56);
+    assert_eq!(muir::checkpoint::version_for(&Geometry::QUUX), muir::checkpoint::VERSION_16);
     let mut w = muir::checkpoint::Writer::new();
     rev16().save(&mut w);
     let g = Machine::checkpointed_geometry_at(&w.finish(), 40).unwrap();
-    assert_eq!(g, Geometry::QUUX_16, "the body says revision 16");
+    assert_eq!(g, Geometry::QUUX, "the body says revision 16");
 }
 
 /// **Revision 16's checkpoint carries 253-257** (§2.9; §3, "The two
@@ -1177,27 +1150,6 @@ fn revision_16_s_checkpoint_carries_253_to_257() {
         assert_eq!(get(&mut back, w), want, "word {w:o} back from the checkpoint");
     }
     assert!(state(&back) == body, "the state back as it was");
-}
-
-/// **Revision 15's machine state is what it was**: a checkpoint body of a
-/// revision-15 machine has no Ethernet device in it, byte for byte the
-/// same whatever the device's state and whatever 253-257 hold, and loads
-/// back as revision 15.
-#[test]
-fn revision_15_s_checkpoint_has_no_ethernet_device() {
-    let mut m = rev(Geometry::QUUX_15);
-    let s = state(&m);
-    m.ethernet.host = eth::Host {
-        mac: [9; 6],
-        address: u32::from_be_bytes([192, 0, 2, 6]),
-        netmask: u32::MAX << 3,
-        gateway: u32::from_be_bytes([192, 0, 2, 1]),
-    };
-    put(&mut m, 0o242, 0o1000);
-    put(&mut m, 0o240, 1);
-    assert!(state(&m) == s, "revision 15's body does not carry the device");
-    let g = Machine::checkpointed_geometry_at(&s, 40).unwrap();
-    assert_eq!(g, Geometry::QUUX_15);
 }
 
 /// **Revision 16's body has no Chaosnet interface** (QUUX's Ethernet
@@ -1248,56 +1200,46 @@ fn prom_16(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
-/// **Revision 16 loads revision 15's `.mcr`, and only that** (QUUX's
+/// **QUUX loads a `.mcr` whose section 6 says 15, and only that** (QUUX's
 /// Ethernet contract, §10): section 6 names the microinstruction's
-/// revision, so one microcode runs on 15 and 16. On 16 a PROM and a
-/// microcode file saying 15 are taken, and ones saying 16 or 14 are
-/// refused, naming 15; on 15, 15 is taken and 16 refused, as before.
-/// **Fails** a reader that takes 15 on the PROM only, or that takes 15 or
-/// 16 on 16.
+/// revision, 15. A PROM and a microcode file saying 15 are taken, and ones
+/// saying 16 or 14 are refused, naming the field's value and 15. **Fails**
+/// a reader that takes 15 on the PROM only, or that takes 14 or 16.
 #[test]
-fn revision_16_loads_a_revision_15_mcr_and_refuses_others() {
+fn quux_loads_an_mcr_whose_section_6_says_15_and_refuses_others() {
     use muir::mcr::parse_quux_microcode;
     use muir::prom::parse_quux_mcr;
-    let (g15, g16) = (Geometry::QUUX_15, Geometry::QUUX_16);
-    for g in [g15, g16] {
-        let m = parse_quux_microcode(&mcr_saying(15, false), g).unwrap();
-        assert_eq!((m.hardware_revision, m.version()), (Some(15), Some(2002)), "{g:?}");
-        parse_quux_mcr(&mcr_saying(15, true), g).unwrap();
-    }
+    let g = Geometry::QUUX;
+    let m = parse_quux_microcode(&mcr_saying(15, false), g).unwrap();
+    assert_eq!((m.hardware_revision, m.version()), (Some(15), Some(2002)));
+    parse_quux_mcr(&mcr_saying(15, true), g).unwrap();
     for r in [16, 14] {
         for e in [
-            parse_quux_microcode(&mcr_saying(r, false), g16).map(|_| ()).unwrap_err(),
-            parse_quux_mcr(&mcr_saying(r, true), g16).map(|_| ()).unwrap_err(),
+            parse_quux_microcode(&mcr_saying(r, false), g).map(|_| ()).unwrap_err(),
+            parse_quux_mcr(&mcr_saying(r, true), g).map(|_| ()).unwrap_err(),
         ] {
             assert!(
-                e.contains(&format!("section 6 says hardware revision {r}, and this is revision 16, which loads revision 15's"), ),
+                e.contains(&format!(
+                    "section 6 says hardware revision {r}, and QUUX loads files whose section 6 says 15"
+                )),
                 "{r}: {e}"
             );
         }
     }
-    for e in [
-        parse_quux_microcode(&mcr_saying(16, false), g15).map(|_| ()).unwrap_err(),
-        parse_quux_mcr(&mcr_saying(16, true), g15).map(|_| ()).unwrap_err(),
-    ] {
-        assert!(e.contains("section 6 says hardware revision 16, and this is revision 15"), "{e}");
-    }
 }
 
-/// **`MUIR_QUUX_REVISION=16` runs revision 16 on both engines**, from a
-/// boot PROM whose section 6 says 15 (QUUX's Ethernet contract, §10): the start
-/// names it, the checkpoint records it at its own version, 58, and revisions
-/// 15 and 16 refuse each other's checkpoints, naming the revision; a
-/// revision-16 file of version 57, from before R4, is refused.
+/// **`quux` runs on both engines from a boot PROM whose section 6 says
+/// 15** (QUUX's Ethernet contract, §10): the start says the machine, the
+/// checkpoint records revision 16 at its version, 58, and resumes; a file
+/// of version 57, from before R4, is refused.
 #[test]
-fn the_switch_runs_revision_16_and_15_and_16_refuse_each_other_s_checkpoints() {
+fn quux_runs_on_both_engines_and_resumes_its_checkpoint() {
     use support::{Run, quux, scratch, text};
     let dir = scratch("revision-16");
     let prom = prom_16(&dir);
     let chk = dir.join("16.chk");
     for engine in ["--micro", "--rtl"] {
         let out = quux()
-            .env("MUIR_QUUX_REVISION", "16")
             .args([engine, "--main-memory-size", "2MW", "--stop-after", "10", "--prom"])
             .arg(&prom)
             .arg("--checkpoint")
@@ -1305,22 +1247,13 @@ fn the_switch_runs_revision_16_and_15_and_16_refuse_each_other_s_checkpoints() {
             .run();
         let t = text(&out);
         assert!(out.status.success(), "{engine}: the run failed:\n{t}");
-        assert!(t.contains("machine: quux, revision 16: "), "{engine}: {t}");
+        assert!(t.contains("machine: quux: "), "{engine}: {t}");
         let c = muir::checkpoint::read(&chk).unwrap();
         assert_eq!(c.version, muir::checkpoint::VERSION_16, "{engine}");
         let g = Machine::checkpointed_geometry_at(&c.body, c.word_bits).unwrap();
-        assert_eq!(g, Geometry::QUUX_16, "{engine}");
+        assert_eq!(g, Geometry::QUUX, "{engine}");
     }
     let out = quux()
-        .env("MUIR_QUUX_REVISION", "15")
-        .args(["--rtl", "--main-memory-size", "2MW", "--stop-after", "10", "--resume"])
-        .arg(&chk)
-        .run();
-    let t = text(&out);
-    assert_eq!(out.status.code(), Some(2), "15 resumed 16:\n{t}");
-    assert!(t.contains("is revision 16's, and this is revision 15"), "{t}");
-    let out = quux()
-        .env("MUIR_QUUX_REVISION", "16")
         .args(["--rtl", "--main-memory-size", "2MW", "--stop-after", "10", "--resume"])
         .arg(&chk)
         .run();
@@ -1335,7 +1268,6 @@ fn the_switch_runs_revision_16_and_15_and_16_refuse_each_other_s_checkpoints() {
     let old = dir.join("16-before-r4.chk");
     std::fs::write(&old, &file).unwrap();
     let out = quux()
-        .env("MUIR_QUUX_REVISION", "16")
         .args(["--rtl", "--main-memory-size", "2MW", "--stop-after", "10", "--resume"])
         .arg(&old)
         .run();

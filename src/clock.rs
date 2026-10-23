@@ -151,21 +151,12 @@ pub enum TimingModel {
     Cadr,
     /// muir-fpga's grid: every instant on a [`GRID_NS`] tick.
     Fpga,
-    /// QUUX's synchronous microcycle, H1a: the grid, with a microcycle of
-    /// `cycle_ticks` ticks and `ilong_ticks` more for an `ILONG`
-    /// instruction, in place of the CADR's delay-line taps. Every register
-    /// is still clocked at the one edge, the late writes one edge later,
-    /// and the bus keeps its own time on the grid, so only the length of a
-    /// microcycle changes. The ticks are a board's: the fit that proves its
-    /// longest path settles in them. QUUX's, having no speed bits; `rtl`'s.
-    Sync { cycle_ticks: u8, ilong_ticks: u8 },
 }
 
 /// **The machine's unit of time, and the grid its devices act on**: what
-/// [`crate::machine::Machine::ns`] counts. The CADR and QUUX revisions 13
-/// and 14 count nanoseconds with no grid of the machine's own
-/// ([`TimeBase::NS`]); their engines keep their own grids. **QUUX revision
-/// 15** counts units of 0.5 ns, feature word 25's unit, and its clock's
+/// [`crate::machine::Machine::ns`] counts. The CADR counts nanoseconds with
+/// no grid of the machine's own ([`TimeBase::NS`]); its engines keep their
+/// own grids. **QUUX** counts units of 0.5 ns, feature word 25's unit, and its clock's
 /// period `period` is a whole number of them, so that every period
 /// `--microcycle-ns` admits is exact and clock k ends at the instant
 /// k·`period` (contract G3 revision 15, A15b.12; its MP2b ruling Q1). A
@@ -181,18 +172,18 @@ pub enum TimingModel {
 /// reading every device at a clock's instant (MP2b ruling Q2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimeBase {
-    /// Units a nanosecond: 1, or 2 on revision 15.
+    /// Units a nanosecond: 1, or 2 on QUUX.
     pub per_ns: u64,
-    /// The clock's period in units, revision 15's; 0 where the machine has
-    /// no grid of its own.
+    /// The clock's period in units, QUUX's; 0 where the machine has no grid
+    /// of its own.
     pub period: u64,
 }
 
 impl TimeBase {
-    /// Nanoseconds, with no grid: the CADR's and revisions 13 and 14's.
+    /// Nanoseconds, with no grid: the CADR's.
     pub const NS: TimeBase = TimeBase { per_ns: 1, period: 0 };
 
-    /// Revision 15's: units of 0.5 ns, its clock `period` of them.
+    /// QUUX's: units of 0.5 ns, its clock `period` of them.
     pub const fn half_ns(period: u64) -> TimeBase {
         TimeBase { per_ns: 2, period }
     }
@@ -243,7 +234,7 @@ impl TimeBase {
     }
 }
 
-/// **Revision 15's and 16's period when no flag says**, in units of 0.5 ns:
+/// **QUUX's period when no flag says**, in units of 0.5 ns:
 /// 20, 10 ns, muir's default (contract G3 revision 15, §12.1; MP2b
 /// ruling Q14). The default is 10 ns, on both engines; `--microcycle-ns`
 /// sets any other period in its range.
@@ -276,12 +267,6 @@ pub fn microcycle_ns_text(units: u64) -> String {
     TimeBase::half_ns(units).ns_text(units)
 }
 
-/// `sync`'s microcycle when `--sync-cycle-ticks` does not say: 4 ticks,
-/// 40 ns, the DE25-Nano's. The Arty Z7-20 runs revision 13 at 5: its
-/// two-level map through the memory path's decode misses 4 ticks there by
-/// about a nanosecond (muir-fpga's fit at its commit `ccc3d12`).
-pub const SYNC_CYCLE_TICKS: u8 = 4;
-
 /// The tick of muir-fpga's grid.
 pub const GRID_NS: u64 = 10;
 
@@ -291,7 +276,6 @@ impl TimingModel {
         match self {
             TimingModel::Cadr => "cadr",
             TimingModel::Fpga => "fpga",
-            TimingModel::Sync { .. } => "sync",
         }
     }
 
@@ -300,7 +284,6 @@ impl TimingModel {
         match word {
             "cadr" => Some(TimingModel::Cadr),
             "fpga" => Some(TimingModel::Fpga),
-            "sync" => Some(TimingModel::Sync { cycle_ticks: SYNC_CYCLE_TICKS, ilong_ticks: 0 }),
             _ => None,
         }
     }
@@ -322,17 +305,13 @@ impl TimingModel {
     fn tick(self, ns: u64) -> u64 {
         match self {
             TimingModel::Cadr => ns,
-            TimingModel::Fpga | TimingModel::Sync { .. } => ns.div_ceil(GRID_NS) * GRID_NS,
+            TimingModel::Fpga => ns.div_ceil(GRID_NS) * GRID_NS,
         }
     }
 
     /// The whole microcycle: [`Speed::cycle_ns`] on the board; on the grid,
     /// the tap rounded up and the restart rounded up after it.
     pub fn cycle_ns(self, speed: Speed, ilong: bool) -> u32 {
-        if let TimingModel::Sync { cycle_ticks, ilong_ticks } = self {
-            let ticks = cycle_ticks as u32 + if ilong { ilong_ticks as u32 } else { 0 };
-            return ticks * GRID_NS as u32;
-        }
         let read = self.triggered(speed.read_phase_ns(ilong) as u64);
         let restart = self.triggered(RESTART_AFTER_READ_NS as u64);
         (read + restart) as u32

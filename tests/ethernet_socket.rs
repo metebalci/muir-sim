@@ -45,7 +45,7 @@ const PEER: [u8; 6] = [0x02, 0, 0, 0, 0, 0x02];
 const WALL: Duration = Duration::from_secs(20);
 
 fn rev16() -> Machine {
-    let mut m = Machine::with_geometry(Geometry::QUUX_16, 1);
+    let mut m = Machine::with_geometry(Geometry::QUUX, 1);
     m.period = PERIOD;
     m
 }
@@ -917,28 +917,19 @@ fn refused(out: &std::process::Output, saying: &str) {
     assert!(t.contains(saying), "{saying:?}:\n{t}");
 }
 
-/// **The CADR and revisions below 16 refuse the five flags, by name**
-/// (§3, "Flags"): `cadr` says they are quux's, and revisions 13, 14 and 15
-/// that they are revision 16's, before anything is connected. **Fails** a
-/// flag taken, or ignored, where there is no device.
+/// **The CADR refuses the five flags, by name** (§3, "Flags"): `cadr`
+/// says they are quux's, before anything is connected. **Fails** a flag
+/// taken, or ignored, where there is no device.
 #[test]
-fn the_flags_are_refused_on_the_cadr_and_below_revision_16() {
+fn the_flags_are_refused_on_the_cadr() {
     for (flag, value) in FLAGS {
         let args: Vec<&str> = [flag, value].into_iter().filter(|a| !a.is_empty()).collect();
         let out = support::cadr().args(&args).args(["--stop-after", "1"]).run();
         refused(&out, &format!("{flag} is quux's, not cadr's"));
-        for revision in [None, Some("14"), Some("15")] {
-            let mut c = quux();
-            if let Some(r) = revision {
-                c.env("MUIR_QUUX_REVISION", r);
-            }
-            let out = c.args(&args).args(["--stop-after", "1"]).run();
-            refused(&out, &format!("{flag} is QUUX revision 16's: MUIR_QUUX_REVISION=16"));
-        }
     }
 }
 
-/// The Chaosnet's five flags, each with a value `quux` takes below 16.
+/// The Chaosnet's five flags, each with a value `cadr` takes.
 const CHAOS_FLAGS: [(&str, &[&str]); 5] = [
     ("--chaos-address", &["--chaos-address", "3050"]),
     ("--chaos-trace", &["--chaos-trace"]),
@@ -950,45 +941,35 @@ const CHAOS_FLAGS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-/// **Revision 16 refuses the Chaosnet's flags, by name, and 13-15 take
-/// them** (QUUX's Ethernet contract, §8 R4: revision 16 loses the
-/// Chaosnet interface): on 16 each of `--chaos-address`, `--chaos-trace`,
-/// `--chaos-udp`, `--chaos-udp-peer` and `--chaos-udp-default-peer` is a
-/// usage error naming it and saying QUUX has no Chaosnet interface; on
-/// 13, 14 and 15 the same arguments run, and the start names the
-/// Chaosnet. 16's start has no chaosnet line. **Fails** a flag taken, or
-/// ignored, on 16, or one refused below it.
+/// **`quux` refuses the Chaosnet's flags, by name** (QUUX's Ethernet
+/// contract, §8 R4: QUUX has no Chaosnet interface): each of
+/// `--chaos-address`, `--chaos-trace`, `--chaos-udp`, `--chaos-udp-peer`
+/// and `--chaos-udp-default-peer` is a usage error naming it and saying
+/// QUUX has no Chaosnet interface. The control: `cadr` takes the same
+/// arguments, and its start names the Chaosnet; `quux`'s has no chaosnet
+/// line. **Fails** a flag taken, or ignored, on QUUX.
 #[test]
-fn the_chaos_flags_are_refused_on_revision_16_and_taken_below() {
+fn the_chaos_flags_are_refused_on_quux() {
     let dir = scratch("chaos-flags");
     let prom = prom_16(&dir);
-    let run = |revision: &str, args: &[&str]| {
-        let mut c = quux();
-        c.env("MUIR_QUUX_REVISION", revision).args([
-            "--micro",
-            "--main-memory-size",
-            "2MW",
-            "--stop-after",
-            "1",
-        ]);
-        if revision != "13" && revision != "14" {
-            c.arg("--prom").arg(&prom);
-        }
-        c.args(args).run()
+    let run = |args: &[&str]| {
+        quux()
+            .args(["--micro", "--main-memory-size", "2MW", "--stop-after", "1", "--prom"])
+            .arg(&prom)
+            .args(args)
+            .run()
     };
     for (flag, args) in CHAOS_FLAGS {
-        // The flag alone, with its value: 16 refuses it where it stands,
+        // The flag alone, with its value: quux refuses it where it stands,
         // before any check of the flags it goes with.
         let alone = &args[args.iter().position(|a| *a == flag).unwrap()..];
-        refused(&run("16", alone), &format!("{flag}: QUUX has no Chaosnet interface"));
-        for revision in ["13", "14", "15"] {
-            let out = run(revision, args);
-            let t = text(&out);
-            assert!(out.status.success(), "{revision} {args:?}:\n{t}");
-            assert!(t.contains("chaosnet: "), "{revision}: {t}");
-        }
+        refused(&run(alone), &format!("{flag}: QUUX has no Chaosnet interface"));
+        let out = support::cadr().args(["--micro", "--stop-after", "1"]).args(args).run();
+        let t = text(&out);
+        assert!(out.status.success(), "cadr {args:?}:\n{t}");
+        assert!(t.contains("chaosnet: "), "cadr: {t}");
     }
-    let out = run("16", &[]);
+    let out = run(&[]);
     let t = text(&out);
     assert!(out.status.success(), "{t}");
     assert!(!t.lines().any(|l| l.starts_with("chaosnet")), "{t}");
@@ -1004,7 +985,6 @@ fn the_flags_values_are_checked_before_the_run() {
     let prom = prom_16(&dir);
     let run = |args: &[&str]| {
         quux()
-            .env("MUIR_QUUX_REVISION", "16")
             .args(["--micro", "--main-memory-size", "2MW", "--stop-after", "1", "--prom"])
             .arg(&prom)
             .args(args)
@@ -1050,12 +1030,8 @@ fn started_from(
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).unwrap();
     let spec = format!("{}{}", path.display(), if clocked { ",clocked" } else { "" });
-    let child = c
-        .env("MUIR_QUUX_REVISION", "16")
-        .args(["--main-memory-size", "2MW"])
-        .args(args)
-        .args(["--ethernet-socket", &spec])
-        .start();
+    let child =
+        c.args(["--main-memory-size", "2MW"]).args(args).args(["--ethernet-socket", &spec]).start();
     listener.set_nonblocking(true).unwrap();
     let t = Instant::now();
     let stream = loop {
@@ -1153,7 +1129,6 @@ fn a_c_ends_a_run_waiting_on_a_silent_clocked_peer_within_a_second() {
     let p = prom.to_str().unwrap();
     for engine in ["--micro", "--rtl"] {
         let normal = quux()
-            .env("MUIR_QUUX_REVISION", "16")
             .args(["--main-memory-size", "2MW", engine, "--prom", p])
             .args(["--terminal", "127.0.0.1:0"])
             .start();
@@ -1262,7 +1237,6 @@ fn enabled_checkpoint(dir: &std::path::Path, prom: &std::path::Path) -> std::pat
     use muir::engine::Engine;
     let base = dir.join("base.chk");
     let out = quux()
-        .env("MUIR_QUUX_REVISION", "16")
         .args(["--micro", "--main-memory-size", "2MW", "--stop-after", "10", "--prom"])
         .arg(prom)
         .args(["--ethernet-mac", "02:00:00:00:00:07"])
@@ -1392,13 +1366,7 @@ fn host_words(chk: &std::path::Path) -> [u32; 5] {
 /// at `prom`, or with none for a resume, which takes the checkpoint's.
 fn run_16(engine: &str, prom: Option<&std::path::Path>, args: &[&str]) -> std::process::Output {
     let mut c = quux();
-    c.env("MUIR_QUUX_REVISION", "16").args([
-        engine,
-        "--main-memory-size",
-        "2MW",
-        "--stop-after",
-        "10",
-    ]);
+    c.args([engine, "--main-memory-size", "2MW", "--stop-after", "10"]);
     if let Some(p) = prom {
         c.arg("--prom").arg(p);
     }

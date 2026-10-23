@@ -24,30 +24,37 @@ Install `rustup`, then open a new shell so `cargo` is on the path:
 
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-Build muir-sim and fetch QUUX's system, the current release of
-[muir-sys](https://github.com/metebalci/muir-sys), System 2001, which runs
-on QUUX revision 13, the 40-bit word. The compiler version is pinned in
-`rust-toolchain.toml`, and the release lands in `vendor/`, every file
-checked against its SHA-256 sum.
+Build muir-sim and fetch QUUX's system. Until
+[muir-sys](https://github.com/metebalci/muir-sys) releases System 2002,
+it is muir-sys's hand-over of it, the pre-release `handover-2002-2999694`.
+The compiler version is pinned in `rust-toolchain.toml`, and the
+hand-over lands in `ref/band-2002-2999694/`, every file checked against its
+SHA-256 sum.
 
     git clone https://github.com/metebalci/muir-sim
     cd muir-sim
     cargo build --release
-    tools/fetch-system-for-quux.sh
+    tools/fetch-handover-2002.sh
 
-The script puts QUUX's disk in `vendor/run/` and makes the machine's host
-folder beside it: copies of the release's `sys/` and `site/`, and an empty
-home to log in to. QUUX reads its files from that folder through a device
-of its own, so it needs no file server. Start the machine:
+QUUX reads its files from a host folder through a device of its own, so it
+needs no file server. Make the folder from the hand-over's sources, with an
+empty home to log in to, and start the machine:
 
-    target/release/quux --micro --disk-pack vendor/run/release-2001-disk.vhd \
-        --file-root vendor/run/release-2001-root
+    mkdir -p ref/run
+    tar xzf ref/band-2002-2999694/handover-2002-2999694-sys.tar.gz -C ref/run
+    mkdir -p ref/run/release-2002-2999694/home/lispm
+    cp ref/band-2002-2999694/handover-2002-2999694-disk.vhd ref/run/disk.vhd
+    target/release/quux --micro --disk-pack ref/run/disk.vhd \
+        --file-root ref/run/release-2002-2999694
 
 It says where its terminal is and boots. Point any VNC viewer at
 `vnc://127.0.0.1:5900`, with no password: the display, keyboard and mouse
-are the machine's only way in or out. It boots to a Lisp Listener, System
-2001; `(login "LISPM" "HOST" t)` logs in. `--micro` is the faster engine;
+are the machine's way in. It boots to a Lisp Listener, System 2002;
+`(login "LISPM" "FILES" t)` logs in. `--micro` is the faster engine;
 without it `quux` runs `rtl`, at the machine's own speed.
+
+System 2001, muir-sys's release for QUUX's hardware revision 13, runs on
+muir-sim's tag `quux-revisions-13-15`, whose README says how.
 
 ## The CADR
 

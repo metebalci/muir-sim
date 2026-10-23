@@ -223,7 +223,6 @@ fn halted_16(engine: &str, prom: &std::path::Path) -> Halted16 {
     use support::{Run, quux, text};
     const SAID: &str = "the machine stopped itself: ";
     let mut child = quux()
-        .env("MUIR_QUUX_REVISION", "16")
         .args([&format!("--{engine}"), "--main-memory-size", "2MW", "--stop-after", "2000000"])
         .args(["--terminal", "127.0.0.1:0", "--prom"])
         .arg(prom)
@@ -342,7 +341,7 @@ fn looping_16(halt: bool) -> Machine {
     for (k, w) in words.iter().enumerate() {
         prom[k] = Insn::extended(*w);
     }
-    let mut m = Machine::with_geometry(muir::machine::Geometry::QUUX_16, 1);
+    let mut m = Machine::with_geometry(muir::machine::Geometry::QUUX, 1);
     m.load_prom(&prom);
     m
 }
