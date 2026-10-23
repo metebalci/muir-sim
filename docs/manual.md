@@ -34,17 +34,17 @@ applies to a `cargo` run inside the tree only.
 git clone https://github.com/metebalci/muir-sim
 cd muir-sim
 cargo build --release
-tools/fetch-system-for-quux.sh
+tools/fetch-handover-2002.sh
 tools/fetch-system-100-for-cadr.sh
 ```
 
 The machines boot from a disk or a pack, which is not part of the
-repository. Four scripts fetch them into `vendor/`, where the tests look,
-and check every file against its SHA-256 sum:
+repository. Four scripts fetch them into `vendor/` or `ref/`, where the
+tests look, and check every file against its SHA-256 sum:
 
 | Script | Fetches | Puts |
 |---|---|---|
-| `tools/fetch-system-for-quux.sh` | QUUX's current release of [muir-sys](https://github.com/metebalci/muir-sys), `release-2001`: System 2001 | `vendor/system-2001/`, the disk `vendor/run/release-2001-disk.vhd`, and the machine's host folder `vendor/run/release-2001-root/` |
+| `tools/fetch-handover-2002.sh` | QUUX's system until [muir-sys](https://github.com/metebalci/muir-sys) releases System 2002: muir-sys's hand-over of it, the pre-release `handover-2002-2999694` | `ref/band-2002-2999694/`: the sources, the band's disk and the high band's, and the microcode's and the PROM's files |
 | `tools/fetch-dev-system-for-quux.sh` | QUUX's system in development, muir-sys's rolling release `dev-system-for-quux`, replaced with each build | `vendor/dev-system-for-quux/`, `vendor/run/dev-system-for-quux-disk.vhd`, `vendor/run/dev-system-for-quux-root/` |
 | `tools/fetch-system-100-for-cadr.sh` | MIT's System 100, the CADR's reference | `vendor/system-100-0/`, the pack `vendor/run/disk-sys-100-0.img`, and `vendor/run/file-root/` |
 | `tools/fetch-system-for-cadr.sh` | the CADR's current muir-sys release, `release-1003`: System 1003 | `vendor/system-1003/`, the pack `vendor/run/release-1003-pack.img` |
@@ -57,7 +57,7 @@ release's own `SHA256SUMS`, downloaded before them and again after, and
 replaces what it fetched last time only when all of them agree; it is for
 trying the newest system, never for the tests. Each script also checks
 that what it fetched is for its machine before it unpacks anything: QUUX's
-sources unpack to `release-2NNN/` or `dev-system-for-quux/` and its disk is
+sources unpack to `release-2NNN-*/` or `dev-system-for-quux/` and its disk is
 a VHD holding a GPT; the CADR's unpack to `release-1NNN/` and its pack
 begins with `LABL`.
 
@@ -67,7 +67,9 @@ scripts leave a disk or a folder already in place alone; the rolling
 release's replaces its disk, and its folder's `sys/` and `site/`, only with
 a new build, and keeps the home. QUUX's host folder holds copies of the
 release's `sys/` and `site/`, where the band's `SYS:` is, and an empty
-`home/lispm/`, the login's home.
+`home/lispm/`, the login's home; the rolling release's script makes it, and
+for the hand-over the quick start below unpacks the sources into one and
+adds the home.
 
 System 100 comes from muir-sim's own GitHub release
 [`system-100-0`](https://github.com/metebalci/muir-sim/releases/tag/system-100-0):
@@ -88,12 +90,17 @@ muir builds to two executables that are machines: [`quux`](#quux), the
 CADR evolved, and `cadr`, MIT's CADR as built. **The executable is the
 machine**: each takes only the flags that mean something on its own.
 
-QUUX boots its release's disk, with its host folder as the file device's
-root:
+QUUX boots its system's disk, with its host folder as the file device's
+root. For the hand-over of System 2002 the folder is made from its sources,
+with an empty home to log in to, and the disk is a copy:
 
 ```text
-target/release/quux --disk-pack vendor/run/release-2001-disk.vhd \
-    --file-root vendor/run/release-2001-root
+mkdir -p ref/run
+tar xzf ref/band-2002-2999694/handover-2002-2999694-sys.tar.gz -C ref/run
+mkdir -p ref/run/release-2002-2999694/home/lispm
+cp ref/band-2002-2999694/handover-2002-2999694-disk.vhd ref/run/disk.vhd
+target/release/quux --disk-pack ref/run/disk.vhd \
+    --file-root ref/run/release-2002-2999694
 ```
 
 Run `cadr` with no flags and it starts an `rtl` machine, presses the boot
@@ -136,7 +143,7 @@ the block stays readable wherever the tree lives.
 
 At the end it reports what it did: microcycles, wall time, the rate, and
 that rate against the machine's own microcycle, the CADR's 145 ns or
-QUUX's `sync` ticks --- `2.42x hardware` is faster than the machine,
+QUUX's clock period --- `2.42x hardware` is faster than the machine,
 `hardware/3827` is that many times slower.
 
 **That ratio is microcycles against microcycles, and the disk is outside
@@ -183,27 +190,27 @@ them.
 
 ### `quux`
 
-`quux` is QUUX, the CADR evolved, revision 13 by default. Its word is 40
-bits, the tag `<39:32>` over the field `<31:0>`; its map is two levels over
-1024-word pages, with 28-bit virtual and physical addresses; its PDL buffer
-is 16K words to the CADR's 1K; ALU functions 42 and 43 multiply and divide
-in one instruction each, where the CADR takes a step per bit; and it has
-clocks of its own, a microsecond clock in the processor and three interval
-timers on its register page, timer 0 the 60 Hz tick, where the CADR's clock
-is the display's vertical interrupt and the others are on the I/O board.
-The rest of it is the CADR's. It boots from its own PROM and needs
+`quux` is QUUX, the CADR evolved, hardware revision 16. Its word is 40
+bits, the tag `<39:32>` over the field `<31:0>`; its virtual addresses are 32
+bits, translated by a page table walked by hardware behind a TLB ([the page
+table and the TLB](quux.md#the-page-table-and-the-tlb)); its
+microinstruction is 64 bits ([the 64-bit
+microinstruction](quux.md#the-64-bit-microinstruction)); its PDL buffer is
+16K words to the CADR's 1K; ALU functions 42 and 43 multiply and divide in
+one instruction each, where the CADR takes a step per bit; it has clocks of
+its own, a microsecond clock in the processor and three interval timers on
+its register page, timer 0 the 60 Hz tick, where the CADR's clock is the
+display's vertical interrupt and the others are on the I/O board; and it has
+an Ethernet device ([the Ethernet
+device](quux.md#the-ethernet-device)) and no Chaosnet interface. The rest of
+it is the CADR's. It boots from its own PROM, PROM 2002, built in, and needs
 microcode that knows it. [QUUX](quux.md) has the whole of the difference.
 
-With `MUIR_QUUX_REVISION=14` in its environment `quux` runs revision 14
-instead, a page table walked by hardware behind a TLB ([revision
-14](quux.md#revision-14-a-page-table-behind-a-tlb)), and with `15`
-revision 15, a 64-bit microinstruction, on `micro` alone and with a boot
-PROM given by `--prom` ([revision
-15](quux.md#revision-15-the-64-bit-microinstruction)), and with `16`
-revision 16, revision 15 with the Ethernet device ([revision
-16](quux.md#revision-16-the-ethernet-device)). Unset or `13`, it
-runs revision 13; any other value is refused at the start. `cadr` does not
-read it.
+No switch chooses a revision. `MUIR_QUUX_REVISION=16` in the environment is
+taken and says nothing; any other value stops the run with exit status 2,
+saying that this `quux` runs one QUUX and naming the tag of muir-sim that
+runs an earlier QUUX hardware revision, `quux-revisions-13-15`. `cadr` does
+not read the variable.
 
 It runs on `micro` and `rtl`: `chip` is the CADR's boards as MIT drew them.
 A checkpoint carries its machine, and the other executable refuses it,
@@ -232,7 +239,7 @@ Default: `--rtl`.
 ### `--chaos-address <address>`
 
 `cadr`. QUUX has no Chaosnet interface
-([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+([QUUX](quux.md#the-network)), and `quux` refuses the
 flag by name.
 
 This machine's Chaosnet address: the sixteen address switches on the I/O
@@ -260,7 +267,7 @@ names the band's address: `--chaos-address 3050` for the System 100 pack.
 ### `--chaos-trace`
 
 `cadr`. QUUX has no Chaosnet interface
-([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+([QUUX](quux.md#the-network)), and `quux` refuses the
 flag by name.
 
 Every Chaosnet packet and frame on the cable, to stderr. What to reach for
@@ -271,7 +278,7 @@ Default: off.
 ### `--chaos-udp [<endpoint>]`
 
 `cadr`. QUUX has no Chaosnet interface
-([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+([QUUX](quux.md#the-network)), and `quux` refuses the
 flag by name.
 
 Where the Chaosnet cable is on the network: **Chaosnet over UDP**, the
@@ -302,7 +309,7 @@ is given; off with neither flag.
 ### `--chaos-udp-default-peer <host>[:<port>]`
 
 `cadr`. QUUX has no Chaosnet interface
-([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+([QUUX](quux.md#the-network)), and `quux` refuses the
 flag by name.
 
 Where a frame goes whose destination no `--chaos-udp-peer` named: the route
@@ -330,7 +337,7 @@ names is dropped.
 ### `--chaos-udp-peer <address>@<host>:<port>`
 
 `cadr`. QUUX has no Chaosnet interface
-([QUUX](quux.md#revision-16-the-ethernet-device)), and `quux` refuses the
+([QUUX](quux.md#the-network)), and `quux` refuses the
 flag by name.
 
 A Chaosnet host reached over UDP and where it lives: `3060@127.0.0.1:42042`,
@@ -631,21 +638,21 @@ in it and a boot that waits on it for ever.
 
 ### `--ethernet-mac XX:XX:XX:XX:XX:XX`
 
-`quux` only, revision 16.
+`quux` only.
 
-**QUUX:** the [Ethernet device's](quux.md#revision-16-the-ethernet-device)
+**QUUX:** the [Ethernet device's](quux.md#the-ethernet-device)
 MAC address, register-page words 253-254, and the address its filter takes
 besides broadcast. Six pairs of hex digits by colons, in either case; a
 group address, `<0>` of its first byte set, is refused, a station's own
-address never being one. The start says it. The CADR and revisions below 16
-refuse the flag. A checkpoint carries it, and a resume under another,
-given or by default, is refused.
+address never being one. The start says it. The CADR refuses the flag. A
+checkpoint carries it, and a resume under another, given or by default, is
+refused.
 
 Default: `02:00:00:00:00:01`, a locally administered address.
 
 ### `--ethernet-socket <path>[,clocked]`
 
-`quux` only, revision 16.
+`quux` only.
 
 **QUUX:** what sits behind the Ethernet device: a UNIX stream socket muir
 connects to as a client, whose listener is the peer. In plain mode each
@@ -659,15 +666,14 @@ and drops what is sent beyond them. ^C reaches a clocked run whose peer
 has gone silent. [The host
 side](quux.md#the-host-side---ethernet-socket) gives the records. A socket
 muir cannot connect to stops the run; the peer closing it is said once,
-and the run goes on as without the flag. The CADR and revisions below 16
-refuse the flag.
+and the run goes on as without the flag. The CADR refuses the flag.
 
 Default: none. What the device sends is dropped, its consumer index still
 advancing, and nothing arrives.
 
 ### `--ethernet-trace`
 
-`quux` only, revision 16.
+`quux` only.
 
 **QUUX:** every Ethernet frame the device sends and receives, to stderr,
 with the machine's time in ns, its length, its addresses and its type, and
@@ -682,15 +688,16 @@ Default: off.
 `quux` only.
 
 **QUUX:** a host folder its [file device](quux.md#the-file-device) serves
-under the band's pathname host: `FILES` from System 2002, `HOST` in Systems
-2000 and 2001. A folder alone is the root `/`, holding
-`sys/`, `site/` and `home/<user>/`; `<name>=<folder>` is the top-level
-directory `<name>`, over the default folder's entry of that name. A value is
-a named mount when the text before its first `=` is a name's component.
-`,ro` refuses every write under it, answering ATF. The flag can come more
-than once, each name once and one default folder; the folder must be one.
-With no default folder `/` holds the mounts alone and is read-only. The
-start lists them, with the device's time.
+under the band's pathname host, `FILES`. A folder alone is the root `/`,
+holding `sys/`, `site/` and `home/<user>/`; `<name>=<folder>` is the
+top-level directory `<name>`, over the default folder's entry of that name.
+A value is a named mount when the text before its first `=` is a name's
+component. `,ro` refuses every write under it, answering ATF. The flag can
+come more than once, each name once and one default folder; the folder must
+be one. With no default folder `/` holds the mounts alone and is read-only.
+**A symlink is followed only where it stays inside its folder**: a folder of
+links into another serves nothing through them, and that other folder is
+given whole, or by name. The start lists the mounts, with the device's time.
 
 Default: none; `/` is empty.
 
@@ -704,10 +711,10 @@ Default: `netlist`.
 
 ### `--ip-address A.B.C.D/N`
 
-`quux` only, revision 16.
+`quux` only.
 
 **QUUX:** the machine's IPv4 address and its prefix length, the [Ethernet
-device's](quux.md#revision-16-the-ethernet-device) register-page words 255
+device's](quux.md#the-ethernet-device) register-page words 255
 and 256, which the band reads when its network starts. N is 1 to 30, so
 that the subnet holds the machine's address and its gateway besides its
 network and broadcast addresses. The address is a host's: the subnet's
@@ -720,14 +727,14 @@ link-local is a LAN address: behind `quux0` made a LAN tap by `quux-taps
 --ip-address`, the machine is on the host's LAN, and the mover prints
 that address with the LAN's router. The start says it. A
 checkpoint carries it, and a resume under another, given or by default, is
-refused. The CADR and revisions below 16 refuse the flag.
+refused. The CADR refuses the flag.
 
 Default: `169.254.100.2/30`, the machine's side of `quux0`: link-local,
 never routed, and nobody's on any network.
 
 ### `--ip-gateway A.B.C.D`
 
-`quux` only, revision 16.
+`quux` only.
 
 **QUUX:** the gateway's IPv4 address, register-page word 257: where the
 band sends a datagram for an address off its subnet. There is always a
@@ -736,8 +743,7 @@ gateway: it is refused when it is 0.0.0.0, the machine's own address, off
 1122 §3.3.1), or the subnet's network or broadcast address. The default is
 held to the same rule, so an `--ip-address` on another subnet wants an
 `--ip-gateway` beside it. A checkpoint carries it, and a resume under
-another, given or by default, is refused. The CADR and revisions below 16
-refuse the flag.
+another, given or by default, is refused. The CADR refuses the flag.
 
 Default: `169.254.100.1`, the link's other end: `quux0`'s host side.
 
@@ -994,12 +1000,14 @@ of their 454 words, and nothing about a copy announces which it is.
 Default: MIT's own, built in --- System 100's `sys/ubin/promh.mcr`, version
 9.
 
-On `quux` the file is QUUX's own kind: an MCR file in **partition
-order**, MIT's with the two 16-bit halves of every 32-bit word swapped, as
-muir-sys's builder writes QUUX's PROM and microcode, with the program
-assembled at `36000`, where QUUX's PROM sits. A file in MIT's order is
-refused saying so, and so is one assembled at 0. Default: QUUX's own,
-built in, `data/quux-promh.mcr`, PROM 2001 ([QUUX](quux.md#its-boot-prom-in-its-own-addresses)).
+On `quux` the file is QUUX's own kind: an MCR file in [QUUX's own
+format](quux.md#the-64-bit-microinstruction), as muir-sys's builder writes
+QUUX's PROM and microcode: its control store section starts at `36000`,
+where QUUX's PROM sits, and runs to at most 1K words, with the statistics
+bit `IR<46>` nowhere set. MIT's `.mcr` is refused, saying its format word:
+`format word 00010000, not 51550001`. Default: QUUX's own, built in,
+`data/quux-promh.mcr`, PROM 2002
+([QUUX](quux.md#its-boot-prom-in-its-own-addresses)).
 
 ### `--resume <file>`
 
@@ -1017,6 +1025,10 @@ A checkpoint carries `RUN` as it stood. One taken with the machine halted
 [`continue`](#continue-c), or [`--continue`](#--continue) at the start,
 sets `RUN` and runs it on from where it stood; `boot` starts it afresh from
 the PROM.
+
+A checkpoint of an earlier QUUX hardware revision, 13, 14 or 15, is refused
+on `quux` and on `cadr`, saying that this build does not run it and naming
+the tag of muir-sim it resumes on, `quux-revisions-13-15`.
 
 ### `--rtc <unix-seconds>|host`
 
@@ -1114,12 +1126,9 @@ the first tick at or after it. A microcycle at normal speed is 150 ns there
 rather than 145. [What each engine models](engines.md#what-each-engine-models)
 says which delays and clocks those are.
 
-QUUX drops the delay lines, and its one timing is `sync`: the same grid,
-with every microcycle [`--sync-cycle-ticks`](#--sync-cycle-ticks-k) ticks
-long in place of the CADR's delay-line taps. Registers are still clocked at
-the one edge, and the bus keeps its own time, so only the length of a
-microcycle changes. A `quux` run has it without asking, and `sync` is no
-word of this flag. [QUUX](quux.md) has it.
+QUUX has no delay lines, and `quux` refuses this flag: its time is its
+clock's period, [`--microcycle-ns`](#--microcycle-ns-ns). [QUUX](quux.md)
+has it.
 
 `fpga` is refused on `micro` and `chip`, which keep the board's time. A
 checkpoint carries the timing, and a resume under another is refused.
@@ -1134,68 +1143,39 @@ Default: `cadr`.
 [QUUX's cache](quux.md), always fitted, unified and write-through, by
 physical address, main memory and the frame buffer and no device
 register, in lines of 8 words, 2-way; at least 16 words, a set of two
-lines. On revisions 13 and 14 a hit takes 20 ns, and a one-word write buffer
-holds the write while main memory runs it. On revisions 15 and 16 a hit
-lands two clocks after the grant, at every size; a write is posted in a
-queue of 8 and is issued to the port in order, its word reaching main
-memory at the port's response, a write hit updating the line and a write
-miss allocating nothing; a read of a line with a write queued or in flight
-waits for the writes' responses. It changes when the machine's reads and
-writes are answered and never what they read. The start says it and a
+lines. A hit lands two clocks after the grant, at every size; a write is
+posted in a queue of 8 and is issued to the port in order, its word reaching
+main memory at the port's response, a write hit updating the line and a
+write miss allocating nothing; a read of a line with a write queued or in
+flight waits for the writes' responses. It changes when the machine's reads
+and writes are answered and never what they read. The start says it and a
 checkpoint carries it. Refused on `micro`.
 
-Default: 4096 on revisions 13 and 14; 65,536 on revisions 15 and 16.
+Default: 65,536.
 
-### `--tlb <entries>`
-
-`quux` only, revision 14.
-
-**micro, rtl, QUUX revision 14:** the size of its TLB, `<entries>`, a power
-of two from 1024 to 32768: [revision 14](quux.md), direct-mapped, its
-contents modelled on both engines; on `rtl` a sweep takes a tick of 10 ns
-an entry. The start says it. Refused below revision 14.
-
-Default: 4096.
-
-### `--memory-timing <read>,<write>[,<occupancy>]`
+### `--memory-timing <read>,<write>,<occupancy>`
 
 `quux` only.
 
 **rtl, QUUX:** main memory's timing on [QUUX's memory port](quux.md): a line
-fill and a write, in ns, or `arty` or `de25` for the two boards' own
-figures. On revisions 15 and 16 the interval between two accepted writes
-follows, `<read>,<write>,<occupancy>`, or a name, `kria`, `arty` or `de25`;
-the two-number form is refused there, and the three-number form and `kria`
-are refused below revision 15. On revisions 15 and 16 a line fill is
-never under 6 clocks of the period, the port's 5 beats and the clock it
-lands in, whatever the figure. The start says it and a checkpoint carries
-it. Refused on `micro`.
+fill, a write and the interval between two accepted writes, in ns,
+`<read>,<write>,<occupancy>`, or a name, `kria`, `arty` or `de25`, for a
+board's own figures. A line fill is never under 6 clocks of the period, the
+port's 5 beats and the clock it lands in, whatever the figure. The start says
+it and a checkpoint carries it. Refused on `micro`.
 
-Default: 380,290, the slower board's, on revisions 13 and 14; `kria`,
-344,215,10, on revisions 15 and 16.
+Default: `kria`, 344,215,10.
 
 ### `--microcycle-ns <ns>`
 
-`quux` only, revisions 15 and 16.
-
-**micro, rtl, QUUX revisions 15 and 16:** the clock's period, the
-microcycle, `<ns>`, 5 to 63.5 in steps of 0.5 (a whole number, or one with
-`.5` or `.0`). Durations are turned to clocks of it, and feature word 25
-reads it in units of 0.5 ns ([revision 15](quux.md)). The start says it and
-a checkpoint carries it. Refused below revision 15, where the microcycle is
-`--sync-cycle-ticks`'s, and `--sync-cycle-ticks` is refused on 15 and 16.
-
-Default: 10.
-
-### `--sync-cycle-ticks <k>`
-
 `quux` only.
 
-**rtl and micro:** a microcycle's length in 10 ns ticks, 1 to 255, QUUX's
-`sync` timing. It is a board's: the number its fit proves its longest path
-settles in.
+**micro, rtl, QUUX:** the clock's period, the microcycle, `<ns>`, 5 to 63.5
+in steps of 0.5 (a whole number, or one with `.5` or `.0`). Durations are
+turned to clocks of it, and feature word 25 reads it in units of 0.5 ns
+([QUUX](quux.md#quuxs-clock)). The start says it and a checkpoint carries it.
 
-Default: 4, the DE25-Nano's. The Arty Z7-20 runs QUUX at 5.
+Default: 10.
 
 ### `--tv netlist|model`
 
@@ -1639,8 +1619,8 @@ A 1 GiB disk:
 ```
 qemu-img create -f raw quux.img 1G          # or: truncate -s 1G quux.img
 sgdisk \
-  -n 1:0:+256K -t 1:9e318cf5-a95b-4b3b-b2ad-9ae306b0e2da -c 1:"MCR1 UCADR 2001" -A 1:set:48 \
-  -n 2:0:+100M -t 2:a3b30470-c5d4-41c1-87a8-d26590424cb8 -c 2:"LOD1 System 2001" -A 2:set:48 \
+  -n 1:0:+256K -t 1:9e318cf5-a95b-4b3b-b2ad-9ae306b0e2da -c 1:"MCR1 UCADR 2002" -A 1:set:48 \
+  -n 2:0:+100M -t 2:a3b30470-c5d4-41c1-87a8-d26590424cb8 -c 2:"LOD1 System 2002" -A 2:set:48 \
   -n 3:0:+256M -t 3:4652bea5-06af-4bd9-b2bb-3541370151c8 -c 3:"PAGE" \
   -n 4:0:+600M -t 4:7afa9532-75de-409f-8dc8-fef9763511d5 -c 4:"FILE" \
   quux.img
@@ -1662,8 +1642,8 @@ quux --disk-pack quux.vhd
 - **There is no TEMP partition.** QUUX's disk has none; the boot PROM
   saves nothing to the disk ([QUUX](quux.md#the-disk-file)).
 - **At most 8 GiB**, 2^23 blocks: Lisp's block numbers are fixnums.
-- **`dd` writes a band file, or a microcode file written in partition
-  order, as it is**, at the partition's first sector (`sgdisk -i`), with
+- **`dd` writes a band file, or a microcode file in QUUX's `.mcr` format,
+  as it is**, at the partition's first sector (`sgdisk -i`), with
   `conv=notrunc` so the rest of the disk stays.
 - The raw file is itself a disk muir takes; `-o subformat=fixed` makes a
   fixed VHD, the raw bytes and a 512-byte footer, which muir-fpga needs no
@@ -1692,15 +1672,15 @@ The traps, each measured with qemu-img 10.2.1 and sgdisk 1.0.10:
   footer and says which it found.
 
 **Only the GPT PROM may meet a GPT disk.** QUUX's built-in PROM,
-`data/quux-promh.mcr`, PROM 2001, is a GPT PROM: it takes the first
+`data/quux-promh.mcr`, PROM 2002, is a GPT PROM: it takes the first
 microcode partition carrying bit 48 and writes no block of the disk, and on
-a disk with no GPT it halts at `ERROR-NO-GPT`, 36653
+a disk with no GPT it halts at `ERROR-NO-GPT`, 36776
 ([QUUX](quux.md#its-boot-prom-in-its-own-addresses)). A PROM given with
 `--prom` that does not read the GPT, or that saves page 0 to block 1
 before it loads anything, as MIT's does, writes over sectors 2 and 3, the
 start of the primary GPT's entry array, and breaks the primary table
-(muir-sys, measured). System 2001's release disk is a disk made this way,
-as a dynamic VHD ([QUUX](quux.md#the-disk-file)).
+(muir-sys, measured). System 2002's disk is a disk made this way, as a
+dynamic VHD ([QUUX](quux.md#the-disk-file)).
 
 ## The Chaosnet
 

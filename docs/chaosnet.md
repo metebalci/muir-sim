@@ -404,10 +404,11 @@ one ending in 1, the fourth rise of `FCLK^` after the last edge each time.
 sweeps frames of 14 and 44 words ending in 0 and in 1, another station's at
 three phases of the board's clock and the board's own on the cable and
 looped back, and the next frame each of the board's own sets the turn of,
-reading the CSR back to back on both. Revision 15's interface, QUUX's own,
-keeps no such clock and keeps MP2b ruling Q19's delay: the cable goes idle
-its frame's length and `CBLBSY_OFF_NS` after its first edge, whatever its
-last bit.
+reading the CSR back to back on both. The interface of MP2b ruling Q19,
+which `src/chaos/` keeps for any time base and no machine of muir's runs,
+keeps no such clock and keeps the ruling's delay: the cable goes idle its
+frame's length and `CBLBSY_OFF_NS` after its first edge, whatever its last
+bit.
 
 **The transmitter's shift register paces the writes and readies the
 frame.** Every word the software writes, and at `START` the source and check
@@ -444,10 +445,10 @@ and the model's does the same at every step.
 register shifts empties it at once; MIT's driver writes neither inside a
 packet, and the board has not been measured doing it.
 
-This is the CADR's I/O board, which revisions 13 and 14 keep. **Revision
-15's interface is QUUX's own** and does not follow the board's 8 MHz clock:
-its `START` is ready `TSR_READY_NS`, 4,150 ns, after the read, a delay
-started there (below), and it holds no cycle.
+This is the CADR's I/O board. **The interface of MP2b ruling Q19** does not
+follow the board's 8 MHz clock: its `START` is ready `TSR_READY_NS`, 4,150
+ns, after the read, a delay started there (below), and it holds no cycle.
+`src/chaos/` keeps it for any time base; no machine of muir's runs it.
 
 **A checkpoint does not keep when the register is next empty.** The hold is
 `rtl`'s bus interface's (`IoBoardTiming::answer_cycle`), which remembers the
@@ -738,8 +739,8 @@ what the receiver has of a frame on it, is plugged in afresh.
 `src/chaos/board.rs::a_checkpoint_anywhere_in_a_frame_resumes_as_the_run_without_it`
 cuts a frame looped back, one finding the buffer full, and one cleared
 before and after its destination word, at every 250 ns through it, on the
-CADR's time and revision 15's, and every resumed run ends as the straight
-one, its checkpoint byte for byte.
+CADR's time and the 0.5 ns grid's, and every resumed run ends as the
+straight one, its checkpoint byte for byte.
 
 **A read of the buffer while the receiver takes a frame is not modelled.** On
 the netlist board such a cycle is not answered until the frame is over ---
@@ -786,8 +787,8 @@ another over it is not held**: `-CRC.PRE`, the 74S00 at LMRBUF `0D07` on
 `ABORTSIG` and `RACT`, presets the register to ones while the line is held
 high, which muir does not model; on the board that brought it to 0 once,
 sixteen cells after the last such preset, where muir's stays at 1. **On
-revision 15** CRC Error reads the cable busy from a frame's first edge, as
-before: its interface is QUUX's own, and MP2b ruling Q19's tests read the
+the 0.5 ns grid** CRC Error reads the cable busy from a frame's first edge,
+as before: MP2b ruling Q19's interface is its own, and its tests read the
 busy line there.
 
 **Reset does not clear Lost Count.** The 74LS161 at LMMYNM `0F04` has
@@ -829,10 +830,10 @@ measured on the netlist board, and each says which.
 | `TDONE_BEFORE_END_NS` | 500 | how far before that nominal end Transmit Done comes | netlist board |
 | `TSR_LOAD_NS` | 101 | a WRITE BUFFER's or `START`'s answer, `-SSYN`, to the earliest `FCLK^` edge the shift register loads at | netlist board, at every nanosecond of the clock's period |
 | `TSR_WORD_NS` | 2000 | one word shifted from the register into the buffer | netlist board: sixteen bits on `FCLK^` |
-| `TSR_READY_NS` | 4150 | revision 15's `START`, from the read to ready | the board's `TSREMPTY` after a `START` that waited for the last word, as MIT's driver's does; revision 15 keeps it as a delay started at the read |
+| `TSR_READY_NS` | 4150 | the 0.5 ns grid's `START` (MP2b ruling Q19), from the read to ready | the board's `TSREMPTY` after a `START` that waited for the last word, as MIT's driver's does; the grid keeps it as a delay started at the read |
 | `TDONE_AFTER_ABORT_NS` | 125 | `ABORT` setting to Transmit Done | netlist board |
 
-**On QUUX revision 15 the interface keeps the machine's time** (contract G3
+**On the 0.5 ns grid the interface keeps the machine's time** (contract G3
 revision 15, §9; its MP2b ruling Q19), told it by `Machine::chaos_time`.
 Every constant above, the cable's with the interface's, doubles into units
 of 0.5 ns, unchanged. The turn timer's terminal counts are acted on at the
@@ -849,12 +850,11 @@ and the turn counter's load, or the board's abort at its transmitter's next
 8 MHz edge, timing Transmit Done --- ends at the first clock at or after its
 exact start plus its exact value, rounded up once and not first the start
 to a clock (the ruling's clarification of a delay started off the clock's
-grid). At 8.5 ns a three-word frame read out by START at clock
-11 goes on the cable at clock 556, Transmit Done comes at 2,880 and Receive
-Done at 2,983 (`a_frame_s_delivery_at_8_5_ns_lands_at_the_rule_s_clock` in
-`tests/quux_network.rs`, with 19 ns, an edge between clocks, a START at an
-odd unit and the frame's first edge on the cable's record beside it). The
-CADR and revisions 13 and 14 keep nanoseconds with no grid.
+grid). `src/chaos/board.rs` takes the turn timer's terminal counts at 8.5,
+19 and 63.5 ns and checkpoints a frame at 8.5 ns
+(`a_batched_run_of_terminal_counts_is_a_stepped_one`,
+`a_checkpoint_anywhere_in_a_frame_resumes_as_the_run_without_it`). No
+machine of muir's runs the grid: the CADR keeps nanoseconds with no grid.
 
 ## What each engine has
 

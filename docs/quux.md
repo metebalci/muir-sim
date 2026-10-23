@@ -5,16 +5,14 @@ a change pays for itself. In muir it is the `quux` executable, and `cadr`
 is the CADR as MIT built it; muir-fpga and muir-sys choose it with
 `--machine quux`. Back to [the manual](manual.md).
 
-This page says where QUUX, revision 13, differs from the CADR. Everything
-it does not mention is the CADR's. Its word is 40 bits, the tag `<39:32>`
-over the field `<31:0>` (contract G2). Revision 13 is what `quux` runs by
-default; [revision 14](#revision-14-a-page-table-behind-a-tlb),
-[revision 15](#revision-15-the-64-bit-microinstruction) and
-[revision 16](#revision-16-the-ethernet-device), at the end, are what it
-runs when `MUIR_QUUX_REVISION` is `14`, `15` or `16`.
+This page says where QUUX, hardware revision 16, differs from the CADR.
+Everything it does not mention is the CADR's. Its word is 40 bits, the tag
+`<39:32>` over the field `<31:0>` (contract G2). `quux` runs this one
+hardware revision and nothing chooses another ([the
+manual](manual.md#quux)).
 
 QUUX's software is numbered in the 2000s and the CADR's in the 1000s: QUUX
-runs muir-sys's System 2001 on microcode 2001 and boots on PROM 2001.
+runs muir-sys's System 2002 on microcode 2002 and boots on PROM 2002.
 
 ## What each difference reaches
 
@@ -22,58 +20,27 @@ A change to the hardware reaches further than the board: the boot PROM,
 the microcode, the Lisp system in the band, and the tools that read a
 machine's state can all depend on what changed. For each of QUUX's
 differences, what it needed (muir-sys's sources as handed over with System
-2001):
+2002):
 
 | Difference | Boot PROM | Microcode | Lisp system | Tools |
 |---|---|---|---|---|
-| The 40-bit word: the tag over the field, the ALU on tags, 6-bit BYTE fields, a dispatch memory of 4,096 entries | PROM 2001 loads A memory as the 40-bit section 5 and 4,096 dispatch entries, and stops at `ERROR-A-MEM-SECTION-32-BITS` on a microcode of 32-bit words | 2001, assembled at 40 bits | System 2001 | muir's `.mcr` reader takes section 5 and 4,096 entries (`src/mcr.rs`) |
-| The map: two levels over 1024-word pages, 28-bit addresses | PROM 2001 maps on 1024-word pages | 2001 | System 2001 | --- |
-| MACHINE-ID in functional source 16 | nothing | 2001 reads it at `RESET-MACHINE` and halts at `MACHINE-NOT-QUUX-13` on anything but QUUX from revision 13 (`uc-cold-disk.lisp`) | `PROCESSOR-TYPE-CODE` is 4, which the cold load checks (`sys/ltop.lisp`) | nothing |
-| The feature page | nothing | nothing: field widths are fixed when the microcode is assembled | System 2001 reads it: the PDL buffer's length, word 3, at every boot (`sys/sys2/proces.lisp`); the video controller's size and buffer address, words 11 to 13 (`sys/sys/ltop.lisp`); and whether the file device and the real-time clock are there, word 15 (`sys/io/fdev.lisp`, `sys/io1/time.lisp`) | do not read it yet |
-| `MUL` and `DIV` in one instruction | nothing | 2001 uses them in `MPY`, `DIV` and `BIDIV`'s quotient (`uc-arith.lisp`) | nothing | nothing |
-| The clocks: the microsecond clock in the processor, and the interval timers on the register page, timer 0 the tick | writes reset devices and timer 0's period, 16,667 µs | 2001 writes timer 0's period at `RESET-MACHINE`, turns the tick on at `BEG06` and clears it in `INTR-TICK` through word 110, and turns off timer 1 or 2 if one interrupts | nothing: it reads the microsecond clock, and no timer | nothing |
-| Reset devices, word 104 of the register page | writes it before it reads the disk | 2001 writes it at `RESET-MACHINE`, at every start of the microcode, a `%DISK-RESTORE`'s too, in place of `PROG.UNIBUS.RESET` | nothing | nothing |
-| Block-disk | PROM 2001 for block-disk, which does not boot the CADR controller | 2001 for block-disk: the disk routines by block number, no cylinder, head or sector | System 2001: the partitions, the band and the disk routines by block number | block-disk is `quux`'s only disk; `--disk-controller`, the CADR's controller, is `cadr`'s |
+| The 40-bit word: the tag over the field, the ALU on tags, 6-bit BYTE fields, a dispatch memory of 4,096 entries | PROM 2002 loads A memory as a 40-bit section and the dispatch memory as 4,096 entries, and halts at `ERROR-BAD-WIDTH` on a section of another width (`sys/ucadr/promh.text`) | 2002, assembled at 40 bits | System 2002 | muir's `.mcr` reader takes QUUX's format (`src/mcr.rs`) |
+| The page table and the TLB: 32-bit virtual addresses, two windows | the PROM writes no map (`promh.text`) | 2002 sets the directory's first frame, register-page word 220, and the pointer-type register at `INITIAL-MAP` (`uc-cold-disk.lisp`) | System 2002 makes the addresses above 2^31 with `%POINTER-PLUS` (`sys/sys/ltop.lisp`) | muir models the TLB's contents (`src/tlb.rs`) |
+| MACHINE-ID in functional source 16 | `GO` halts at `ERROR-NOT-REVISION-15` when the hardware revision is below 15 (`promh.text`) | 2002 reads it at `RESET-DEVICES` and halts at `MACHINE-NOT-QUUX-14` on anything but QUUX of hardware revision 14 or more (`uc-cold-disk.lisp`) | `PROCESSOR-TYPE-CODE` is 4, which the cold load checks (`sys/sys/ltop.lisp`) | nothing |
+| The feature page | nothing | nothing: field widths are fixed when the microcode is assembled | System 2002 reads it: the PDL buffer's length, word 3, at every boot (`sys/sys2/proces.lisp`); the video controller's size and buffer address, words 11 to 13 (`sys/sys/ltop.lisp`); and whether the file device and the real-time clock are there, word 15 (`sys/io/fdev.lisp`, `sys/io1/time.lisp`) | do not read it yet |
+| `MUL` and `DIV` in one instruction | nothing | 2002 uses them in `MPY`, `DIV` and `BIDIV`'s quotient (`uc-arith.lisp`) | nothing | nothing |
+| The clocks: the microsecond clock in the processor, and the interval timers on the register page, timer 0 the tick | writes reset devices and timer 0's period, 16,667 µs | 2002 writes timer 0's period at `RESET-DEVICES`, at every start of the microcode, turns the tick on at `BEG06` (`uc-cold-disk.lisp`) and clears it in `INTR-TICK` through word 110, and turns off timer 1 or 2 if one interrupts (`INTR-TIMER-1-STRAY`, `uc-interrupt.lisp`) | nothing: it reads the microsecond clock, and no timer | nothing |
+| Reset devices, word 104 of the register page | writes it before it reads the disk | 2002 writes it at `RESET-DEVICES`, at every start of the microcode, a `%DISK-RESTORE`'s too, in place of `PROG.UNIBUS.RESET` | nothing | nothing |
+| Block-disk | PROM 2002 for block-disk, which does not boot the CADR controller | 2002 for block-disk: the disk routines by block number, no cylinder, head or sector | System 2002: the partitions, the band and the disk routines by block number | block-disk is `quux`'s only disk; `--disk-controller`, the CADR's controller, is `cadr`'s |
 | The memory cache (`--cache`) | nothing | nothing | nothing | `--cache`; the profile harness's `MUIR_CACHE` |
-| No delay lines: `sync`, always | nothing | nothing | nothing | `--sync-cycle-ticks`; `--timing-model` is `cadr`'s |
+| No delay lines: one clock of the period `--microcycle-ns` | nothing | nothing | nothing | `--microcycle-ns`; `--timing-model` is `cadr`'s |
 | No hung microcycle; the old word in a RAM's write cycle | nothing | nothing (below) | nothing | nothing |
 | No speed bits | nothing | the mode register write at boot need not set them | nothing | nothing |
-| The video controller, the display | nothing | 2001: the run light in the frame buffer window (`uc-cadr.lisp`), no TV vertical flag (`uc-interrupt.lisp`) | System 2001 sizes the main screen from the feature page | the terminal, screenshots and captures show whichever screen is fitted |
-| The real-time clock | nothing | nothing | System 2001 sets the time from it at boot when word 15 `<0>` of the feature page says it is there (`sys/io1/time.lisp`) | `--rtc` |
-| The file device | nothing | 2001 waits at `RESET-MACHINE` for it to be quiet, word 161 `<1>`, after reset devices, and halts at `FILE-DEVICE-NOT-QUIET` if it is not (`uc-cold-disk.lisp`) | System 2001's `SYS:` is on it, at `/sys` and `/site` (`site/sys.translations`) | `--file-root` |
-| The fused return: the MACRO-DISPATCH register and the MACRO DISPATCH MEMORY, destinations 5 to 7 | nothing | 2001 fills the MACRO DISPATCH MEMORY and writes the register in `RESET-MACHINE` (`RESET-MACHINE-MACRO-DISPATCH-FILL`, `uc-cold-disk.lisp`) | nothing | the profile harness's `MUIR_H8A` fills and enables it |
-
-## The map
-
-**A frame is a page-sized slot of physical memory, and a page is a page of
-virtual memory.** "Frame" (page frame) is what MIT's CADR code calls a
-"physical page": the `PHYSICAL-PAGE-DATA` region has a word for each one
-(muir-sys `sys/sys/qmisc.lisp:32`), and a map entry's "physical page (frame)
-number" is its `vma-phys-page-addr-part` (`sys/ucadr/uc-page-fault.lisp:165`).
-"Page" alone is virtual. MIT's symbols keep their names. The frame buffer is
-the video controller's memory, not a frame in this sense.
-
-**QUUX's map is two levels over 1024-word pages and 28-bit addresses**
-(contract G2 §2.6, appendix A1.7):
-
-| | CADR | QUUX |
-|---|---|---|
-| Virtual address | `VMA<23:0>`, 256-word pages | `VA<27:0>`, 1024-word pages |
-| Level 1 | 2,048 five-bit entries, by `VMA<23:13>` | 8,192 seven-bit entries, by `VA<27:15>` |
-| Level 2 | 1,024 24-bit entries, by the level-1 entry and `VMA<12:8>` | 4,096 28-bit entries, by the level-1 entry and `VA<14:10>` |
-| Physical word | `{VMO<13:0>, VMA<7:0>}`, 22 bits | `{L2<17:0>, VA<9:0>}`, 28 bits |
-| Access bits | `<23:22>` | `<27:26>`; `<23:22>` the map bits a dispatch takes |
-| Read back, `MAP(MD)` | the fault bits `<31:30>`, level 1 `<28:24>`, level 2 `<23:0>` | the fault bits `<31:30>`, level 1 `<38:32>`, level 2 `<27:0>` |
-| Written, `WRITE-MAP` | `VMA<26>` level 1 from `VMA<31:27>`, `VMA<25>` level 2 from `VMA<23:0>`, at `MD` | `VMA<29>` level 1 from `VMA<38:32>`, `VMA<28>` level 2 from `VMA<27:0>`, at `MD`; with both, level 1 alone |
-
-An address with `<31:28>` set reads block 177, the invalid block, whatever
-level 1 holds there, so that the map-miss path runs and nothing aliases the
-low 256 M words, and a map write there writes nothing; `<39:32>` never
-reaches the map. A store that writes both levels at once writes level 2 on
-the CADR with the level-1 bits zero (`Machine::write_map` has why), and
-level 1 alone on QUUX. `the_map_translates_28_bits_at_1024_word_pages` and
-`map_md_and_the_map_write_round_trip` in `tests/revision_13.rs` hold it on
-`micro` and `rtl`.
+| The video controller, the display | nothing | 2002: no TV vertical flag (`uc-interrupt.lisp`) | System 2002 sizes the main screen from the feature page | the terminal, screenshots and captures show whichever screen is fitted |
+| The real-time clock | nothing | nothing | System 2002 sets the time from it at boot when word 15 `<0>` of the feature page says it is there (`sys/io1/time.lisp`) | `--rtc` |
+| The file device | nothing | 2002 waits at `RESET-DEVICES` for it to be quiet, word 161 `<1>`, after reset devices, and halts at `FILE-DEVICE-NOT-QUIET` if it is not (`uc-cold-disk.lisp`) | System 2002's `SYS:` is on it, at `/sys` and `/site`, under the pathname host `FILES` (`site/sys.translations`) | `--file-root` |
+| The Ethernet device | nothing | 2002 waits at `RESET-DEVICES` for it to be quiet, word 241 `<1>`, when feature word 15 `<2>` says it is there, and halts at `ETHERNET-DEVICE-NOT-QUIET` if it is not (`uc-cold-disk.lisp`) | System 2002's network (`sys/network/ip/ether.lisp`) | `--ethernet-socket`, `--ethernet-mac`, `--ip-address`, `--ip-gateway`, `--ethernet-trace` |
+| The fused return: the MACRO-DISPATCH register and the MACRO DISPATCH MEMORY, destinations 5 to 7 | nothing | 2002 fills the MACRO DISPATCH MEMORY and writes the register at `RESET-DEVICES` (`RESET-MACHINE-MACRO-DISPATCH-FILL`, `uc-cold-disk.lisp`) | nothing | the profile harness's `MUIR_H8A` fills and enables it |
 
 ## How software tells the two apart
 
@@ -83,12 +50,12 @@ microinstruction, no bus cycle:
 | Bits | QUUX | CADR |
 |---|---|---|
 | 31:16 | signature `0x5155` | nothing drives the M bus: all ones |
-| 15:4 | hardware revision: 13 | |
+| 15:4 | hardware revision: 16 | |
 | 3:0 | processor type: 4 | |
 
 Source 16 is one MIT left unassigned: the 74S138 on page SOURCE that
 decodes it has that output unconnected, and microcode 323 does not read
-it; microcode 2001 does, at boot (above). `IR<30>` is in no source decode,
+it; microcode 2002 does, at boot (above). `IR<30>` is in no source decode,
 so source 36 is the same. Source 17 reads all ones on both: open on the
 CADR, and on QUUX unassigned (below), all 40 bits. A machine is QUUX only if
 bits 31:16 hold the signature.
@@ -118,8 +85,8 @@ rest on `micro` and `rtl`:
 | Fields | BYTE: rotate `IR<5:0>`, length − 1 `IR<11:6>`, LC byte mode by `IR<24>` on an LDB alone, and no misc function; JUMP and DISPATCH: `IR<47>` the rotate's bit 5; DISPATCH: address `IR<23:12>`; ALU output select 0: rotate `IR<5:0>`, length − 1 `IR<9:6>`, no LC byte mode |
 | Rotator and masker | a ring of 40, a rotate taken mod 40; a byte that does not fit in bits 0-39 gives an empty mask, the A source showing through |
 | LC byte mode | the rotate plus 0 or 24 for halfwords 0 and 1 (`LC<1>` 1 and 0), and 0, 32, 24, 16 for bytes 0 to 3 (`LC<1:0>` 1, 2, 3, 0), mod 40 |
-| Conditions | in condition mode `IR<4:0>`: M < A and M ≤ A on the fields, signed; M = A on all 40 bits; 10 the fixnum overflow flag, which every executed ALU word loads, 1 for an arithmetic function whose 33-bit result has bit 32 unlike bit 31; 11 M < A on the fields, unsigned; the rest as `IR<2:0>` |
-| Location counter | `LC<29:0>`, a byte address, a fetch taking `LC<29:2>`; read with NEED-FETCH in `<39>` and INTERRUPT-CONTROL's flags in `<37:34>`, which a write of destination 2 takes from there: LC byte mode `<37>`, `PROG.UNIBUS.RESET` `<36>`, `INT.ENABLE` `<35>`, `SEQUENCE.BREAK` `<34>`, where the CADR has `<29:26>` |
+| Conditions | in condition mode `IR<4:0>`: M < A and M ≤ A on the fields, signed; M = A on all 40 bits; 10 the fixnum overflow flag, which every executed ALU word loads, 1 for an arithmetic function whose 33-bit result has bit 32 unlike bit 31; 11 M < A on the fields, unsigned; 12 M ≤ A on the fields, unsigned (`condition_12_is_m_at_most_a_unsigned` in `tests/revision_14.rs`); the rest as `IR<2:0>` |
+| Location counter | `LC<33:0>`, a byte address, a fetch taking `LC<33:2>` ([the location counter](#the-page-table-and-the-tlb)); read with NEED-FETCH in `<39>` and INTERRUPT-CONTROL's flags in `<37:34>`, which a write of destination 2 takes from there: LC byte mode `<37>`, `PROG.UNIBUS.RESET` `<36>`, `INT.ENABLE` `<35>`, `SEQUENCE.BREAK` `<34>`, where the CADR has `<29:26>` |
 | Dispatch memory | 4,096 entries |
 
 ## The PDL buffer
@@ -134,15 +101,16 @@ know the size.
 
 ## The feature page
 
-**QUUX lists its sizes in words 0-77 of its register page**, physical
-`1777777400` to `1777777477` ([the register page](#the-register-page)).
-They are read-only and read like any device register, through the map:
+**QUUX lists its sizes in words 0-77 of its register page**, at
+`35777777400` to `35777777477` in the device window ([the register
+page](#the-register-page)). They are read-only and read like any device
+register:
 
 | Word | QUUX |
 |---|---|
-| 0 | the MACHINE-ID, as source 16 gives it |
-| 1 | level-1 entry: 7 bits |
-| 2 | level-2 map: 4,096 entries |
+| 0 | the MACHINE-ID, as source 16 gives it: `0x51550104` |
+| 1 | level-1 map entry: 0 bits, there being no map |
+| 2 | the TLB: 4,096 entries |
 | 3 | PDL buffer: 16,384 words |
 | 4 | control store: 16,384 words |
 | 5 | A memory: 1,024 words |
@@ -151,13 +119,14 @@ They are read-only and read like any device register, through the map:
 | 10 | the tick, timer 0: 1 |
 | 11 | the main screen: width in 31:16, height in 15:0 |
 | 12 | the main screen: bits a pixel in 31:16, words a line in 15:0 |
-| 13 | the main screen: its buffer's first physical address, the frame buffer window's, `1760000000` |
+| 13 | the main screen: its buffer's first address, the device window's base, `34000000000` |
 | 14 | the microsecond clock: 1 |
-| 15 | the optional devices, a bit each: 3, bit 0 the real-time clock and bit 1 the file device; on revision 16 7, bit 2 the Ethernet device |
+| 15 | the optional devices, a bit each: 7, bit 0 the real-time clock, bit 1 the file device and bit 2 the Ethernet device |
 | 16 | the number of interval timers: 3 |
 | 17 | the MACRO DISPATCH MEMORY's entries: 1,024 |
 | 20-24 | the board name, 4 characters a word in 31:0 |
-| 25-77 | 0 |
+| 25 | the microcycle, the clock's period, in units of 0.5 ns: 20 at the default 10 ns, and what `--microcycle-ns` sets (`feature_words_0_and_25_say_revision_15_and_its_period`, `word_25_reads_the_period_on_rtl`) |
+| 26-77 | 0 |
 
 **The board name**, words 20-24, names what runs the
 machine: up to 20 characters of printable ASCII, `040`-`176`, the codes the
@@ -178,7 +147,7 @@ the first two on both engines.
 Words 11 to 13 describe whichever display is fitted: the video controller's
 1280 by 1024, one bit a pixel, 40 words a line, or, on a QUUX run with a
 CADR board, that board's 768 by 963, one bit, 24 words a line, both in the
-window.
+device window.
 
 On the CADR the same words of its last page, `17777400`, are in its Unibus
 window, Unibus `777000`-`777776`, where nothing answers: a read there times
@@ -208,7 +177,7 @@ select.
 | `Q` before | the multiplier | the low dividend |
 | Output bus | the product's high word | the partial remainder |
 | `Q` after | the product's low word | the quotient; `Q<31>` the first step's bit, set on overflow or a zero divisor |
-| Time | one ordinary microcycle, once its operands are ready | ten microcycles in all: nine held once its operands are ready, then its own; 400 ns at four ticks |
+| Time | 5 clocks in EX, 4 of them held, once its operands are ready | 18 clocks in EX, 17 of them held, once its operands are ready |
 
 Each step's M operand is the output bus of the step before, as when the
 microcode writes the step's result back to the same M location. Both
@@ -217,56 +186,23 @@ drive the output bus and load `Q` whatever the output selector `IR<13:12>` and
 the Q control `IR<1:0>` say. `DIVIDE-LAST-STEP` and `DVREM` stay the CADR's
 separate instructions.
 
-**A `DIV` takes ten microcycles, its own and nine held after its operands
-are ready**, QUUX's definition as ruled on 25 September 2026. A register is
-ready at once, so a `DIV` of a register closes 400 ns after it entered `IR`
-at four ticks; muir-fpga's fabric closes it on the same tick
-(`cadr_microcycle.sv` line 2192, its trace `quux_muldiv.quux.k4.golden`
-row `c4`). An
-`MD` operand first waits for its read to land, through the MD interlock any
-instruction reading `MD` has; the count starts in the microcycle after that
-wait ends. A `MUL` of `MD` waits the same and then takes its one
-microcycle. muir-fpga's measurement is what the rule settles: since
-contract Q6 a main-memory read releases at its acknowledgement, so a `DIV`
-of `MD` can run in the microcycle after the word lands, and the fabric's
-divider needs its operand 17 ticks before the `DIV` ends. Its program
-`quux_divmd` puts a `DIV` of `MD` there; counted from the `DIV`'s entry into
-`IR`, the hold runs during the wait and the new word is divided at once,
-where the fabric divided the old `MD` --- at microcycle 81, an output bus of
-`a850e26d` against the fabric's `11465777`. Counted from the end of the
-wait, both divide the new word.
-
-The hold is a `-WAIT` term of QUUX's own: the divider is busy while a `DIV`
-stands in `IR`, not nopped, and `muldiv::DIV_CYCLES`, nine, generator cycles
-have not passed since the edge that loaded `IR` or, if the MD interlock held
-it, since the end of that hold. The master clock runs on, so the memory port
-carries on. Nine held microcycles of QUUX's 40 ns at four ticks is 360 ns,
-which covers the divider's 330 (32 quotient bits and a load at 10 ns each), and muir-fpga
-finds it fits with 15 ticks to spare. The count is in microcycles, not
-nanoseconds: at another `--sync-cycle-ticks` muir still holds nine, ten in
-all, and a
-contract that changes the microcycle's length recounts it. The time does
-not depend on the operands. A halt during the hold stops the machine with
-the `DIV` still in `IR`. The hold does not stop a single step, as `-WAIT`
-does not; by then the divider is done.
-
-**Unverified:** whether the fabric starts the count after `-WAIT`'s other
-terms too --- a memory destination written while a cycle is busy, a fetch
---- which hold the instruction and not its operands. muir counts through
-them, since the rule counts from when the operands are ready; a `DIV`
-with a memory destination behind a busy cycle, run on both, would settle
-it.
+**A `DIV` stays in EX 18 clocks and a `MUL` 5**, at every period (contract
+G3 revision 15, A15b.3; its MP2b ruling Q3), 17 and 4 of them held. A
+register operand is ready at once. An `MD` operand first waits for its read
+to land, through the MD interlock any instruction reading `MD` has, and the
+count starts when that wait ends, so that a `DIV` of `MD` divides the word
+that landed. `micro` holds its microcycle for the same number of clocks, 17
+for a `DIV` and 4 for a `MUL`, counted from when the instruction enters
+`IR` (`src/micro.rs:2818-2819`, `src/muldiv.rs:82-83`). The time does not
+depend on the operands. The hold does not stop a single step.
 
 `tests/muldiv.rs` holds each against the step sequence on the CADR, for many
 operands and every output selector and Q control, on `micro` and `rtl`, with
 the step sequence itself held to the netlist; the CADR's 42 and 43 to the
-netlist; the hold's length on both engines, from a register's `DIV`'s start
-and from the end of a miss's wait for a `DIV` of `MD` (the `DIV` ends nine
-microcycles after a plain copy of `MD` in its place, 22 after the read's
-start on `rtl` where the copy ends at 13, the line's fill being 5 beats),
-and at three ticks; a `MUL` of
-`MD` ending with the copy; the CADR's 43 held for nothing; a halted and
-single-stepped `DIV`; and a checkpoint taken during one.
+netlist; and the CADR's 43 held for nothing (`on_the_cadr_43_is_not_held`).
+`div_stays_18_clocks_in_ex_and_mul_5` in `tests/revision_15_rtl.rs` holds the
+pipeline's clocks at three periods, a `DIV` of `MD` counted from the landing,
+with the results as `micro`'s.
 
 ## The clocks
 
@@ -317,25 +253,18 @@ interval timer are on the I/O board, on the Unibus (`764120`-`764124`).
   written by the boot PROM (contract Q11). The microsecond
   clock moves on through every reset.
 - **Instants.** A timer word is read or written at the instant the
-  register's cycle is taken, the edge the memory port takes it at (`rtl`:
-  the edge that ends the microcycle after the memory start), and a period
-  starts from that edge; a write is in `SINTR` from the next edge on, the
-  one that acknowledges the cycle, and not at the edge that takes it. A read
-  gives the flags as they stood at that edge, a rise at the edge itself
-  counting as before it.
-
-A flag that rises while a microcycle waits for `MD` is up for the jump
-after it: `SINTR` is registered at the edge that ends the waiting
-microcycle, with the flags as they stand then (the case muir-fpga measured
-on Q1's timers).
+  register's cycle is taken, and a period starts from that instant. A read
+  gives the flags as they stood then, a rise at that instant itself
+  counting as before it
+  (`m1_a_periodic_timer_rises_every_period_on_its_start_s_grid` in
+  `tests/interval_timers.rs`).
 
 **Functional destinations 3 and 4 write only M, and functional source 17
 reads all ones**, on QUUX as on the CADR: Q1's tick control, its interval
 timer's period and their status are not there, and every timer is reached
 through the register page alone. A write of destination 3 changes no
-timer, also at an edge that takes a register write, and takes no flag out
-of any `SINTR`. So microcode that turns its tick on through destination 3
-has no tick.
+timer. So microcode that turns its tick on through destination 3 has no
+tick.
 
 **The microsecond clock** is functional source 15: the microseconds since
 power-on, 32 bits, wrapping, one read giving the whole word.
@@ -347,68 +276,53 @@ nowhere, by a scan of every control-store word, and running shows the same
 of what the OA registers make at run time: `tests/unused_codes.rs` reads
 every executed microinstruction as it stood in `IR` through a boot to the
 listener. System 1003 on the CADR's microcode 1001, on the CADR, runs
-none. System 2001 on microcode 2001 runs
-them at 43 addresses through its boot and a moment after on revision 13,
-each a control-store word that carries them: it writes destinations 5 to 7
-only in `RESET-MACHINE`'s fill of the MACRO DISPATCH MEMORY, between
-`RESET-MACHINE-MACRO-DISPATCH-FILL` and `RESET-MACHINE-MACRO-DISPATCH-DONE`,
-nothing to destinations 3 and 4, its tick being timer 0 on the register
-page, which is on at the end, and reads source 17 nowhere
-(`system_2001_uses_the_clocks_codes_only_where_its_microcode_does` in
-`tests/system_2001.rs`).
+none.
 
 `tests/interval_timers.rs` holds, for each timer, the periodic grid to the
 nanosecond with late clears and a period written under a raised flag, the
 one-shot's one rise, the mode taken at turn-on, the independence of the
 three, every reset on both engines, the interrupt under `<8>` and not
-without it on both engines and inside a wait for `MD`, the layout,
-destination 4 and source 17 on QUUX, a checkpoint resumed to the same
-rises, destination 3 changing no timer on either engine, and on `rtl` the
-shared edge: destination 3 changing nothing beside a register write, nor
-its `SINTR`, nor a read's flags, which are as they stood at its edge.
-`tests/tick.rs` holds the tick as timer 0 at the PROM's period, turned on
-through word 110 and not through destination 3, the microsecond clock
-against each engine's time (under `sync` too) and across its wrap, and the
+without it on both engines, the layout, destination 4 and source 17 on QUUX,
+a checkpoint resumed to the same rises, and destination 3 changing no timer
+on either engine. `tests/tick.rs` holds the tick as timer 0 at the PROM's
+period, turned on through word 110 and not through destination 3, the
+microsecond clock against each engine's time and across its wrap, and the
 CADR's all ones.
 
-## QUUX drops the delay lines
+## QUUX's clock
 
-**A QUUX microcycle is a fixed number of 10 ns ticks, always**: `sync`,
-`--sync-cycle-ticks` of them, 4, the DE25-Nano's, unless a board's fit
-says otherwise. The CADR's clock is a string of delay-line phases: the
-read phase ends at the tap the mode register's `SPEED1` and `SPEED0` choose
-(`mit/cadr/ir.bits`: "00 Extra slow, 01 Slow, 10 Normal, 11 Fast"), and a
-60 ns restart follows, 145 ns at normal speed, which muir-fpga's fabric
-replays as 15 ticks. QUUX has none of it: no taps, no speed bits (a write
-of the mode register's bits 1 and 0 goes nowhere; its other bits are
-unchanged), and no timing but `sync`. `--timing-model` is `cadr`'s alone,
-and an engine made for a QUUX machine starts on four ticks: `rtl` refuses
-another timing on it, and `micro`'s clock counts the same ticks.
+**A QUUX microcycle is one clock of the period `--microcycle-ns` gives**,
+5 to 63.5 ns in steps of 0.5, 10 ns by default. The CADR's clock is a string
+of delay-line phases: the read phase ends at the tap the mode register's
+`SPEED1` and `SPEED0` choose (`mit/cadr/ir.bits`: "00 Extra slow, 01 Slow, 10
+Normal, 11 Fast"), and a 60 ns restart follows, 145 ns at normal speed.
+QUUX has none of it: no taps, no speed bits (a write of the mode register's
+bits 1 and 0 goes nowhere; its other bits are unchanged), and no timing
+model. `--timing-model` is `cadr`'s alone
+(`the_timing_model_is_the_cadr_s` in `tests/cli.rs`).
 
-The ticks are a board's: the number its fit proves its longest path settles
-in. **The Arty Z7-20 runs QUUX at five ticks**, 50 ns: its map, two levels
-through the memory path's decode, misses four ticks on that part by about
-a nanosecond and meets five with a setup slack of +0.153 ns (muir-fpga's
-commit `ccc3d12`). **The DE25-Nano runs it at four.** The tick stays 10 ns,
-so the clocks that count ticks keep true time. muir's default is 4;
-`--sync-cycle-ticks 5` is the Arty's.
+**Time** is in units of 0.5 ns, `Machine::ns` counting them. The period is a
+whole number of them, so that every period the flag admits is exact and
+clock *k* ends at the instant *k* times the period; the Kria KR260's
+revision 15 fit closes at 19 ns. A device's duration is turned to clocks
+once, rounded up, and a timer keeps true time over a second at every period
+(`a_command_s_time_is_rounded_to_clocks_once`,
+`a_1_us_timer_rises_at_clock_1649_the_14th_time`,
+`the_accumulators_keep_true_time_over_a_second`). The reports say the
+machine's time and the period in ns, with ".5" where an instant is odd
+(MP2b ruling Q1): the prompt's `pc` and `step` lines, the resume line, and
+`--pace`'s line; and the run's report measures it against the hardware at
+the period
+(`the_prompt_s_pc_on_revision_15_prints_an_odd_instant_s_half`,
+`a_resume_on_revision_15_prints_an_odd_instant_s_half`,
+`pace_on_revision_15_says_its_period`,
+`the_run_s_report_on_revision_15_is_against_the_period`). Feature word 25
+says the period ([the feature page](#the-feature-page)).
 
-What the microcode sees does not change, only the time: every register is
-clocked at the one edge and the late writes land one edge later, as the
-single-edge contract below has it; the bus keeps its own time on the grid;
-a held cycle is one microcycle long; and a `DIV` is ten microcycles, its
-own and nine held, at any length. An `ILONG` instruction takes `ilong_ticks`
-more, 0 unless the library says otherwise.
-
-`tests/sync_timing.rs` holds the microcycle's length, the default and the
-refusal, `ILONG`'s ticks, the grid, the divider's hold and a checkpoint;
-`quux_has_no_speed_bits` in `tests/quux.rs` the speed bits;
-`quux_runs_on_sync_alone` in `tests/cli.rs` the flags; and
-`system_2001_runs_at_its_ticks` in `tests/system_2001.rs` System 2001 at
-four ticks and at three on `rtl`: the same listener, reached in
-10,108,268,840 ns at four and 8,919,479,220 at three, 1.13 times sooner
-where the microcycle is 1.33 times shorter, the memory port keeping its own
-time.
+`quux_has_no_speed_bits` in `tests/quux.rs` holds the speed bits, and
+`--microcycle-ns` is held in `tests/revision_15.rs`: its range and
+refusals, the period in the start, in `--pace`'s line and in a checkpoint,
+which a resume under another period refuses.
 
 ## The memory port and the device registers
 
@@ -425,69 +339,34 @@ control and small data in their registers. The CADR keeps its Xbus, Unibus
 and bus interface. The boot PROM is not in the address space: it is in the
 control store (Q2).
 
-The physical space is 28-bit word addresses (contract G1 §3.2, G2 §4.1):
+A reference leaves the processor on a 29-bit bus address, the cache's key
+([the page table and the TLB](#the-page-table-and-the-tlb) has how a virtual
+address becomes one): `<28>` clear and the physical word address for main
+memory, `<28>` set and the device window's offset `<27:0>` for the device
+window.
 
 | | |
 |---|---|
-| Main memory | from 0 up to its end, below the frame buffer window: whole 40-bit words. 380 ns a fill of two 64-bit beats and a tick, 10 ns, for each further beat, so 410 ns a line of 8 words, 40 bytes in 5 beats, and 290 ns a write (`MemoryTiming::NOMINAL`, the DE25-Nano's, the slower board's), one operation at a time, no setup, deskew or refresh; a floor, a board slower on an access waiting. `--memory-timing <read>,<write>`, `arty` or `de25` sets others, on `rtl`. **Unverified**: the beats past two, until a fill is measured at 40 bits; a line that crosses a 4 KiB boundary, which the boards' ports issue as two bursts, costs nothing more here |
-| The frame buffer window | `1760000000` up to the video controller's buffer's end, at most `1777775777`, 4,193,280 words: on the memory bus with main memory, cached, 4 bytes a word. A write stores the field and drops the tag, and a read gives the field with tag `005`, a fixnum's (G1 §4.2). A line fill there is 4 beats, 400 ns. The software reads it back (`BITBLT` combines with the destination, scrolling copies), and the display only reads it, which a write-through cache keeps current |
-| The cache | always fitted: 4K words (`--cache <words>` another size) |
-| A device register | a word of the register page, `1777777400`-`1777777777`, the feature page, block-disk's and the video controller's among them: never cached, taken at the edge and answered a microcycle on, two microcycles in all |
-| Nothing there | past main memory's end below the window, past the frame buffer's end in it, and between the window and the register page: fails at once, in the microcycle, reading 0 and setting word 101's NXM bit, with no timeout. The CADR's addresses from `17000000` up are main memory's when there is that much of it, and nothing when there is not. A write to nothing does not read back, which the microcode's memory-size probe, `MEM-SIZE-LOOP` in `uc-cold-disk.lisp`, relies on: it tests the value read back, not the time |
-| Block-disk | its words move at START, and the cache is invalidated; a transfer reads the processor's writes made before START and, after DONE, no read hits a word from before it |
+| Main memory | from 0 up to its end: whole 40-bit words. A line of 8 words is 40 bytes, 5 beats of the 64-bit port. `--memory-timing <read>,<write>,<occupancy>`, or `kria`, `arty` or `de25`, gives a line fill, a write's response and the interval between two accepted writes: `kria`, the default, 344, 215 and 10 ns, `arty` 290, 120 and 16, `de25` 600, 485 and 40 (`PortTiming`, `src/pipeline/port.rs`). **Unverified**: `kria`'s occupancy, 10 ns, and `de25`'s, 40 ns |
+| The frame buffer | from the device window's base, `34000000000`, the video controller's buffer, at most 4,193,280 words: on the memory bus with main memory, cached, 4 bytes a word. A write stores the field and drops the tag, and a read gives the field with tag `005`, a fixnum's (G1 §4.2). A line of it is read in 4 beats, and the port has one fill time for both, so a fill there takes the time of main memory's. The software reads it back (`BITBLT` combines with the destination, scrolling copies), and the display only reads it, which a write-through cache keeps current |
+| The cache | always fitted: 64K words by default (`--cache <words>` another size), unified and write-through, 2-way, in lines of 8 words, by bus address. A hit lands two clocks after the grant and a miss when its line's fill does; a write allocates nothing. [`rtl` is the pipeline](#rtl-is-the-pipeline) has the port's queue and the cache's rules |
+| A device register | a word of the register page, `35777777400`-`35777777777` in the device window, the feature page, block-disk's and the video controller's among them: never cached |
+| Nothing there | past main memory's end below the device window, past the frame buffer's end in the window, the window's reserved slices, and the words below the register page: fails at once, in the microcycle, reading 0 and setting word 101's NXM bit, with no timeout. The CADR's addresses from `17000000` up are main memory's when there is that much of it, and nothing when there is not. A write to nothing does not read back, which the microcode's memory-size probe, `RESTORE-MEM-SIZE-LOOP` in `uc-cold-disk.lisp`, relies on: it tests the value read back, not the time |
+| Block-disk | its words move at START, which first lands every posted write, so that a transfer reads every word written before it and a read's words are not overwritten by an older write (`block_disk_s_start_lands_the_posted_writes`); the transfer clears the cache's sets of the words it writes and no others (`a_block_disk_transfer_clears_the_sets_it_writes_and_no_more`) |
 
 The bus interface's registers all have homes on QUUX already: the
 diagnostic registers are the host's (Q5), `ERRSTOP` is word 102, the
 interrupt control word 100 and the error status word 101 (Q2); the Unibus
 map is gone (Q5).
 
-`tests/quux_memory_port.rs` holds the port in place of the bus interface,
-a miss's line fill against a hit, a register never cached, nothing past
-main memory's end reading back on both engines, the disk's write never hit
-stale, and a checkpoint; `tests/quux_device_registers.rs` a register a
-microcycle longer than nothing, every empty range failing at once on both
-engines, the frame buffer through the cache, and a register write held
-behind a register read keeping `MD` no longer than a main memory write;
-`the_physical_space_is_28_bits`, `the_frame_buffer_window_holds_the_field`
-and `a_store_to_a_word_spanning_two_beats_is_whole` in
-`tests/revision_13.rs` the space and the window on both engines;
+`tests/quux_memory_port.rs` holds nothing past main memory's end reading
+back on both engines; `tests/quux_device_registers.rs` every empty range
+failing at once on both engines, a reserved register answering 0, and a
+start right after a start waiting for it; `the_frame_buffer_window_holds_the_field`
+and `a_store_to_a_word_spanning_two_beats_is_whole` in `tests/revision_13.rs`
+the window and a packed word across two beats on both engines;
 `quux_s_memory_port_and_its_timing` in `tests/cli.rs` the flag and the
 start's report.
-
-## The memory cache
-
-**QUUX's memory cache** (H2) is unified and write-through, in front of main
-memory and the frame buffer, by physical address after the map. Device
-registers are not cached. In muir it is `rtl`'s, and it holds tags only:
-`rtl` takes a word from main memory as a cycle ends, and a write-through
-cache never holds a word memory does not, so the cache changes when a
-cycle is answered and never what it reads.
-
-| | |
-|---|---|
-| A read that hits | acknowledged `hit_ns` after the request (20 ns, two ticks of the grid, met on the Arty in muir-fpga's fit; the DE25's to follow), with no bus cycle and none of the bus's setup, deskew or release |
-| A read that misses | main memory's line fill; it fills the line, the set's least recently used line going |
-| A write | allocates nothing. With the write buffer it is acknowledged after `hit_ns`, or when the buffer's last write is done, and main memory runs it behind the processor; the word is memory's from the acknowledgement, as a read after it finds it |
-| Shape | lines of 8 words, a line of packed storage (contract G1 §4.1, G2 §3), 2-way, `<words>` in all, a power of two and at least 16, a set of two lines; `--cache`'s sizes keep the 8-word line |
-| Coherence | a disk transfer writes main memory behind the processor, and invalidates the whole cache before the next cycle |
-
-Behind the cache is main memory on the port. muir-fpga measured its two
-boards, a 1,000,000 word array loop on System 1001 for 300 s:
-
-| | Read, average | Write | In muir |
-|---|---|---|---|
-| Arty Z7-20 | 20.68 ticks of 10 ns (19 to 88) | 12 | read 220 ns, write 120 ns |
-| DE25-Nano | 36.25 (33 to 228) | 29 (28 to 58) | read 380 ns, write 290 ns |
-
-rounded up to the tick, with a tick more on a read for a fill of two 64-bit
-beats: the boards were measured on single-word accesses, so a fill's time
-is **unverified**.
-
-`tests/cache.rs` holds the lines and the replacement, a read loop and a
-write-and-read-back loop leaving the same words with the cache as with the
-least cache the port fits, and sooner, the invalidation, and a checkpoint;
-`on_rtl_high_memory_and_the_window_are_cached` in `tests/revision_13.rs`
-the window and main memory above 22 bits through it.
 
 ## Block-disk
 
@@ -501,7 +380,7 @@ appendix A1.11).
 
 | | CADR controller | block-disk |
 |---|---|---|
-| Registers | `17377774`-`17377777`: status and command, command list pointer, disk address, START | the same four, words 200-203 of the register page, `1777777600`-`1777777603` |
+| Registers | `17377774`-`17377777`: status and command, command list pointer, disk address, START | the same four, words 200-203 of the register page, `35777777600`-`35777777603` |
 | Command list | one word a block, `<23:8>` the page's physical address, `<0>` More | one word a page, `<27:10>` the page, `<0>` More, `<9:1>` and `<39:28>` ignored; the pointer 28 bits |
 | Disk address | cylinder `<27:16>`, head `<15:8>`, sector `<7:0>`, unit `<30:28>` | the block number, `<27:0>`; one disk, unit 0 |
 | Commands | read, read compare, write, read all, write all, seek, at ease, recalibrate, offset clear, reset | read, 0, and write, 11; any other stops by error. Command `<12>` chooses the transfer (below) |
@@ -530,7 +409,8 @@ a failure too.
 
 The words move inside the store to START, and the controller stays busy for
 a block's time each; a transfer writes main memory behind the processor, so
-the memory cache is invalidated. The disk is a file in a standard format,
+the cache clears the sets of the words it wrote. The disk is a file in a
+standard format,
 [below](#the-disk-file). `tests/block_disk.rs` holds the read, the write,
 the end of the disk, the NXM, a command it does not do, the registers on
 QUUX's register page with nothing at the CADR's, and a checkpoint;
@@ -538,7 +418,7 @@ QUUX's register page with nothing at the CADR's, and a checkpoint;
 the disk file, and the GPT fixture read by a 4-byte transfer and taken 4
 bytes a word as the file's bytes.
 
-PROM 2001, microcode 2001 and System 2001 address it by block.
+PROM 2002, microcode 2002 and System 2002 address it by block.
 
 ## The disk file
 
@@ -591,7 +471,7 @@ type GUIDs, whose first 32-bit words all differ:
 | retired: once `TEMP`; not to be used | `445976f2-34e4-4583-b750-75d28a080cba` |
 
 - **The name** is the partition's four-character Lisp name, a space and a
-  comment of up to 31 characters, `MCR1 UCADR 2001`: 36 characters, which
+  comment of up to 31 characters, `MCR1 UCADR 2002`: 36 characters, which
   is what a GPT name holds.
 - **The current microcode and the current band** carry attribute bit 48,
   the first of the bits a GPT leaves to the partition type.
@@ -616,17 +496,14 @@ sgdisk, and writes nothing (`quux_s_disk_is_named_and_left_alone` in
 `tests/diskpack.rs`). The boot PROM, `data/quux-promh.mcr`, the microcode
 and the bands read the GPT; MIT's label in block 0 is the CADR's.
 
-**System 2001's band is on a GPT disk in a dynamic VHD**: its release
-disk, 853,359 blocks, with microcode 2001 in its current `MCR1`, "MCR1
-UCADR 2001", the band in its current `LOD1`, "LOD1 System 2001", and a
-`PAGE` partition of 655,360 blocks, 128MW at 5 blocks a page
-(`band_2001_is_system_2001_on_microcode_2001` in `tests/system_2001.rs`,
-on System 2001's release, [below](#system-2001)). QUUX boots
-the VHD as it is, a copy of it, the disk being written. Its `SYS:` is on
-the file device, which the tests serve the band's sources through. It
-restores its own band: `(si:disk-restore 1)`, answered `yes`, reads `LOD1`
-back through block-disk's packed transfers and boots it to the listener
-again (`system_2001_restores_its_band_to_the_listener`).
+**System 2002's band is on a GPT disk in a dynamic VHD**: its disk,
+853,359 blocks, with microcode 2002 in its current `MCR1`, "MCR1 UCADR
+2002", the band in its current `LOD1`, "LOD1 System 2002", and a `PAGE`
+partition of 655,360 blocks, 128MW at 5 blocks a page
+(`tools/fetch-handover-2002.sh` checks the layout of the hand-over's disks,
+and `tests/system_2002.rs` boots them). QUUX boots the VHD as it is, a copy
+of it, the disk being written. Its `SYS:` is on the file device, which the
+tests serve the band's sources through.
 
 How to make a disk with standard tools is in
 [the manual](manual.md#quuxs-disk).
@@ -635,11 +512,12 @@ How to make a disk with standard tools is in
 
 **What a single-edge core must keep**, for H1b: in which microcycle each
 resource's new value is seen, counted from the microcycle whose
-instruction produced it (cycle *n*). It is `rtl`'s read phase, write
-phase and edge, which `tests/cosim.rs`, `tests/chip.rs` and
+instruction produced it (cycle *n*). It is the CADR's `rtl`'s read phase,
+write phase and edge, which `tests/cosim.rs`, `tests/chip.rs` and
 `tests/dispatch_write_order.rs` hold to the netlist; an FPGA core that
 keeps every row, and stalls where a row needs it, runs the microcode
-unchanged.
+unchanged. `rtl` is the single-edge machine on the CADR alone: on QUUX it is
+the pipeline ([below](#rtl-is-the-pipeline)), whose rows are `micro`'s.
 
 | Resource | Written | Seen by |
 |---|---|---|
@@ -648,10 +526,10 @@ unchanged.
 | A memory, M memory | in *n*+1's write pulse, from `WADR` and `L` registered at the edge ending *n* | *n*+1, through the pass-around (ACTL 3B21/3B27, MCTL 4B18: a source address equal to the pending `WADR` reads `L`); the memory itself from *n*+2 |
 | PDL buffer | in *n*+1's write pulse, at the pointer or the index as it stands then: only the choice between them is registered (`PWIDX`), not the address | *n*+2: no pass-around, so *n*+1 reads the word as it was (`pdl_read_right_after_a_push_on_the_board`, `tests/cosim.rs`) |
 | SPC stack, a push | in *n*+1's write pulse, at the pointer the edge ending *n* moved to | the next-address path in *n*+1 (`SPCWPASS` puts the word on the `SPC` bus); an M-source read of the stack in *n*+1 reads the RAM's old word at the new pointer; *n*+2 reads the new |
-| Map, a `WRITE-MAP` store | in *n*+1's write pulse, both levels, addressed by `MAPI` then (`VMA` while `MEMSTART`, else `MD`) | `MAP(MD)` and a dispatch on map bits read the old word in *n*+1 (QUUX's definition; below) and the new from *n*+2. A memory cycle an instruction in *n*+1 starts is translated at the edge ending *n*+2, through the new word: `PHYS-MEM-READ` stores the map and starts a read in the next instruction |
+| Map, a `WRITE-MAP` store | in *n*+1's write pulse, both levels, addressed by `MAPI` then (`VMA` while `MEMSTART`, else `MD`) | `MAP(MD)` and a dispatch on map bits read the old word in *n*+1 (QUUX's definition; below) and the new from *n*+2. A memory cycle an instruction in *n*+1 starts is translated at the edge ending *n*+2, through the new word: `PHYS-MEM-READ` stores the map and starts a read in the next instruction. QUUX's `WRITE-MAP` is the TLB's operation, [below](#the-page-table-and-the-tlb) |
 | Dispatch memory, a dispatch write | in *n*'s own write pulse, at its own `DADR` | the dispatch in *n* reads the old word (QUUX's definition); from *n*+1 the new |
 | Control store, `WRITE-I-MEM` | in *n*+1's write pulse, at the `PC` it moved to. N nops *n*+1's word; `IR` takes `IWR` at the edge ending *n*+1, and `IWRITED`'s N nops it | `IWRITED`'s POPJ returns to the address the write pushed, the word after it in execution order (the next in sequence, or the target of the transfer whose slot it fills), which is fetched from the RAM after the write: a write of that word runs the new word, on `rtl`, `micro` and the pipeline (`a_write_i_mem_of_the_word_after_it_runs_as_the_board_runs_it`, `a_write_i_mem_in_a_delay_slot_goes_on_at_the_jump_s_target`). That is MIT's form, `IR<9:0>` 1647; CC's form without N runs the word fetched during the write as it was, and costs one nopped microcycle where MIT's costs two (`a_write_i_mem_costs_its_nopped_microcycles_on_micro_as_on_the_board`) |
-| OA registers, `IMOD` | at the edge ending *n* | or'd into `IR` as it loads at that same edge: the instruction executed in *n*+1 |
+| OA registers, `IMOD` | at the edge ending *n* | or'd into `IR` as it loads at that same edge: the instruction executed in *n*+1. QUUX's OA registers are read only through a word's OA select ([below](#the-64-bit-microinstruction)) |
 | `MD`, from memory | at `-LOADMD`, when the bus says | on the CADR, a microcycle that reads `MD` before `READ IN PROGRESS` falls is held by `-HANG`; on QUUX it waits (below) |
 
 Holds and write pulses:
@@ -665,53 +543,26 @@ Holds and write pulses:
 - **QUUX has no hung microcycle** (`Geometry::hangs`): a microcycle that
   reads `MD` while a read is in flight waits as for `-WAIT`, whole
   microcycles with no write pulse, and runs once, whole, when the word is
-  in `MD`. Unlike `-WAIT`, a single step does not pass it. Its writes
-  therefore take their addresses from the word read: a dispatch write
-  addressed by `MD`, and a map store's write pending into it, land where
-  the word read says, where the CADR's land at the `MD` from before
-  (`on_quux_a_dispatch_write_addressed_by_md_waits_for_the_word_read`,
-  `on_quux_a_map_write_pending_into_the_wait_lands_at_the_word_read`,
-  `on_quux_the_wait_for_md_is_whole_microcycles` in
-  `tests/dispatch_write_order.rs`).
+  in `MD`.
 - A memory cycle goes out at the edge ending the microcycle after its
   start, and a write carries `MD` as it stands then: an `MD` loaded in
-  that microcycle is the word written, on the CADR as on QUUX and on
-  `rtl` and `micro` alike; one loaded later waits on `MBUSY.SYNC` for the
-  cycle to end
+  that microcycle is the word written, on `rtl` and `micro` alike; one
+  loaded later waits on `MBUSY.SYNC` for the cycle to end
   (`the_engines_write_the_md_of_the_microcycle_after_the_start` in
-  `tests/chip.rs`, `a_write_carries_the_md_of_the_microcycle_after_its_start`
-  in `tests/quux_memory_port.rs`). Revision 15 leaves this rule: its write
-  carries `MD` as its start's own microcycle leaves it (below, the
-  pipeline's rows).
+  `tests/chip.rs`). QUUX leaves this rule: its write carries `MD` as its
+  start's own microcycle leaves it (below, the pipeline's rows).
 - **QUUX holds a memory start in the microcycle right after a start**, a
   `-WAIT` term of its own, `MEMSTART AND MEMOP`, until the first cycle has
   gone out and ended; both then land as written, a first write with the
   `MD` from before the held microcycle, a first read's word in `MD` before
   the second's, the word right after the second start reading the first's
-  (`row_a_read_start_right_after_a_read_start_both_land`,
-  `revision_14_s_engines_land_both_reads` in `tests/revision_15_rtl.rs`),
-  an instruction fetch held the
-  same way (`a_start_right_after_a_start_waits_for_it` in
-  `tests/quux_device_registers.rs`,
-  `a_start_held_behind_a_write_loads_md_after_the_write` and
-  `a_fetch_right_after_a_write_waits_for_it` in
-  `tests/quux_memory_port.rs`). **Not modelled** in revision 14's
-  `micro`: a word right after a read start that starts a cycle and writes
-  or reads `MD`. `rtl` holds it, its `MD` load with it, so that its own
-  `MD` write stands after the read's word, where `micro` lands the read's
-  word in `MD` after it: the two differ in the word written and in `MD`
-  after. No program runs it: microcode 2002 has no such
-  word, and the traces of release 2002 on revision 14 none. A register write held behind a register
-  read does not put the read's word off: `MD` has it when the read's own
-  `READ IN PROGRESS` falls, 140 ns after its acknowledgement, and the
-  write's acknowledgement moves nothing, so a microcycle reading `MD`
-  after one filler takes 80 ns, two microcycles, as with a write of main
-  memory there
-  (`a_register_write_right_after_a_register_read_holds_md_no_longer` in
-  `tests/quux_device_registers.rs`). On the CADR nothing holds it: one cycle
-  goes out for the two starts, with the second start's direction, page
-  and `VMA<7:0>`, and the first is lost, measured on `chip` and held on
-  `rtl` and `micro`
+  (`row_a_read_start_right_after_a_read_start_both_land` in
+  `tests/revision_15_rtl.rs`), an instruction fetch held the same way
+  (`a_start_right_after_a_start_waits_for_it` in
+  `tests/quux_device_registers.rs`). On the CADR nothing holds it: one
+  cycle goes out for the two starts, with the second start's direction,
+  page and `VMA<7:0>`, and the first is lost, measured on `chip` and held
+  on `rtl` and `micro`
   (`on_the_board_a_start_right_after_a_start_loses_the_first`,
   `a_start_right_after_a_start_goes_out_as_the_second` and
   `a_fetch_right_after_a_write_loses_the_write` in `tests/chip.rs`).
@@ -719,7 +570,8 @@ Holds and write pulses:
 - **QUUX's definition**: a RAM read in the cycle its own write pulse fires
   --- the dispatch word a dispatch writes, the map word right after a map
   store --- gives the word from before the write
-  (`Geometry::old_word_while_written`), as an FPGA's block RAM gives it.
+  (`Geometry::old_word_while_written`; `on_quux_rtl_and_micro_take_the_old_word`
+  in `tests/dispatch_write_order.rs`), as an FPGA's block RAM gives it.
   On the CADR the RAM's output floats while written and the answer is a
   race; muir's CADR engines take `chip`'s answer, the new word, which rests
   on its clock cutting the pulse at the edge
@@ -731,7 +583,7 @@ Holds and write pulses:
   dispatch write with `POPJ`, no map read in the microcycle a map store's
   write lands, and no hung microcycle whose pulse writes the dispatch
   memory or the map. The same counters fire on the test programs built to
-  do each. **Unverified** for microcode 2001, which no count has run.
+  do each. **Unverified** for microcode 2002, which no count has run.
 
 ## The video controller
 
@@ -746,17 +598,17 @@ CADR's boards.
 
 | | |
 |---|---|
-| Buffer | 40,960 words in the frame buffer window, physical `1760000000`-`1760117777`: 40 words a line, 1,024 lines, 4 bytes a word, a read giving tag `005` and a write dropping the tag |
+| Buffer | 40,960 words in the frame buffer window, `34000000000`-`34000117777` in the device window: 40 words a line, 1,024 lines, 4 bytes a word, a read giving tag `005` and a write dropping the tag |
 | Pixel | pixel `x` of line `y` is bit `x mod 32` of word `40 y + x / 32` (at the default size), the low bit leftmost, as on the CADR's TV |
-| Mode, word 210 of the register page, `1777777610` | bit 2, black-on-white, reads back; every other bit reads 0 and a write of it is dropped |
+| Mode, word 210 of the register page, `35777777610` | bit 2, black-on-white, reads back; every other bit reads 0 and a write of it is dropped |
 | Words 211-217 | reserved: read 0, writes ignored |
 | The CADR's control registers, `17377760`-`17377767` | main memory's addresses when there is that much of it; on a QUUX of 2MW nothing there: an access fails at once and sets word 101 `<0>` |
 | Interrupt | none |
 
 **Its size is muir's to choose**, `--video-size <width>x<height>`: the width
 a multiple of 32, and at most **1920 by 1080**, the largest QUUX supports
-(`a_size_is_checked` in `tests/video.rs`). That is 64,800 words. The window
-lets the buffer reach up to `1777775777`: 4,193,280 words
+(`a_size_is_checked` in `tests/video.rs`). That is 64,800 words. The device
+window lets the buffer reach 4,193,280 words, up to `34017775777`
 (`the_buffer_may_fill_its_window`), which no word states to the software.
 The feature page's words 11 to 13 give the size and the buffer's address
 to the software. The table above is the default size.
@@ -764,19 +616,18 @@ to the software. The table above is the default size.
 **The boards' sizes differ**, each fixed in its bitstream: muir-fpga's Arty
 Z7-20 and DE25-Nano are 1280 by 1024, its Kria KR260 1920 by 1080. A band
 reads the size from words 11 to 13 at boot, so one band runs on each. At
-1920 by 1080 the buffer is 60 words a line, 64,800 words; the window is `1760000000`-`1760176437`, and `1760176440` is nothing and sets
-word 101 `<0>` (`full_hd_s_window_ends_at_64800_words` in
-`tests/revision_13.rs`, on both engines).
+1920 by 1080 the buffer is 60 words a line, 64,800 words; the window is
+`34000000000`-`34000176437`, and `34000176440` is nothing and sets word 101
+`<0>` (`full_hd_s_window_ends_at_64800_words` in `tests/revision_13.rs`, on
+both engines).
 
 1280 bits a line is 40 whole words, which `BITBLT` needs of a screen array's
 first dimension (`BITBLT-DECODE-ARRAY` in `sys/ucadr/uc-tv.lisp`).
 
-System 2001 sizes the main screen from the feature page's words 11 to 13
-at every boot, and draws it at the screen's own words a line: at 1280 by
-1024 on both engines (`system_2001_boots_on_both_engines` in
-`tests/system_2001.rs`) and at 1024 by 768 and 1920 by 1080 on `micro`
-(`system_2001_sizes_its_screen_at_boot`). **Unverified**: the sizes
-between, which no test boots.
+System 2002 reads the main screen's size from the feature page's words 11 to
+13 (`video-width`, `video-height` and `video-words-per-line` in
+`sys/sys/ltop.lisp`). **Unverified**: that it draws at any size but the
+default, which no test boots.
 
 `tests/video.rs` holds the buffer's first and last words and the NXM past
 it on both engines, QUUX's decode of the whole buffer and of the largest
@@ -794,84 +645,80 @@ A reboot is a jump to 36000. The CADR keeps MIT's overlay: its PROM covers
 0-1777, the first 1K words, until `PROMDISABLE` in the mode register,
 written at Unibus `766012`, lets the RAM show through.
 
-The PROM is muir-sys's PROM 2001 for block-disk and a GPT
+The PROM is muir-sys's PROM 2002 for block-disk and a GPT
 (`data/quux-promh.mcr`), MIT's `promh.text` changed so that the disk is
 read by block number, nothing is saved, the microcode is found through the
 GPT, the devices are reset through the register page and timer 0 given its
-period, the register page is at `1777777400` with block-disk's registers at
+period, the register page is at `35777777400` with block-disk's registers at
 its words 200-203, the GPT and the microcode partition are read by
 block-disk's 4-byte transfers, 4 blocks a 1024-word page, and the
-microcode's dispatch memory of 4,096 entries and A memory as the 40-bit
-section 5 are loaded (muir-sys's `sys/ucadr/promh.text` as committed in
-muir-sys `5d98e43`), assembled at 36000. It sets error stop through the
-register page, not `766012`, and halts at `ERROR-MICROCODE-TOO-BIG` if a
-microcode reaches 36000. The control store stays 16K words: jump targets
-are `IR<25:12>`, dispatch words carry 14 address bits, and `SPC<14>` is the
+microcode, in QUUX's own `.mcr` format ([the 64-bit
+microinstruction](#the-64-bit-microinstruction)), is loaded: its control
+store of 64-bit words, its dispatch memory of 4,096 entries, its symbol
+area and its A memory of 40-bit words (muir-sys's `sys/ucadr/promh.text` as
+committed in muir-sys `2999694`, assembled at 36000; `data/README.md` has
+where the file came from and its digest). `GO` is at 36043, the file's first
+word at 36000 being `JUMP GO`. It sets error stop through the register page,
+not `766012`, and halts at `ERROR-MICROCODE-TOO-BIG` if a microcode reaches
+36000. The control store stays 16K words: jump targets are `IR<25:12>`,
+dispatch words carry 14 address bits, and `SPC<14>` is the
 macroinstruction-return flag, so 32K waits for a new microinstruction
 format.
 
+**It checks the machine first**: at `GO` it halts at `ERROR-NOT-REVISION-15`
+when MACHINE-ID's hardware revision is below 15, by bit tests alone, before
+it makes anything (`promh.text`).
+
 **It finds the microcode through the GPT**: the first microcode partition
-in the entry array carrying attribute bit 48 (muir-sys). Its own halts are
-`ERROR-NO-GPT` at 36653, no GPT (or an entry array whose LBA does not fit
-in 32 bits, within the 8 GiB limit, muir-sys says);
-`ERROR-NO-CURRENT-MICR` at 36655, no current microcode partition;
-`ERROR-ODD-MICR-START` at 36657, one whose first LBA is odd; and
-`ERROR-A-MEM-SECTION-32-BITS` at 36661, a microcode partition whose A
-memory is section 4, 32 bits (contract G2 §2.8; the release's error table
-`promh.tbl` and symbols `promh.sym`). On a pack with MIT's `LABL` label and
-no GPT --- a T-300 label with microcode 323 in `MCR1` --- it reads blocks 0
-to 3, a page, into its buffer at page 3, nothing else, and halts at
-`ERROR-NO-GPT` after 158,816 microcycles on `micro` and 191,629 on `rtl`,
-having written nothing (`quux_s_prom_reads_a_gpt_not_mit_s_label`). On a
-GPT disk whose `MCR1` holds MIT's microcode 323 as it is, its A memory
-section 4, it stops at `ERROR-A-MEM-SECTION-32-BITS` before any microcode
-runs, on both engines; the same PROM with its jump to that halt taken out
-does not stop there
-(`a_32_bit_microcode_on_revision_13_stops_at_prom_2001_s_halt` in
-`tests/system_2001.rs`). **Unverified**: the other two halts, which no test
-here reaches.
+in the entry array carrying attribute bit 48 (muir-sys). Its own halts,
+from the hand-over's error table `promh.tbl` and symbols `promh.sym`, are
+`ERROR-NO-GPT` at 36776, no GPT (a header without the signature "EFI PART",
+an entry array that does not start on an even sector below 2^32, or entries
+that are not 128 bytes); `ERROR-NO-CURRENT-MICR` at 37000, no current
+microcode partition; and `ERROR-ODD-MICR-START` at 37002, one whose first
+LBA is odd. Reading the microcode in QUUX's format, it halts at
+`ERROR-MCR-FORMAT` at 37006 on a first word that is not the format word,
+`ERROR-MICROCODE-NOT-REVISION-15` at 37010 on a first section that is not
+section 6 saying 15, `ERROR-BAD-SECTION-TYPE` at 36022 on a type other than
+1-4 and 6, `ERROR-SECTION-ORDER` at 37012 on a type twice or out of order,
+`ERROR-BAD-WIDTH` at 37014 on an actual width that is not the machine's or a
+storage width that is not a multiple of 32 or is below it,
+`ERROR-NONZERO-PADDING` at 37016 on a padding bit or an unused header word
+that is not zero, `ERROR-BAD-ADDRESS` at 36024 on an item past its memory,
+`ERROR-MICROCODE-TOO-BIG` at 36036 on a control store at or past 36000, and
+`ERROR-BUFFER-NOT-LOADED` at 36042 on no symbol area or one other than
+6000-7777 (`promh.text`). **Unverified**: these halts, which no test here
+reaches; the tests below boot a disk to the microcode's location 6.
 
 **It saves nothing and writes no block of the disk** (contract Q8). MIT's
 PROM saves main memory's page 0 to block 1 before it loads anything
 (`SAVE-A-PAGE`, `mit/sys/ucadr/promh.text`), and on a GPT disk block 1 is
 the partition table's entry array. QUUX's reads every page into its buffer
-at physical page 3 of 1024 words, words 6000-7777, and loads the
-microcode's main-memory section --- four blocks, the microcode symbol area
---- last, over the buffer. Two halts are for that:
-`ERROR-TWO-MAIN-MEM-SECTIONS` at 36040, a second main-memory section with
-blocks, and `ERROR-BUFFER-NOT-LOADED` at 36042, a section that does not
-cover the buffer (`promh.sym`). 36000 is `JUMP GO`, and `GO` is at 36043; the
-code ends at 36661 (`promh.locs`, `I-MEM 36662`).
-`tests/quux_prom_saves_nothing.rs` boots it on both engines until the
-microcode's location 6 runs, on `data/quux-disk.img` with MIT's microcode
-323 in revision 13's shapes in its `MCR1`, and counts: no block written;
-the only stores are to word 2377, the command list word; every page read
-goes into page 3; the disk file is byte for byte as it was; and page 3
-holds the main-memory section's four blocks. It reads 136 blocks and
-reaches 6 after 594,793 microcycles on `micro` and 721,539 on `rtl`.
+at physical page 3 of 1024 words, words 6000-7777, and loads the microcode's
+symbol area, which lies there, last, over the buffer (`promh.text`: "the
+prom writes nothing to the disk"). **Unverified**: that it writes no block,
+which no test counts; a boot of a disk file compared byte for byte with its
+copy would settle it.
 
-**Its file, like QUUX's microcode's, is in partition order** (contract
-Q8): MIT's `.mcr` with the two 16-bit halves of every 32-bit word swapped,
-so that each word is stored low byte first, as it lies in a microcode
-partition and as block-disk's 4-byte transfer reads it, and a whole number
-of 1024-byte blocks, so that `dd` writes a microcode file into its
-partition with no conversion. muir-sys's `sys/sys/qwmcr.lisp` writes it.
-Swapped back, the PROM's file has MIT's `promh.mcr`'s sections in
-revision 13's shapes, A memory as section 5 with MIT's words and a dispatch
-memory of 4,096 entries whose first 2,048 are MIT's, only the program
-QUUX's (`prom_2001_is_read_from_36000_in_partition_order`); and System
-2001's `MCR1` holds the release's `ucadr.mcr` block for block, as `dd`
-put it there (`band_2001_is_system_2001_on_microcode_2001`). The CADR's
-`.mcr` stays MIT's, and so does `diskpack`, which is the CADR's.
+**Its file is QUUX's own `.mcr`**, as muir-sys's builder writes it for the
+PROM and the microcode alike: the format word `51550001`, section 6 first
+saying 15, and the control store section from 36000, 64 bits a word, and a
+whole number of 1024-byte blocks, so that `dd` writes a microcode file into
+its partition with no conversion. The CADR's `.mcr` stays MIT's, and so
+does `diskpack`, which is the CADR's.
 
 `tests/quux_prom.rs` holds the start at 36000, the PROM read only, the RAM
-below live with no disable, the CADR's overlay, the file read from 36000
-in partition order, and the built-in file byte for byte the release's
-PROM 2001, whose symbols and error table say version 2001
-(`prom_2001_is_the_release_s`, where the release is fetched);
-`tests/system_2001.rs` boots System 2001 on it. `--prom` on `quux` takes a
-file in partition order assembled at 36000, and refuses one in MIT's order
-or assembled at 0.
+below live with no disable, the CADR's overlay, and the built-in file byte
+for byte the hand-over's PROM 2002, by its SHA-256, section 6 and address
+(`the_built_in_prom_is_prom_2002`); `tests/system_2002.rs` holds
+`data/quux-promh.mcr` byte for byte the hand-over's `promh.mcr` and the
+sources' `sys/ubin/promh.mcr` (`prom_2002_is_the_hand_over_s`), and boots
+System 2002 on it, where the hand-over is fetched. `tests/cli.rs` stops
+`quux` at `GO` and boots a disk made here with a microcode of QUUX's format
+to the microcode's location 6, on both engines
+(`quux_s_stops_are_the_microcode_s_and_the_prom_s`). `--prom` on `quux`
+takes a file in QUUX's own format whose control store starts at 36000, and
+refuses MIT's (`quux_s_prom_is_assembled_at_36000`).
 
 **It resets the devices and gives timer 0 its period** (contract Q11). It
 pulses no `PROG.UNIBUS.RESET`, which resets nothing on QUUX. Before its
@@ -880,29 +727,19 @@ reboot starts the microcode with no timer on, the file device disabled and
 block-disk idle; and then word 111 with 16,667, timer 0's period, since no
 timer resets to a period. It turns no timer on. At location 6 timer 0 is
 off at period 16,667 with its interrupt enable 0, and timers 1 and 2 are in
-their reset state (`prom_2001_resets_the_devices_and_writes_timer_0_s_period`
-in `tests/system_2001.rs`). A reboot of System 2001, a jump to 36000
-without `-RESET`, with timers 1 and 2 turned on and up under their
-interrupt enables while the machine is halted (microcode 2001 turns off a
-timer 1 or 2 that interrupts, `INTR-TIMER-1-STRAY`) and the file device
-enabled with three READs of 64 KiB and a CREATE-DIRECTORY queued, reaches
-the listener after 163,049,041 microcycles with `INTR` run 1,259 times,
-against 163,205,436 and 1,259 for the same reboot with neither, with the
-timers off and the device disabled at location 6 and no queued command run
-(`a_reboot_resets_the_timers_and_the_file_device` in
-`tests/system_2001.rs`, on `micro`).
+their reset state (`promh.text`).
 
 ## The register page
 
 **QUUX's device registers are on one page of 256 words**, the register
-page, physical `1777777400`-`1777777777`, the last page of the 28-bit
-physical space (contracts Q2, Q13 and G2 §4.1). Microcode 2001 reaches word
-*w* at virtual `1777777400` + *w*, virtual equal to physical there
-(`QUUX-REGISTER-PAGE-VIRTUAL-ADDRESS` in `uc-cadr.lisp`), and Lisp's
-`%xbus-read` at the offset `17777400` + *w* from the frame buffer window's
-base, `1760000000` (`FEATURE-PAGE-XBUS-ADDRESS` in `sys/sys/ltop.lisp`).
-Each word answers in two microcycles ([the memory
-port](#the-memory-port-and-the-device-registers)).
+page, `35777777400`-`35777777777`, the last page of the device window
+(contracts Q2, Q13 and G2 §4.1; G3 revision 14, A14.1). Microcode 2002
+reaches word *w* at virtual `35777777400` + *w*, virtual equal to physical
+there (`QUUX-REGISTER-PAGE-VIRTUAL-ADDRESS` in `uc-cadr.lisp:65`), and
+Lisp's `%xbus-read` at the offset `17777400` + *w* from
+`IO-SPACE-VIRTUAL-ADDRESS`, `35760000000` (`FEATURE-PAGE-XBUS-ADDRESS` in
+`sys/sys/ltop.lisp`, `sys/cold/qcom.lisp`). A register access is never
+cached ([the memory port](#the-memory-port-and-the-device-registers)).
 
 | Words | Device | Words and bits |
 |---|---|---|
@@ -910,24 +747,23 @@ port](#the-memory-port-and-the-device-registers)).
 | 100-107 | the page's own words | 100: interrupt status, read only (below). 101: error status: `<0>` NXM is the only bit QUUX sets (`<3>` and `<5>`, the CADR's Unibus bits, read 0); a write of any value clears it. 102: mode, `<0>` error stop, read and written, which the host can set too. 103: the real-time clock, read only (below). 104: `RESET-DEVICES`, written, reads 0 (below). 105-107 reserved |
 | 110-117 | the interval timers | 110-115 ([the clocks](#the-clocks)); 116-117 reserved |
 | 120-137 | the keyboard and the mouse | 120-123 (below); 121 gives the key word in `<23:0>`, and `<31:24>` read 0. 124-137 reserved |
-| 140-157 | the network, the Chaosnet interface, to revision 15 | on revision 16 all reserved, and never reused. 140: the CSR, read and written. 141: my address when read, the write buffer when written. 142: the read buffer, read only; a read advances it. 143: the bit count, read only. 145: START, read only; a read starts a transmission. Writes of 142, 143 and 145 are ignored. 144, 146, 147 and 150-157 reserved |
+| 140-157 | the network | all reserved, and never reused: QUUX has no Chaosnet interface ([the network](#the-network)) |
 | 160-177 | the file device | 160-171 (below); 172-177 reserved |
 | 200-207 | block-disk | 200: status when read, command when written. 201: the last memory address when read, the command list pointer when written. 202: the disk address, read and written. 203: START, written; reads 0. The bits are [block-disk's](#block-disk), the done interrupt's enable command `<11>`. 204-207 reserved |
 | 210-217 | the video controller | 210: mode, `<2>` black-on-white reads back, the other bits read 0 and a write of them is dropped. 211-217 reserved |
-| 220-237 | the memory system, revision 14 on | 220-227 ([revision 14](#revision-14-a-page-table-behind-a-tlb)); 230-237 reserved; on revision 13 all reserved |
-| 240-257 | the Ethernet device, revision 16 | 240-257 ([revision 16](#revision-16-the-ethernet-device)); below revision 16 reserved |
+| 220-237 | the memory system | 220-227 ([the page table and the TLB](#the-page-table-and-the-tlb)); 230-237 reserved |
+| 240-257 | the Ethernet device | 240-257 ([the Ethernet device](#the-ethernet-device)) |
 | 260-377 | none | reserved |
 
-**Reserved** means a read gives 0 and a write changes nothing. Everything
-past main memory's end below the frame buffer window, past the frame
-buffer's end in it, and between the window and the page is **nothing
-there**: an access fails at once, reads 0 and sets word 101 `<0>`. The
-CADR's device addresses, `17377000`-`17377777` where its display and disk
-registers are, and its Unibus window, are main memory's when there is that
-much of it, and nothing when there is not ([No Unibus](#no-unibus)). On the
-CADR the same words of its last page, `17777400`, are inside the Unibus
-window, Unibus `777000`-`777776`, where nothing answers: an access sets the
-Unibus NXM bit, `766044` `<3>`.
+**Reserved** means a read gives 0 and a write changes nothing. Everything past
+main memory's end, past the frame buffer's end in the device window, and
+between the buffer and the page is **nothing there**: an access fails at once,
+reads 0 and sets word 101 `<0>`. The CADR's device addresses,
+`17377000`-`17377777` where its display and disk registers are, and its Unibus
+window, are main memory's when there is that much of it, and nothing when
+there is not ([No Unibus](#no-unibus)). On the CADR the same words of its last
+page, `17777400`, are inside the Unibus window, Unibus `777000`-`777776`,
+where nothing answers: an access sets the Unibus NXM bit, `766044` `<3>`.
 
 **Word 100** says who interrupted, a bit each:
 
@@ -939,9 +775,9 @@ Unibus NXM bit, `766044` `<3>`.
 | `<3>` | block-disk | not active and command `<11>` | a command write with `<11>` clear, START, `RESET-DEVICES` |
 | `<4>` | the keyboard | a key word waiting and 120 `<8>` | reading 121 until the FIFO is empty; `<8>` off |
 | `<5>` | the mouse | 123 `<0>` and 123 `<8>` | reading 122; `<8>` off |
-| `<6>` | the network, to revision 15 | the Chaosnet interface's request, as the CADR's CSR gives it; never on revision 16 | as on the CADR, through 140-145; `RESET-DEVICES` |
+| `<6>` | reserved: the Chaosnet interface's, which QUUX does not have | never | --- |
 | `<7>` | the file device | 170 ≠ 171 and 160 `<8>` | writing 171 up to 170; `<8>` off; a disable; `RESET-DEVICES` |
-| `<8>` | the Ethernet device, revision 16 | 251 ≠ 252 and 240 `<8>` | writing 252 up to 251; `<8>` off; a disable; `RESET-DEVICES` |
+| `<8>` | the Ethernet device | 251 ≠ 252 and 240 `<8>` | writing 252 up to 251; `<8>` off; a disable; `RESET-DEVICES` |
 | `<31:9>` | reserved | never | --- |
 
 Each bit is a level, and their OR is the interrupt pending that jump
@@ -953,22 +789,24 @@ That is what a handler does for a bit it does not serve.
 **The page's convention** is for devices made for it: the enable in `<0>`
 and the interrupt enable in `<8>` of the control word. Devices moved onto it
 keep their own bits: block-disk the CADR disk controller's programming
-interface, the network the Chaosnet interface's. 160 `<8>` is taken only by
+interface. 160 `<8>` is taken only by
 a write that enables the file device or leaves it enabled.
 
 **How the flags clear**: a write of any value clears 101, 120 `<1>`, and 161
 `<2>` and `<3>` (the last two through any write of 160); a write with the bit
 set clears 110, 112 and 114 `<1>`; a read clears or consumes --- 121 pops,
-122 clears 123 `<0>`, 142 advances, 145 starts a transmission.
+122 clears 123 `<0>`.
 
 `tests/quux_registers.rs` holds every word of the page in one table, on the
-machine and through both engines' map: its class and its value at power-on;
+machine and through both engines' device window: its class and its value at power-on;
 a write of all ones to every reserved or read-only word leaving the
 machine's state byte for byte as it was; the words a read or a write of has
-an effect listed apart, each with the test that holds it; word 100's eight
+an effect listed apart, each with the test that holds it; word 100's
 sources, each alone reading its own bit, and each turned off by one write;
 and, on a QUUX of 2MW, every address of `17377000`-`17377777`, `17400000`
-and `17777377` failing at once on both engines.
+and `17777377` failing at once on both engines
+(`the_old_addresses_answer_nothing`,
+`both_engines_find_nothing_at_the_old_addresses`).
 
 **`RESET-DEVICES`** (contract Q11): a write of word 104 with
 `<0>` set resets every device, at the instant the write is taken. What the
@@ -979,13 +817,13 @@ file device had due by then runs first, as for a write of its word 160; then
 | The interval timers | every timer off, flag down, periodic, interrupt enable 0, period 0 |
 | The file device | disabled, status `<2>` and `<3>` cleared (below) |
 | Block-disk | command 0, its done interrupt's enable with it, and its errors cleared; not active at once, a transfer in flight ending there |
-| The network | the Chaosnet interface reset, its CSR's writable bits cleared |
+| The Ethernet device | disabled, status `<2>` and `<3>` cleared ([the Ethernet device](#the-ethernet-device)) |
 | The video controller | nothing to show: it has no vertical flag and no interrupt |
 | The keyboard and mouse | nothing: the FIFO, the counts and both interrupt enables are kept, since a warm boot's key word is read by the microcode's location 6 after the PROM, which writes word 104, has run |
 | The real-time clock, the microsecond clock, words 101 and 102 | nothing |
 
-Block-disk, the network, the video controller and the file device are reset
-as `PROG.UNIBUS.RESET` resets the CADR's boards (`Machine::bus_reset`).
+Block-disk, the video controller and the file device are reset as
+`PROG.UNIBUS.RESET` resets the CADR's boards (`Machine::bus_reset`).
 **On QUUX `INTERRUPT-CONTROL`'s `PROG.UNIBUS.RESET`, `<36>`, drives
 nothing**: the bit is written and read back through `LOCATION-COUNTER` as
 the CADR's `<28>` is, and resets no device; the CADR's still resets its
@@ -1043,11 +881,10 @@ its refusals and the start's report; `a_resume_has_the_checkpoint_s_rtc` in
 
 **QUUX reads and writes files on its host through a file device** (contract
 Q9; G1 §4.4, G2 §4.3): folders of the host served to the machine under one
-pathname host (`FILES` from System 2002, `HOST` in Systems 2000 and 2001),
-with commands and responses in two rings in main memory and the bytes moved
-by DMA. The registers carry control and the
-rings' indexes; nothing polls memory for an index. `src/file_device.rs` is
-muir's device.
+pathname host, `FILES`, with commands and responses in two rings in main
+memory and the bytes moved by DMA. The registers carry control and the rings'
+indexes; nothing polls memory for an index. `src/file_device.rs` is muir's
+device.
 
 | Word | | |
 |---|---|---|
@@ -1192,7 +1029,7 @@ leaves it, or loops, is ACC.
 **Mounts** (`--file-root`). `--file-root <folder>[,ro]` is the root `/`, a
 folder holding `sys/`, `site/` and `home/<user>/`, so that one path serves
 `/sys/...`, `/site/...` and `/home/lispm/...` under the band's pathname host,
-`FILES` from System 2002 and `HOST` in Systems 2000 and 2001. `--file-root
+`FILES`. `--file-root
 <name>=<folder>[,ro]`, once for each name, is the top-level directory
 `<name>`, over the default folder's entry of that name. A value is a named
 mount when the text before its first `=` is a valid component. DIRECTORY of
@@ -1229,14 +1066,18 @@ muir-fpga measures its path. At the due time, at the edge before the
 processor's next microcycle and on both engines, the device reads the entry
 and buffer A (and B for RENAME), does the host's operation, writes buffer B
 and the response, and moves 165 and 170; main memory having been written
-behind the processor, the whole memory cache is invalidated before the
-processor's next memory cycle, as after a disk transfer. Nothing completes within the producer write,
+behind the processor, the completion sweeps the cache, clearing every valid
+bit in the cache's words / 512 clocks, and every lookup waits for the sweep
+(`src/pipeline/port.rs`). Nothing completes within the producer write,
 and nothing in memory changes before 170 moves. Given the same host files a
 run is the same.
 
-**Coherence.** The device takes a new 164 only once the processor's write
-buffer is empty: on `rtl` the command's time counts from when main memory
-has done the last write the buffer took. `micro` has no write buffer.
+**Coherence.** The device takes a new 164 only once every earlier write is
+answered: on `rtl` the command's time counts from when the port has answered
+the last posted write, so that a command whose entry is still in the posted
+writes is read whole
+(`the_file_device_reads_its_entry_whole_and_the_sweep_shows_its_response` in
+`tests/revision_15_rtl.rs`). `micro` posts no writes.
 
 **A checkpoint is refused** while a handle is open or a command is queued,
 saying which: a host file and a command's host effect are outside the
@@ -1253,7 +1094,7 @@ the write landing whole with its temporary file never listed, the date, the
 mounts, a read-only mount unchanged, names, symlinks, LOG, the checkpoint's
 refusal and its round trip --- and both engines running a program that
 writes the command and its producer index and reads the answer, `rtl`'s
-cache invalidated and its write buffer waited for.
+cache swept and its posted writes waited for.
 `the_file_root_is_quux_s` in `tests/cli.rs` holds the flag. **Not produced
 by a test:** NMR, DAT, and a WRITE past 2^32 - 1.
 
@@ -1289,8 +1130,8 @@ physical pages 37000 and up, is no window on QUUX: in QUUX's 28-bit space
 those are main memory's addresses when there is that much of it, and
 nothing when there is not, where a read or a write fails as any empty
 address does, at once, the NXM bit set in word 101, and changes nothing.
-With it go, on QUUX, the I/O board (its keyboard, mouse, clocks and
-Chaosnet interface now QUUX's own, contracts Q1-Q4; its serial port and
+With it go, on QUUX, the I/O board (its keyboard, mouse and clocks now
+QUUX's own, contracts Q1-Q3; its Chaosnet interface, serial port and
 general-purpose register dropped), the bus interface's Unibus side (the
 adapter, the Unibus map, its buffers, WRITE-THROUGH, the interrupt control
 and error status at `766040`-`766044`, the Unibus interrupt), the
@@ -1309,39 +1150,26 @@ Unibus interrupt not reaching QUUX, and the CADR's Unibus unchanged;
 
 ## The network
 
-**QUUX's Chaosnet interface is on the register page** (contract Q4), off the
-I/O board: its registers keep their order and their bits, word 140 + k being
-the CADR's Unibus `764140` + 2k --- 140 the CSR, 141 my address (read) and
-the write buffer (written), 142 the read buffer, 143 the bit count, 145
-START --- sixteen bits each in the bottom of the word, and its interrupt is
-word 100's `<6>`. Only these five are decoded: 144, 146 and 147 are
-reserved, where the CADR's board answers the CSR at `764150` and the bit
-count at `764156`, and writes of 142, 143 and 145 are ignored, where the
-board takes one of `764152` as the write buffer's. muir's cable is the same:
-CHUDP to `ozd`, `--chaos-address`, `--chaos-udp-peer`. An Ethernet interface
-behind the same device is a later contract. `tests/quux_network.rs` holds
-each decoded word to its Unibus register, the reserved words and the ignored
-writes, and a STATUS request sent and answered through the page.
-
-**Revision 16 has no Chaosnet interface** (QUUX's Ethernet contract, §8
-R4): 140-157 are reserved, as 240-257 are on revision 15, and are never
-reused; nothing sets word 100 `<6>`; the I/O board has no interface to
-plug, and its checkpoint carries none. `quux` refuses the five Chaosnet
-flags on it by name, and its start has no chaosnet line. Revisions 13 to
-15 keep theirs as released. `tests/quux_network.rs` holds 13-15's words
-and `<6>` to what they were and 16's to reserved, and
-`tests/ethernet_socket.rs` the flags.
+**QUUX has no Chaosnet interface** (QUUX's Ethernet contract, §8 R4): the
+register page's words 140-157 are reserved, read 0, ignore writes and are
+never reused; nothing sets word 100 `<6>`; the I/O board has no interface to
+plug, and QUUX's checkpoint carries none. `quux` refuses the five Chaosnet
+flags by name, and its start has no chaosnet line. The CADR's interface is on
+its Unibus ([the Chaosnet](chaosnet.md)). `tests/quux_network.rs` holds
+words 140-157 reserved (`words_140_to_157_are_reserved`) and word 100 `<6>`
+never set (`nothing_sets_word_100_bit_6`), and `tests/ethernet_socket.rs` the
+flags.
 
 ## The fused return
 
 **QUUX can run the next macroinstruction's handler straight from a
-return to the main loop** (contract H8a). Microcode 2001's main loop,
+return to the main loop** (contract H8a). Microcode 2002's main loop,
 `QMLP` in `uc-macrocode.lisp:9-13`, is four microinstructions: a call on
 condition 6, `M-INST-BUFFER <- MD`, `(DISPATCH-XCT-NEXT M-INST-OP OPDTB)`,
 and the push of `A-MAIN-DISPATCH` back as that dispatch's XCT-NEXT. A
 return that pops `A-MAIN-DISPATCH` --- `<14>` and `QMLP` --- when no
 instruction fetch is needed goes to `QMLP+2`, the stream hardware's
-`SPCMUNG` stepping it over the first two (`uc-macrocode.lisp:6-7`): the
+`SPCMUNG` stepping it over the first two (`uc-macrocode.lisp:5-6`): the
 dispatch and the push are two microcycles every such macroinstruction
 spends there.
 
@@ -1373,62 +1201,26 @@ the pop's `NEXT INSTR` steps it in the microcycle after. The step, and a
 fetch it starts, are the stream's as ever. Condition 6 is not tested, as
 the main loop does not test it on this path.
 
-It is today's return, `QMLP` or `QMLP+2`, whenever a fetch is needed and
-the prefetch (below) does not hold the word, the entry has R or P, the
-word is another main loop's (`DMLP`'s), the register is disabled, or the
-popping microinstruction pushes, pops by functional source 14, writes M 31
-or INTERRUPT-CONTROL, follows a `NEXT INSTR` the microcycle before
-(`src/micro.rs:882`, `src/pipeline/exec.rs:256`), or is a dispatch with
-`IR<24>` that pops by its entry's R (`advance`, `src/micro.rs:2433`,
-`src/pipeline/exec.rs:726`). A dispatch with `IR<24>` whose entry has R and
+It is today's return, `QMLP` or `QMLP+2`, whenever a fetch is needed (D,
+[below](#the-64-bit-microinstruction), takes the fetched word), the entry
+has R or P, the word is another main loop's (`DMLP`'s), the register is
+disabled, or the popping microinstruction pushes, pops by functional source
+14, writes M 31 or INTERRUPT-CONTROL, follows a `NEXT INSTR` the microcycle
+before (`src/micro.rs:870`, `src/pipeline/exec.rs:251`), or is a dispatch
+with `IR<24>` that pops by its entry's R (`advance`, `src/micro.rs:2401`,
+`src/pipeline/exec.rs:709`). A dispatch with `IR<24>` whose entry has R and
 P both set, so that its own POPJ pops, still fuses: `dispatch()` steps the
-location counter first (`src/micro.rs:2416`, `src/pipeline/exec.rs:711`),
-the return is decided after (`src/micro.rs:2980`, `src/pipeline/exec.rs:868`),
+location counter first (`src/micro.rs:2384`, `src/pipeline/exec.rs:695`),
+the return is decided after (`src/micro.rs:2942`, `src/pipeline/exec.rs:843`),
 and the index is taken from the counter as the step leaves it, the halfword
 `QMLP+2` would dispatch.
 
-**The prefetch** (`src/memory_port.rs`, contract H8a §3.5, G2 §9). A
-return that needs a fetch fuses too when the next word is already in hand.
-When a macroinstruction fetch's read is answered from main memory at
-physical word *p*, the memory port takes the word at *p* + 1 into a
-one-word buffer, with its virtual and physical addresses, if it is in the
-line the fetch has just read or filled, whose eight words the cache puts
-out of its RAMs together, or in the next line when the cache holds it, a
-lookup of its own on a second read port of the cache: the page's reach.
-It never looks past the 1024-word page. Taking the word needs no memory
-cycle, no map lookup and no arbitration, and it cannot fault. A return
-that needs a fetch fuses on the buffered word when that is the next word
-in sequence (`LC<29:2>`), condition 6 is false, and no store started in
-the microcycle before; with condition 6 true it runs `QMLP` as today,
-since the main loop tests condition 6 on this path. Such a return saves
-four microcycles, `QMLP` to `QMLP+3`, and the stream's fetch of the word
-starts as ever. M 31 is a register beside M memory, which reads of A and
-M address 31 take: it is loaded with the buffered word at the end of the
-microcycle after the return, as the operand address is, so that
-microcycle reads the old word, as on the path the return skips, and the
-handler the new one. The buffer is dropped by a write of the location
-counter, a store to its word, a transfer by block-disk or the file
-device, a map write, and -RESET. A checkpoint keeps the buffered word, a
-fetch the port is yet to answer, and M 31's word armed.
-
-Only `rtl` has the prefetch: it looks in the cache, and `micro` has none.
-`micro` fuses only the returns that need no fetch, and `rtl` those and the
-ones its prefetch holds the word for, so the two engines take different
-microcycles; they leave the same state wherever the microcode keeps the
-rule below, and the tests that compare them count each engine's fused
-returns. The page's reach was measured at 8-word lines on the profile
-harness's workloads at 1.67% less time than the line's alone on the Arty
-Z7-20's memory timing and 1.13% on the DE25-Nano's. The profile harness's
-`MUIR_PREFETCH=line` takes the line's reach alone, the next word only in
-the fetched word's line, and `MUIR_PREFETCH=off` takes the prefetch out,
-for measurement.
-
 **The operand address.** When the entry has the operand bit and the
 halfword's register, `<8:6>`, is LOCAL (5) or ARG (6) (`QADCM1`,
-`uc-macrocode.lisp:138-145`), PDL-INDEX is loaded at the end of the
+`uc-macrocode.lisp:138-147`), PDL-INDEX is loaded at the end of the
 microcycle after the return with `A-LOCALP` + delta or `M-AP` + 1 +
 delta, as `QADLOC1` and `QADARG1` compute them
-(`uc-macrocode.lisp:245-253`): delta is the halfword's `<5:0>`, taken from
+(`uc-macrocode.lisp:249-257`): delta is the halfword's `<5:0>`, taken from
 M 31 rotated, at `<39:34>`, and the sum is masked to PDL-INDEX's bits. The
 handler's first microinstruction finds its operand at
 `C-PDL-BUFFER-INDEX`. The bases are copies the machine keeps, fourteen
@@ -1456,12 +1248,12 @@ word before that write, where today's path has the main loop's dispatch
 and push in between. The machine does not check these rules;
 `tests/support/macro_dispatch.rs` does, over a run.
 
-**Microcode 2001 fills the memory itself.** At every start of the
+**Microcode 2002 fills the memory itself.** At every start of the
 microcode, a cold or warm boot through the PROM and a `%DISK-RESTORE`, and
-before its first main-loop return, `RESET-MACHINE` reads feature word 17
+before its first main-loop return, `RESET-DEVICES` reads feature word 17
 and, where it is not 0, writes every entry with `OPDTB`'s entry for its
 opcode, the operand bit clear; then the register with `QMLP`,
-`A-LOCALP`'s and `M-AP`'s addresses and the enable; then `A-LOCALP` and
+`A-LOCALP`'s and `M-AP`'s addresses, the enable and D's enable, `<30>`; then `A-LOCALP` and
 `M-AP` with their own values, which loads the base copies; and then, over
 the generic entries, 36 entries for handlers of its own
 (`RESET-MACHINE-MACRO-DISPATCH-FILL` in `uc-cold-disk.lisp`). A
@@ -1480,11 +1272,7 @@ Where a `POPJ-AFTER-NEXT`'s next microinstruction would make a write the
 rule forbids, the write is made before the return, by the popping
 microinstruction or the one before it with a no-op after the return, as
 the stores into a local or an argument, `QSTLOC` and `QSTARG`, do
-(`uc-macrocode.lisp:358-381`, the comment above `QSTLOC`). System 2001 boots with returns fused and
-every one of them checked against the rule, with its own fill and with
-every entry the generic handler and the operand bit on every halfword
-whose `<8:0>` is a register and a delta, the checkers finding nothing
-(`tests/system_2001.rs`).
+(`uc-macrocode.lisp:363-381`, the comment above `QSTLOC`).
 
 -RESET clears the enable and nothing else, and every control-store write
 clears it too, wherever it lands: the entries name control-store
@@ -1497,9 +1285,8 @@ register, the index, the entries and the base copies.
 `QMLP` is: the destinations' decode, on QUUX and not on the CADR; the same
 state with the MACRO DISPATCH MEMORY holding the generic handlers as
 without it, two microcycles fewer for each fused return that needs no
-fetch and, on `rtl`, four fewer for each on the fetch path, returns by a
-POPJ, a dispatch with R and, as the switch says, a jump with R fused and
-N honoured; the entry taken by the whole `<15:6>`; each case above that is
+fetch, returns by a POPJ, a dispatch with R and, as the switch says, a jump
+with R fused and N honoured; the entry taken by the whole `<15:6>`; each case above that is
 not fused running today's path microcycle for microcycle; the operand
 address for LOCAL and ARG at the handler's first microinstruction and not
 before, masked, from bases written by the popping microinstruction itself,
@@ -1513,128 +1300,102 @@ generic fill's operand bit only on halfwords whose `<8:0>` is a register
 and a delta (of ND4, `PUSH-CDR-IF-CAR-EQUAL` and
 `PUSH-CDR-STORE-CAR-IF-CONS`, and not `PUSH-NUMBER`, whose `<8:0>` is an
 immediate); the enable cleared by -RESET and by a control-store write, the
-base copies kept; and the checkpoint. On `rtl` it holds the prefetch: QUUX
-fitting it with the page's reach and the CADR not at all; a return on the
-fetch path fused on the buffered word, with the same state and no memory
-cycle of its own, and M 31 main memory's word after it; the microcycle
-after reading the old M 31; condition 6 refusing the word; a store, a map
-write, a transfer and a write of the location counter dropping it, and a
-word that should have been dropped found by the checkers; the page's reach
-taking the next line's word and never the next page's, where the line's
-reach takes neither; -RESET dropping it; and `rtl` saved at every
-microcycle of a run and loaded into another running on to the same end.
+base copies kept; and the checkpoint.
 `the_fused_return_takes_the_halfword_in_the_ring_of_40` in
 `tests/revision_13.rs` holds the index and the operand's delta in the ring
-of 40. `tests/system_2001.rs` holds System 2001 booting on both engines
-with the register written as above and 36 specialised entries, returns
-fused, operand addresses loaded, the rules kept after every fused return,
-the main loop's handler run next, the operand address right, the base
-copies equal to their memory after every microcycle and, on `rtl`, M 31
-main memory's word after every return fused on the prefetched word; the
-same with the generic fill and the operand bit; a stale MACRO DISPATCH
-MEMORY filled again; and, after a `%DISK-RESTORE`, the register enabled
-again and returns fused again.
+of 40.
 
 ## Its microcode
 
-**Microcode 2001 is QUUX's**, muir-sys's change to MIT's 323 for the
-40-bit word (contract G2 §6). At boot, at `RESET-MACHINE`, it reads
-functional source 16, and without QUUX's signature and a revision of 13 or
-more it halts at `MACHINE-NOT-QUUX-13` (`uc-cold-disk.lisp`): a CADR reads
-all ones there. On QUUX the type is the word's bits 3:0, 4. It checks at
-boot that block 0's level-1 entry reads back as the invalid entry the map's
-width promises, and stops at `MAP-WIDTH-MISMATCH` if it does not.
-`A-VERSION`, A memory's word 40, is 2001, its `.mcr` has a dispatch memory
-of 4,096 entries and A memory as section 5
-(`band_2001_is_system_2001_on_microcode_2001` in `tests/system_2001.rs`),
-and the band reaches its listener on it with 2001 in `A-VERSION`
-(`system_2001_boots_on_both_engines`).
+**Microcode 2002 is QUUX's**, muir-sys's change to MIT's 323 for the 40-bit
+word (contract G2 §6) and the 64-bit microinstruction. At boot, at
+`RESET-DEVICES`, it reads functional source 16, and without QUUX's
+signature and a hardware revision of 14 or more it halts at
+`MACHINE-NOT-QUUX-14` (`uc-cold-disk.lisp`): a CADR reads all ones there. On
+QUUX the type is the word's bits 3:0, 4. The band reaches its TELNET server
+on it, and the herald says Microcode 2002 (`tests/system_2002.rs`).
 
 ## The checkpoint
 
-**A checkpoint of QUUX is a 40-bit machine's, version 55**, revision
-15's version 56 and revision 16's version 58, which say the width: every word 5 bytes, `<7:0>` first and the tag last, so that main
-memory in it is packed storage byte for byte (contract G2 appendix A1.13);
-the dispatch memory of 4,096 entries, the map's 8,192 and 4,096 entries,
-the overflow flag, and the rest. A checkpoint of the CADR is version 54,
-every word 4 bytes. QUUX refuses a checkpoint of 32-bit words, the CADR's
+**A checkpoint of QUUX is a 40-bit machine's, version 58**, which says its
+revision in the byte where the CADR keeps its level-1 entry's width: `0o220`,
+16 with `<7>` set, a value no width takes (`REVISION_16_MARK`,
+`src/machine.rs`). Every word is 5 bytes, `<7:0>` first and the tag last, so
+that main memory in it is packed storage byte for byte (contract G2 appendix
+A1.13); the dispatch memory of 4,096 entries, the overflow flag, the location
+counter's `<33:32>`, the memory system's words and the redirect's two copies
+(`a_checkpoint_keeps_the_34_bit_counter_and_the_words`), the control store's
+64 bits and the OA registers, word 225 and the OA select check's shadow, the
+Ethernet device's state, 253-257 with it, and no Chaosnet interface on the I/O
+board (`src/checkpoint.rs`). The TLB is not kept: a resume starts with it
+swept. A checkpoint of the CADR is version 54, every word 4 bytes. QUUX
+refuses a checkpoint of 32-bit words, the CADR's
 (`a_32_bit_checkpoint_is_refused_on_revision_13` in
 `tests/revision_13_memory.rs`), and `quux` refuses one `cadr` wrote at the
-start, naming the executable. QUUX revision 12, the 32-bit QUUX before
-revision 13, wrote the CADR's version too. Its checkpoint records its machine, as
-every 32-bit checkpoint does: a 6-bit level-1 map entry, multiply and
-divide, the tick and the fused return, where the CADR has a 5-bit entry
-and none of the three. Both executables refuse it by that record, naming
-revision 12 and saying it resumes only on an earlier muir-sim
-(`a_revision_12_checkpoint_is_refused_by_its_machine` in
-`tests/quux_revision.rs`); a CADR checkpoint keeps version 54's bytes and
+start, naming the executable; a CADR checkpoint keeps version 54's bytes and
 resumes (`a_cadr_checkpoint_keeps_version_54_s_bytes` in
-`tests/checkpoint.rs`). Versions 54 to 57 are 49, 50, 51 and 53 with the
-Chaosnet interface's pending state after it, which every machine then had
-(`docs/chaosnet.md`); 49, 50, 51 and 53 are refused. Version 58 is
-revision 16's without the interface, and 57, its version with it, is
-refused.
+`tests/checkpoint.rs`).
 
-## The `.mcr` at 40 bits
+The versions read are 54, the CADR's, and 58, QUUX's. A checkpoint of an
+earlier QUUX hardware revision is refused as that revision's, by the machine
+its body records, and not by its version alone: revisions 13 and 14 wrote
+version 55 and revision 15 version 56, and `quux` and `cadr` both refuse
+them, saying that this build does not run revision N and naming muir-sim's
+tag `quux-revisions-13-15`, where it resumes
+(`an_earlier_revision_s_checkpoint_is_refused_naming_it_and_the_tag` in
+`tests/quux_revision.rs`). The 32-bit QUUX of revisions 11 and 12 wrote the
+CADR's format version, and records its machine as every 32-bit checkpoint
+does: a 6-bit level-1 map entry, multiply and divide, the tick and, on 12,
+the fused return, where the CADR has a 5-bit entry and none of the three;
+both executables refuse it by that record, saying it resumes only on an
+earlier muir-sim (`src/machine.rs`, `Machine::load`). Versions 49, 50, 51
+and 53, the formats of 54, 55, 56 and 57 before the Chaosnet
+interface's pending state was kept after them (`docs/chaosnet.md`), are
+refused by version, and so are 52, QUUX's before it had 253-257, and 57, its
+version with the Chaosnet interface.
 
-**QUUX's `.mcr`** has a dispatch memory section of `10000` entries and A
-memory as section 5, each location two 32-bit words, `<31:0>` and then
-`<39:32>` in `<7:0>` (contract G2 appendix A1.4, A1.12); muir's parser
-reads both, in partition order as in MIT's
-(`the_mcr_reads_4096_dmem_entries_and_a_40_bit_a_memory` in
-`tests/revision_13_memory.rs`).
+## System 2002
 
-## System 2001
-
-**System 2001**, muir-sys's first 40-bit band, boots on QUUX
-(`tests/system_2001.rs`, which skips without QUUX's release, muir-sys's
-`release-2001`, that `tools/fetch-system-for-quux.sh` fetches into the
-gitignored `vendor/system-2001`): System 2001's
-release disk, a GPT disk of 853,359 blocks in a dynamic VHD, with
-microcode 2001 in its current `MCR1`, the band in its current `LOD1` and
-a `PAGE` partition of 655,360 blocks, 128MW. At 2MW of main memory it
-reaches its listener on both engines, and at 32MW too; it draws its
-listener at the video controller's words a line at 1280 by 1024 and 1024
-by 768, and at 1920 by 1080, 60 words a line, on both engines
-(`system_2001_sizes_its_screen_at_boot`); `(si:disk-restore 1)` reads
-`LOD1` back through block-disk and boots it to the listener again; the
-PROM writes words 104 and 111 before the disk, and at the listener timer
-0 is on, periodic, under its interrupt enable, with `INTR-TICK` run 600
-times in 10 s of the machine's time; through the file device it writes
-its herald, whose Machine Type line names the board from feature words
-20-24, "QUUX on muir-sim", and whose memory line says "2048K physical
-memory, 131072K virtual memory", 2MW and 128MW; it reads a form and
-writes what it is, `(3 2001 "QUUX" "Experimental System 2001, microcode
-2001")`, and `most-positive-fixnum`, 2147483647; and microcode 2001 fills
-the MACRO DISPATCH MEMORY with 36 specialised entries and boots with
-returns fused under the checkers of `tests/support/macro_dispatch.rs`,
-with its own fill and with the generic one, finding nothing, and fills a
-stale memory again.
+**System 2002**, muir-sys's band for QUUX, boots on it (`tests/system_2002.rs`,
+which skips without muir-sys's hand-over, the pre-release
+`handover-2002-2999694` that `tools/fetch-handover-2002.sh` fetches into the
+gitignored `ref/band-2002-2999694`): microcode 2002 in the current `MCR1` and
+the band in the current `LOD1` of a GPT disk in a dynamic VHD, on `quux`'s
+built-in PROM 2002. Run as `quux` with the disk, the sources as the file
+device's root and `--ethernet-socket`, both of the hand-over's disks, the
+band's and the high band's, boot on both engines to the band's TELNET
+server: a connection to port 23 at the default address is answered with the
+herald, System 2002 on microcode 2002 on "QUUX on muir-sim" with the
+associated machine `FILES`, and "Telnet server here". One of the runs of the
+high band, on `micro`, gives the hand-over's PROM 2002 with `--prom`. PROM
+2002 is the hand-over's `promh.mcr` and the sources' `sys/ubin/promh.mcr`,
+byte for byte (`prom_2002_is_the_hand_over_s`).
 
 ## Main memory
 
 **Main memory is 32MW by default**, the boards' (contract G2 §3), and
 `--main-memory-size` gives it in whole megawords, 1MW to 64MW (G1 §3.2;
 `tests/quux_main_memory.rs`). At 32MW muir holds 256 MiB for it, 8 bytes a
-word. A checkpoint's body is 168,204,521 bytes, main memory 5 bytes a
-word; the file packs runs of zeros, and is 248 bytes of an empty memory
-and 167,772,410 of one full of other words. Writing that full checkpoint
-on `micro` peaked at 757 MB of host memory.
+word. A checkpoint's body holds main memory 5 bytes a word, and the file
+packs runs of zeros.
 
-## Revision 14: a page table behind a TLB
+## The page table and the TLB
 
-muir has QUUX revision 14 beside revision 13 (contract G3 revision 14 and
-its appendix A14): `Geometry::QUUX_14` in the library, which `quux` runs
-when `MUIR_QUUX_REVISION` is `14`; unset or `13`, it runs revision 13, and
-any other value is refused at the start. It is
-revision 13's 40-bit machine with a 32-bit virtual address space, two
-untranslated windows, a page table in memory walked by hardware behind a
-TLB in place of the two map levels, a 34-bit location counter, and jump
-condition 12. What follows is what muir's revision 14 does and which tests
-hold it (`tests/revision_14.rs`, every program on `micro` and `rtl`);
-everything it does not mention is revision 13's. No boot PROM or microcode
-for it exists yet: `quux` loads PROM 2001 on it, which expects revision
-13's map, so a run boots no system.
+**A frame is a page-sized slot of physical memory, and a page is a page of
+virtual memory.** "Frame" (page frame) is what MIT's CADR code calls a
+"physical page": the `PHYSICAL-PAGE-DATA` region has a word for each one
+(muir-sys `sys/sys/qmisc.lisp:40-42`), and a page entry's "physical page
+(frame) number" is its `vma-phys-page-addr-part`
+(`sys/ucadr/uc-page-fault.lisp:237`). "Page" alone is virtual. MIT's symbols
+keep their names. The frame buffer is the video controller's memory, not a
+frame in this sense.
+
+**QUUX's virtual addresses are 32 bits** (contract G3 revision 14 and its
+appendix A14): two untranslated windows, a page table in memory walked by
+hardware behind a TLB in place of the CADR's two map levels, a 34-bit
+location counter, and jump condition 12 ([the 40-bit word](#the-40-bit-word)).
+What follows is what muir does and which tests hold it
+(`tests/revision_14.rs`, every program on `micro` and `rtl`).
 
 **The address space**, by `VA<31:28>`, the decode `VA<31:29>` = `111` for
 the windows and `VA<28>` between them; `VA<39:32>` is never looked at:
@@ -1648,8 +1409,8 @@ the windows and `VA<28>` between them; `VA<39:32>` is never looked at:
 In the device window, frame buffer 0 from its base holds the field, a write
 dropping the tag and a read giving `005`; A memory's window,
 `35700000000`-`35700001777`, faults on every reference; the register page
-is at `35777777400`, with revision 13's offsets; the rest is reserved and
-nothing there, reading 0 and setting word 101 `<0>`
+is at `35777777400` ([the register page](#the-register-page)); the rest is
+reserved and nothing there, reading 0 and setting word 101 `<0>`
 (`the_device_window_and_its_register_page`,
 `nothing_there_past_main_memory_and_in_the_reserved_slices`,
 `a_memory_s_window_faults_with_status_7`). A window address never consults
@@ -1674,7 +1435,7 @@ never faults and reads memory by physical address, a word past main memory
 reading 0 (`no_entry_faults_and_loads_nothing`,
 `a_walk_with_no_directory_reads_nothing`,
 `a_not_in_core_entry_faults_and_map_md_reads_it_without_a_walk`). Faults
-are the entry's access code, `<27>` read and `<26>` write, as revision 13's.
+are the entry's access code, `<27>` read and `<26>` write.
 **The PDL buffer redirect** (A14.7) takes a read or write start through
 a TLB entry of status 5 whose access code faults it; one written directly
 with access `11`, the microcode's fiddle, does not fault and goes to memory
@@ -1682,20 +1443,16 @@ with access `11`, the microcode's fiddle, does not fault and goes to memory
 pointer, n = (PP − head + 1) AND 37777 and off = (`VA<31:0>` − base) mod
 2^32, unsigned; when off ≤ n, the word one past PP admitted as PGF-R-PDL
 admits it, the reference is inside the buffer: a read's word is the
-buffer's at (head + off) AND 37777, and a write's word, `MD` of the
-microcycle after the start (on revision 15 its start's own, below), goes
-there, with no memory cycle, no
-write-back and no setter. Otherwise it goes to memory as if its access
+buffer's at (head + off) AND 37777, and a write's word, `MD` as its start's
+own microcycle leaves it, goes there, with no memory cycle, no write-back
+and no setter. Otherwise it goes to memory as if its access
 code were `11`, with its write-backs (`the_redirect_takes_the_buffer_up_to_the_word_past_pp`,
 `the_redirect_across_2_31_words`). The base and the head are copies of A
 memory's 430 and 431, A-PDL-BUFFER-VIRTUAL-ADDRESS and A-PDL-BUFFER-HEAD,
 taken in A memory's write pulse, so a start in the microcycle after a write
 of A 431 uses the new head
-(`a_start_right_after_a_write_of_a_431_uses_the_new_head`). On `rtl` a
-reference inside holds the microcycle after its start one microcycle, the
-port using the PDL buffer's, and a read's word is in `MD` from the
-microcycle after that (`a_redirect_inside_holds_one_microcycle_on_rtl`);
-`micro` holds nothing. `MAP(MD)` of a status-5 page reads the entry as it
+(`a_start_right_after_a_write_of_a_431_uses_the_new_head`). `MAP(MD)` of a
+status-5 page reads the entry as it
 is held. A port-B lookup that misses fills the one TLB too, so a `MAP(MD)`
 or a pointer-typed map-bit dispatch on a page sharing the fiddle's index
 evicts the fiddle, and the next write to the status-5 page walks, takes the
@@ -1722,65 +1479,46 @@ counts one. The write is an OR, so the table keeps its own bits where a TLB
 entry written directly differs from it (`accessed_is_set_by_the_first_reference_that_does_not_fault`,
 `modified_is_set_by_the_first_write_and_the_table_keeps_its_bits`,
 `the_guard_refuses_a_write_through_a_stale_entry`,
-`the_setter_marks_a_store_of_an_ephemeral_pointer`). On `rtl` the
-write-back's reads go through the cache, after a TLB hit too, unless port
-A's walk in the same microcycle has just made them for this reference, and
-its write through the write buffer, and the reference's cycle waits behind
-it: at K = 4 a write through a TLB hit that writes modified back is
-acknowledged 330 ns after its grant with both table lines in the cache, 60
-ns when the guard refuses (`a_write_back_holds_the_reference_on_rtl`,
-`a_write_back_after_a_tlb_hit_reads_the_tables_again_on_rtl`); on `micro` a
-read's write-back is made at its start and a write's as it goes out, with
-the word it writes.
+`the_setter_marks_a_store_of_an_ephemeral_pointer`). On `micro` a read's
+write-back is made at its start and a write's as it goes out, with the word
+it writes. On `rtl`, the pipeline, a start's walk and its write-back are
+holds of WB ahead of the port's grant (`src/pipeline/mod.rs`), and the
+table reads they make go through the port and the cache like any read
+(`src/pipeline/port.rs`).
 
-**The TLB** is direct-mapped, `--tlb <entries>` of them, a power of two from
-1,024 to 32,768, 4,096 by default, on both engines (`quux` refuses `--tlb`
-below revision 14). The index is `VA<9+k:10>` and the tag `VA<31:10+k>`, k
-being log2 of the entries, and its contents are modelled: two pages that
+**The TLB** is direct-mapped, 4,096 entries, on both engines; the start says
+it. The index is `VA<21:10>` and the tag `VA<31:22>`, and its contents are
+modelled: two pages that
 share an index evict each other, and an entry changed in memory keeps
 translating to the old frame until it is invalidated
 (`two_pages_sharing_an_index_translate_to_their_own_frames`,
 `pages_either_side_of_2_31_translate_to_their_own_frames`,
 `a_stale_entry_is_kept_until_it_is_invalidated`). A store to `WRITE-MAP`
-is an operation, landing in the microcycle after it as revision 13's map
-write does: `VMA<33:32>` 1 a direct write of `VMA<29:0>` at `MD`'s index
-and tag, 2 an invalidation at `MD`'s index whatever its tag, 3 an empty;
-0, revision 13's map-write word, and any operation at a window address do
-nothing (`a_direct_write_loads_and_an_empty_clears`). An empty, and
-`-RESET`, sweep the TLB: at once on `micro`, and on `rtl` in one tick of 10
-ns an entry, a memory start or a `MAP(MD)` or map-bit dispatch lookup
-waiting for the sweep's end (`an_empty_takes_n_ticks_on_rtl`). On `rtl` a
-walk holds the processor, in whole microcycles, while its reads go through
-the cache, a hit in the cache's hit time and a miss a line fill when main
-memory is free. A walk's read is taken at the later of the instant it is
-asked and the acknowledgement of the processor's cycle the memory port has
-granted and not yet acknowledged, if any, which follows that cycle's
-write-back: the cache serves one lookup at a time, so a walk never reads
-beside the processor's lookup or meets a line fill in flight
-(`w1_a_walk_read_waits_for_a_fill_in_flight_on_another_line_on_rtl`,
-`w2_a_walk_read_of_a_line_being_filled_waits_for_the_fill_on_rtl`,
-`w3_a_walk_read_waits_for_a_read_hit_in_flight_on_rtl`,
-`w4_a_walk_read_waits_for_a_cycle_behind_its_write_back_on_rtl`,
-`w5_a_walk_with_no_cycle_in_flight_holds_its_two_hits_on_rtl`). A
-write-back's own reads of the tables belong to its cycle, made before the
-cycle is requested, and wait for no cycle in flight. A port
-looks an address up once a microcycle, and port B again when `MD` changes
-while the microcycle waits, as when a dispatch on `MD` waits for a read:
-a miss then walks, counted, filled and timed as any other
+is an operation, landing in the microcycle after it: `VMA<33:32>` 1 a
+direct write of `VMA<29:0>` at `MD`'s index and tag, 2 an invalidation at
+`MD`'s index whatever its tag, 3 an empty; 0, the CADR's map-write word,
+and any operation at a window address do nothing
+(`a_direct_write_loads_and_an_empty_clears`). An empty, and `-RESET`, sweep
+the TLB: at once on `micro`, and on `rtl` one entry a clock, a memory start
+or a `MAP(MD)` or map-bit dispatch lookup waiting for the sweep's end
+(`an_empty_sweeps_the_tlb_one_entry_a_clock` in `tests/revision_15_rtl.rs`).
+A port looks an address up once a microcycle, and port B again when `MD`
+changes while the microcycle waits, as when a dispatch on `MD` waits for a
+read: a miss then walks, counted, filled and timed as any other
 (`a_port_b_lookup_walks_for_the_md_that_lands_during_its_wait`). As a test
 aid only, `Tlb::small_for_tests` builds a TLB of any power of two down to 1
-entry, where every fill evicts, which `--tlb` does not take
+entry, where every fill evicts
 (`a_1_entry_tlb_runs_e1_s_control_and_evicts_on_every_fill`). The profile
 harness's `tlb:` line counts, as the model's figures and not the
-hardware's, the directly written entries a fill replaced before their
-invalidation, by port and by the replaced entry's status, and the
-microcycles in which port A and port B both missed at one index, on `micro`
-port A's miss at a start paired with port B's in the next instruction, the
-microcycle in which `rtl` walks both
-(`a_double_miss_at_one_index_and_a_port_a_eviction_are_counted`); and on
-`rtl`, also the model's, the walks whose first read waited for a cycle in
-flight, by port, with the time they waited, and the port-B walks made
-while the microcycle waits for `MD`, on the `MD` it waits to replace.
+hardware's, the walks, the sweeps, the write-backs and the redirects, the
+directly written entries a fill replaced before their invalidation, by port
+and by the replaced entry's status, and the microcycles in which port A and
+port B both missed at one index, on `micro` port A's miss at a start paired
+with port B's in the next instruction
+(`a_double_miss_at_one_index_and_a_port_a_eviction_are_counted`); a second
+line counts the walks that waited for a cycle in flight, by port, with the
+time they waited, and the port-B walks made while the microcycle waits for
+`MD` (`examples/profile.rs`).
 
 **`MAP(MD)`** reads `<39:32>` 0, the fault bits `<31:30>` of the last memory
 cycle's entry as before, and `<29:0>` the entry for `MD`'s address, looked
@@ -1803,9 +1541,6 @@ sum shifted. The stepper counts over all 34 bits, and a fetch takes
 `qlenx_s_shifted_write_takes_the_sum_s_carry`,
 `the_stepper_carries_and_a_fetch_reads_lc_33_2`).
 
-**Jump condition 12** is M ≤ A on the fields, unsigned
-(`condition_12_is_m_at_most_a_unsigned`).
-
 **The register page** gains the memory system's words, 220-227: 220 the
 directory base, 221 `<0>` the ephemeral-reference enable, 222 and 223 the
 pointer-type register, types 0-31 and 32-63, all read and written; 224 a
@@ -1813,43 +1548,27 @@ count of the write-backs the guard refused, which a write clears; 225-227
 reserved.
 `-RESET` clears them, `RESET-DEVICES` does not
 (`the_memory_system_words_read_back_and_set_the_directory`). The feature
-page says revision 14 in word 0, 0 in word 1 (no level-1 map), the TLB's
-entries in word 2, and the buffer's device-window address, `34000000000`,
-in word 13.
+page says 0 in word 1 (no level-1 map), the TLB's entries in word 2, and
+the buffer's device-window address, `34000000000`, in word 13.
 
-**The checkpoint** of revision 14 is version 55, as revision 13's, and says
-its revision by its geometry: no level-1 map. After revision 13's fields it
-keeps the location counter's `<33:32>`, the memory system's words and the
-redirect's two copies; the
-TLB is not kept, and a resume starts with it swept, timed on `rtl` as a
-reset's sweep (`a_checkpoint_keeps_the_34_bit_counter_and_the_words`).
-`quux` refuses a checkpoint of revision 13 on revision 14 and the reverse,
-naming the revision that wrote it (`tests/quux_revision.rs`).
+**The `.mcr`'s section 6** (A14.13) names the hardware revision of the
+microinstruction: code 6, start 0, count 1, then one 32-bit word, and it is
+the file's first section, in microcode and boot PROM alike. QUUX loads files
+whose section 6 says 15; a file whose section 6 says another revision is
+refused, saying "section 6 says hardware revision N, and QUUX loads files
+whose section 6 says 15", and so is microcode without one. `quux --prom`
+holds a boot PROM to the same rules, except that a PROM without section 6 is
+not refused for it (`Mcr::check_revision` in `src/mcr.rs`). The CADR reads
+no section 6 and refuses a file that has one.
 
-**The `.mcr`'s section 6** (A14.13) is revision 14's: code 6, start 0,
-count 1, then one 32-bit word, the hardware revision, 14, and it is the
-file's first section, in microcode and boot PROM alike. The reader refuses
-it anywhere else, or of another shape. A file with section 6 is refused
-below revision 14, where PROM 2001 reads no section 6 and halts at
-`ERROR-BAD-SECTION-TYPE`, and on revision 14 unless its word is 14;
-microcode without section 6, revision 13's, is refused on revision 14, as
-PROM 2002 refuses such a partition. `quux --prom` holds a boot PROM to the
-same rules, except that a PROM without section 6 is still taken on
-revision 14 (`Mcr::check_revision` in `src/mcr.rs`;
-`tests/revision_14.rs`).
+## The 64-bit microinstruction
 
-## Revision 15: the 64-bit microinstruction
-
-muir has QUUX revision 15 beside revisions 13 and 14 (contract G3 revision
-15 and its appendix A15b): `Geometry::QUUX_15` in the library, which `quux`
-runs when `MUIR_QUUX_REVISION` is `15`. It runs on `micro`, the
-specification, and on `rtl`, which on revision 15 is its four-stage
-pipeline ([below](#rtl-is-the-pipeline)). No boot PROM for it is built in,
-PROM 2001 being MIT's sections, which revision 15 does not read, so a run
-names one with `--prom`; a resume takes the checkpoint's. It is revision
-14's machine with what follows; everything it does not mention is revision
-14's. What holds it is `tests/revision_15.rs` and, for `rtl`,
-`tests/revision_15_rtl.rs`, on hand-built programs and files.
+QUUX's microinstruction is 64 bits (contract G3 revision 15 and its appendix
+A15b). It runs on `micro`, the specification, and on `rtl`, which on QUUX is
+its four-stage pipeline ([below](#rtl-is-the-pipeline)). Its boot PROM, PROM
+2002, is built in; a resume takes the checkpoint's. What holds it is
+`tests/revision_15.rs` and, for `rtl`, `tests/revision_15_rtl.rs`, on
+hand-built programs and files.
 
 **The microinstruction is 64 bits**: MIT's 48 in `IR<47:0>`, meaning what
 they mean on every other machine, and the extension in `IR<63:48>`, read by
@@ -1877,7 +1596,7 @@ OA-REG-LOW, 26 bits in `IR<25:0>`'s positions, and OA-REG-HIGH, 22 bits in
 `IR<47:26>`'s, at the end of the word, writing M as every functional
 destination does; each keeps its word until the next write, `-RESET`
 clears both, and no source reads them. Nothing ORs them into the next word,
-as IMOD does on the CADR and revisions 13 and 14: a word reads one only
+as IMOD does on the CADR: a word reads one only
 through its OA select, SL `IR<60>` for OA-REG-LOW and SH `IR<61>` for
 OA-REG-HIGH (`an_oa_write_leaves_a_word_without_a_select_alone`,
 `a_select_takes_a_value_written_three_words_before`,
@@ -1918,8 +1637,7 @@ resume between a write and its select runs on as the run would have
 (`a_halt_and_a_checkpoint_between_a_write_and_its_select_resume`).
 
 **D, the dispatch from the fetched word** (A15b.9; the D-timing ruling).
-The MACRO-DISPATCH register keeps `<30>` on revision 15, D's enable, with
-`<31>`. A return that [the fused return](#the-fused-return) would fuse but
+The MACRO-DISPATCH register keeps `<30>`, D's enable, with `<31>`. A return that [the fused return](#the-fused-return) would fuse but
 for a needed fetch goes to the main loop, `QMLP`, as today, and where both
 enables are set, the popped word is the main loop's and condition 6's
 interrupt and sequence break are false, D's wait begins at the return. The
@@ -1947,10 +1665,10 @@ handler at that clock's end, nothing of D's effects showing before
 (`d_s_effects_wait_for_its_word`): a return taken by D to its handler's
 commit is 7 clocks on a hit (`d_s_slot_does_not_wait_in_rd`). A halt
 once the slot has entered EX drains through D's decision; one that squashes
-the slot keeps D's wait and fetches the slot again. With `<30>` clear
-revision 15 runs as revision 14, microcycle for microcycle
+the slot keeps D's wait and fetches the slot again. With `<30>` clear D is
+held off, microcycle for microcycle
 (`d_dispatches_a_return_that_needs_a_fetch`,
-`d_s_enable_clear_is_revision_14_microcycle_for_microcycle`,
+`d_s_enable_clear_is_d_held_off_microcycle_for_microcycle`,
 `condition_6_a_faulting_fetch_and_p_go_to_the_main_loop`,
 `m31_and_the_operand_address_after_d_are_a_fused_return_s`). A fused
 return's operand address over a base the word before it writes clears RD's
@@ -1974,8 +1692,8 @@ writes, and holds the producer index's write until its port is empty.
 not the word right after the start. A write to a device register goes out
 at the edge ending the microcycle after its start, as the single-edge
 contract has every cycle go out, so that word's conditions see the
-interrupt as it stood before the write; on revision 15 `micro` sends a
-register write out then, sooner only when a start in that microcycle or a
+interrupt as it stood before the write; `micro` sends a register write out
+then, sooner only when a start in that microcycle or a
 halt sends it, and keeps its shortcut, the end of the start's own
 microcycle, for main memory alone. The register takes the start's word
 whenever it goes out (`a_register_write_carries_its_start_s_md`). A write of block-disk's command with
@@ -1989,14 +1707,10 @@ Under neutral time the device sees the write at its start's instant
 
 **`WRITE-I-MEM`** writes `IWR<63:32>` from `A<31:0>` and `IWR<31:0>` from
 `M<31:0>`: a word with `<63:48>` set is written whole, and a tag left in
-`A<39:32>` reaches no bit of it, where revisions 13 and 14 take `A<15:0>`
+`A<39:32>` reaches no bit of it, where the CADR takes `A<15:0>`
 (`write_i_mem_writes_64_bits_and_no_tag`).
 
-**The feature page** says revision 15 in word 0, `0x515500f4`, and in word
-25 the microcycle, the clock's period, in units of 0.5 ns: 20 at the
-default 10 ns, and what `--microcycle-ns` sets on either engine
-(`feature_words_0_and_25_say_revision_15_and_its_period`,
-`word_25_reads_the_period_on_rtl`). Register-page word 225 counts the
+**Register-page word 225** counts the
 posted writes answered with an error; a write clears it, and so does
 `-RESET`, as word 224. `micro` posts no writes, so it reads 0 there unless
 a count is planted (`word_225_reads_the_errors_and_a_write_clears_it`);
@@ -2023,77 +1737,39 @@ microcode's control store at or past 36000, a PROM's not starting at 36000
 or past its 2000 words; sections running past the file's end, a non-zero
 word after the last section, and a length that is not a whole number of
 blocks (`every_mcr_refusal_on_a_planted_file`, against
-`a_revision_15_mcr_reads_whole`). **The format names the revision**: a
-revision-15 file is refused on revisions 13 and 14, and MIT's sections on
-revision 15, the refusal naming the format and the revision the file is
-for (`each_format_is_refused_on_the_other_s_revisions`); a revision-15
-file whose section 6 says another revision is refused as on revision 14.
-The symbol area is refused when its start or extent passes the largest
+`a_revision_15_mcr_reads_whole`). **The format is one machine's**: a QUUX
+file is refused on the CADR, which reads MIT's sections, and MIT's sections
+on QUUX, the refusal naming the format word the file lacks
+(`each_format_is_refused_on_the_other_machine`); a QUUX file whose section 6
+says a revision other than 15 is refused
+(`quux_loads_an_mcr_whose_section_6_says_15_and_refuses_others` in
+`tests/quux_ethernet.rs`). The symbol area is refused when its start or extent passes the largest
 main memory, 64MW, and `Mcr::check_main_memory` holds it to a machine's own
 (`the_symbol_area_lies_in_main_memory`).
-
-**The checkpoint** of revision 15 is version 56, a 40-bit machine's as
-revision 14's version 55. It says its revision in the byte where revision
-13 keeps its level-1 entry's width and revision 14 a 0: `0o217`, 15 with
-`<7>` set, a value no width takes. It keeps the control store's 64 bits
-and the OA registers, in IMOD's registers' place, with no pending flag;
-after revision 14's fields, word 225 and the check's shadow
-(`a_checkpoint_records_revision_15_and_keeps_64_bits`). The pipeline's
-state in it holds no pending OA flag either; a revision-15 file of version
-55, which holds revision 14's two IMOD flags after the OA registers, still
-loads, and is written again as version 56
-(`a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_55_one_loads`).
-`quux` refuses a checkpoint of revision 13 or 14 on revision 15 and the
-reverse, naming the revision that wrote it
-(`revision_15_and_the_others_refuse_each_other_s_checkpoints`).
 
 **The console** reads `IR<63:48>` at spy register 3, `SPY-IR-EXT`, after
 `IR<15:0>`, `<31:16>` and `<47:32>` at 0 to 2, and write strobe 6, with
 its alias 14, loads the debug IR's `<63:48>`, `-LDDBIRX`; a console writes
 all four halves. On the
-CADR and revisions 13 and 14 register 3 reads open and strobe 6 loads
-nothing
-(`spy_register_3_and_write_strobe_6_are_ir_s_extension_on_revision_15`).
+CADR register 3 reads open and strobe 6 loads nothing
+(`spy_register_3_and_write_strobe_6_are_ir_s_extension_on_quux`).
 The debug IR's word, all 64 bits, runs in place of the word at PC when a
 step is made with `IDEBUG` up, on `micro` and on the pipeline alike
 (`the_pipeline_runs_the_debug_ir_s_64_bits_as_micro_does`).
 
 ### `rtl` is the pipeline
 
-On revision 15 `rtl` is `muir::pipeline::Pipeline` (contract G3 revision
-15, §5, §6, §9, §12.1; A15b.2-A15b.6, A15b.13), four stages of one clock
-each. CS reads the control store and, at its end, the word's A memory and
-PDL buffer operands; RD reads M, keeps speculative copies of the micro
-stack's top and pointer, LC, the PDL pointer and index, and chooses the
-next address; EX runs the microcycle as `micro` does and checks RD's
-choices; WB writes A, M and the PDL buffer and grants the word's memory
-starts. Programs at random, the main loop's paths, D and the fused return
-end as on `micro` microcycle for microcycle
-(`random_programs_end_as_on_micro`, `the_main_loop_s_paths_end_as_on_micro`,
+On QUUX `rtl` is `muir::pipeline::Pipeline` (contract G3 revision 15, §5, §6,
+§9, §12.1; A15b.2-A15b.6, A15b.13), four stages of one clock each. Time is
+[QUUX's clock](#quuxs-clock). CS reads the control store and, at its end, the
+word's A memory and PDL buffer operands; RD reads M, keeps speculative copies
+of the micro stack's top and pointer, LC, the PDL pointer and index, and
+chooses the next address; EX runs the microcycle as `micro` does and checks
+RD's choices; WB writes A, M and the PDL buffer and grants the word's memory
+starts. Programs at random, the main loop's paths, D and the fused return end
+as on `micro` microcycle for microcycle (`random_programs_end_as_on_micro`,
+`the_main_loop_s_paths_end_as_on_micro`,
 `d_and_the_fused_return_end_as_on_micro`).
-
-**Time** is in units of 0.5 ns on revision 15, `Machine::ns` counting them.
-The period is `--microcycle-ns`, 5 to 63.5 ns in steps of 0.5, 10 by
-default; the Kria KR260's revision 15 fit closes at 19 ns; `--sync-cycle-ticks` is refused. A device's
-duration is turned to clocks once, rounded up, and a timer keeps true time
-over a second at every period
-(`a_command_s_time_is_rounded_to_clocks_once`,
-`a_1_us_timer_rises_at_clock_1649_the_14th_time`,
-`the_accumulators_keep_true_time_over_a_second`). The network is one of
-those devices (MP2b ruling Q19): the Chaosnet interface and its cable count
-in the same units, the turn timer acting at the first clock at or after each
-edge and the delays the interface starts ending ⌈2d/P⌉ clocks after their
-start, so that at 8.5 ns a frame looped back is delivered at the clock the
-rule gives (`a_frame_s_delivery_at_8_5_ns_lands_at_the_rule_s_clock` and
-four more in `tests/quux_network.rs`; `docs/chaosnet.md` has the
-rule's instants). The reports say the machine's time and the period in
-ns, with ".5" where an instant is odd (MP2b ruling Q1): the prompt's `pc`
-and `step` lines, the resume line, and `--pace`'s line; and the run's
-report measures it against the hardware at the period
-(`the_prompt_s_pc_on_revision_15_prints_an_odd_instant_s_half`,
-`a_resume_on_revision_15_prints_an_odd_instant_s_half`,
-`pace_on_revision_15_says_its_period`,
-`the_run_s_report_on_revision_15_is_against_the_period`).
 
 **Transfers.** Jumps, calls, POPJ and the fused return resolve in RD; a
 conditional jump is predicted by its hint and a dispatch by its predicted
@@ -2162,7 +1838,7 @@ check (a proposed name;
 `the_write_i_mem_check_halts_outside_mit_s_form_and_in_a_slot`). **A
 write carries `MD` as its start's own microcycle leaves it**, whatever the
 word after it loads, the single-edge rule's "the `MD` of the microcycle
-after its start" left on revision 15 (the MD-after-write ruling, contract
+after its start" left by QUUX (the MD-after-write ruling, contract
 amendment 10): the pipeline's start takes its word at EX's commit and
 carries it to the port's queue, the register's write or the PDL buffer, and
 `micro` takes it at the end of that microcycle; a halt anywhere then writes
@@ -2333,7 +2009,7 @@ with the register's, for a microcode that does not
 (`MacroDispatch::d`, `d_s_switch_keeps_or_clears_d_s_enable`); held off,
 the main-loop machines whose microcode sets D's enable run as those whose
 microcode leaves it clear (`d_held_off_runs_the_main_loop_machines_as_d_off`). The
-pipeline's fused returns use no prefetched word either way. At every 65,536th step of LC the pipeline
+fused returns that need no fetch are the same either way. At every 65,536th step of LC the pipeline
 halts after the word that stepped it, the word in EX not yet run squashed
 with RD's and CS's, and drains (`Pipeline::boundary_at`); a digest of
 `Machine::cycles`, the step count, the registers, A, M, the PDL buffer, the
@@ -2347,9 +2023,9 @@ missing d3 bypass, a stack copy not restored, a squashed start and a nopped
 slot counted twice each change a digest
 (`the_harness_digests_the_pipeline_as_micro_at_every_boundary`). The
 profile's log opens with the run's configuration: the engine, the machine,
-the band, the PROM, the period, the memory timing, the cache, the prefetch
-(none on the pipeline, whose fused returns use no prefetched word) and the
-harness's switch; and, on the pipeline, closes with the starts made right
+the band, the PROM, the microcode, main memory, the period, the memory
+timing, the cache, `MUIR_H8A`, D, whether time is neutral and the RTC; and,
+on the pipeline, closes with the starts made right
 after a start, by the two starts' kinds, and the write channel's writes,
 two-beat writes and accepts delayed by a second beat.
 
@@ -2358,7 +2034,9 @@ two-beat writes and accepts delayed by a second beat.
 **The profile** (A15b.8) is the file the micro-assembler's profile pass
 reads to set each conditional jump's hint, `IR<48>`, and each dispatch's
 predicted entry, `IR<63:48>` (A15b.2). `examples/profile.rs` makes it on
-the pipeline with `MUIR_PROFILE_OUT=<file>`: the pipeline records, from the
+the pipeline with `MUIR_PROFILE_OUT=<file>`, booting QUUX's band `MUIR_BAND`
+names, its files on the file device under the pathname host `FILES`, with no
+Chaosnet server: the pipeline records, from the
 first workload's typing to the last workload's end, what every predicted
 site did (`Pipeline::outcomes`), and `muir::pipeline::profile` writes one
 record a site with the majority outcome. `MUIR_PROFILE_MICROCODE` names the
@@ -2424,39 +2102,16 @@ The coverage comments give, for each class, the sites in the control store
 the run loaded and those executed, which the file keys, and the share of
 their executions whose outcome is the one the record predicts.
 
-## Revision 16: the Ethernet device
+## The Ethernet device
 
-muir has QUUX revision 16 beside revisions 13 to 15 (QUUX's Ethernet
-contract, §2 and §10): `Geometry::QUUX_16` in the library, which `quux` runs
-when `MUIR_QUUX_REVISION` is `16`. It is revision 15 with the Ethernet
-device, `muir::ethernet_device`; everything this section does not mention
-is revision 15's, but for the Chaosnet interface, which it does not have:
-its 140-157 are reserved and word 100 `<6>` is never set
-([the network](#the-network)). MACHINE-ID
-says 16, feature word 15 reads 7, its `<2>` the device, and word 100 `<8>`
-is its interrupt. It loads revision 15's `.mcr` files, whose section 6
-says 15, the microinstruction's revision, and refuses any other, so one
-microcode runs on 15 and 16
-(`revision_16_loads_a_revision_15_mcr_and_refuses_others`); no boot PROM
-for it is built in. A checkpoint of it is version 58,
-the device's state and 253-257 after revision 15's, with no Chaosnet
-interface on its I/O board, and revisions 15 and 16 refuse
-each other's. What holds it is `tests/quux_ethernet.rs` and, for the
-posted writes and the cache, the last tests of `tests/revision_15_rtl.rs`.
-
-**System 2002** runs on it (`tests/system_2002.rs`, which skips without
-muir-sys's hand-over, the pre-release `handover-2002-2999694` that
-`tools/fetch-handover-2002.sh` fetches into the gitignored
-`ref/band-2002-2999694`): microcode 2002 in the current `MCR1` and the band
-in the current `LOD1` of a GPT disk in a dynamic VHD, PROM 2002 given with
-`--prom`. Run as `quux` with `MUIR_QUUX_REVISION=16`, the disk, the sources
-as the file device's root and `--ethernet-socket`, both of the hand-over's
-disks, the band's and the high band's, boot on both engines to the band's
-TELNET server: a connection to port 23 at the default address is answered
-with the herald, System 2002 on microcode 2002 on "QUUX on muir-sim" with
-the associated machine `FILES`, and "Telnet server here". PROM 2002 is the
-hand-over's `promh.mcr` and the sources' `sys/ubin/promh.mcr`, byte for byte
-(`prom_2002_is_the_hand_over_s`).
+QUUX has an Ethernet device (QUUX's Ethernet contract, §2 and §10),
+`muir::ethernet_device`: the register page's words 240-257, word 100 `<8>`
+its interrupt, and feature word 15 `<2>` saying it is there. It has no
+Chaosnet interface: its 140-157 are reserved and word 100 `<6>` is never set
+([the network](#the-network)). A checkpoint of it carries the device's state
+and 253-257 ([the checkpoint](#the-checkpoint)). What holds it is
+`tests/quux_ethernet.rs` and, for the posted writes and the cache, the last
+tests of `tests/revision_15_rtl.rs`.
 
 **The registers**, words 240-257:
 
@@ -2486,7 +2141,7 @@ link's other end (QUUX's Ethernet contract, §3). There is always a
 gateway: on the address's subnet, and never 0.0.0.0 or QUUX's own
 address. No reset changes them, and a checkpoint carries them (below).
 Writes of the read-only words are ignored
-(`the_page_has_240_to_257_on_revision_16_and_reserves_them_on_15`).
+(`the_page_has_240_to_257`).
 
 **Configuration** is the file device's. 242, 243, 246 and 247 are written
 while disabled and ignored while enabled. The enable checks them: a base
@@ -2545,7 +2200,7 @@ side reads RX_CONS moved
 the entries filled once the cache is coherent, below. The driver
 keeps a buffer within one 1,024-word page: the device cannot see pages.
 
-**Coherence** follows revision 15's rules. On the pipeline a write of 244
+**Coherence** follows the pipeline's rules. On the pipeline a write of 244
 or 250 moves only once every earlier write is answered, as CMD_PROD's does
 (`a_transmit_entry_in_the_posted_writes_is_read_whole`,
 `a_receive_entry_in_the_posted_writes_is_taken_once_it_lands`). Before 251
@@ -2633,9 +2288,7 @@ resume under another `--ethernet-mac`, `--ip-address` or `--ip-gateway`,
 given or by default, is refused naming each flag that differs, as one
 under another `--rtc` is. A band's addresses are its tap's, so a
 checkpoint resumes only on the tap it was taken on
-(`a_resume_under_other_addresses_is_refused_by_the_flag_s_name`). Revision
-15's checkpoint has no device in it
-(`revision_15_s_checkpoint_has_no_ethernet_device`).
+(`a_resume_under_other_addresses_is_refused_by_the_flag_s_name`).
 
 ### The host side: `--ethernet-socket`
 
@@ -2681,7 +2334,7 @@ from the peer, to be delivered at its time; from muir, sent at its time.
   time are delivered in the order they came.
 - A "run until" a time already reached is answered at once with "reached"
   and the same time.
-- The machine's time on revision 16 is in units of 0.5 ns: a time muir
+- The machine's time is in units of 0.5 ns: a time muir
   sends is its own rounded down to the nanosecond, and one it reads is
   exact.
 
@@ -2716,8 +2369,8 @@ A socket muir cannot connect to stops the run before it starts. The setup
 names the MAC address and the socket and its mode. A run's socket, MAC
 address and trace are the run's, not a checkpoint's: a resume keeps them
 (`a_resumed_device_sends_and_receives_through_the_socket_by_its_mac_address`).
-The CADR and revisions below 16 refuse the three flags by name
-(`the_flags_are_refused_on_the_cadr_and_below_revision_16`).
+The CADR refuses the three flags by name
+(`the_flags_are_refused_on_the_cadr`).
 
 ## Not modeled
 
