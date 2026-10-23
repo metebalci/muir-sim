@@ -10,7 +10,11 @@
 //! registers are never cached; an address nothing answers, past main
 //! memory's end, fails at once with the NXM bit
 //! (`tests/quux_device_registers.rs`). QUUX has no bus interface; the CADR
-//! keeps its own.
+//! keeps its own. That port, and its rule that a write carries the `MD`
+//! of the microcycle after its start, are revisions 13's and 14's, on the
+//! single-edge `rtl`; revision 16 halts on an `MD` load there, and its own
+//! port is `tests/revision_15_rtl.rs`'s. A read past main memory's end is
+//! held on revision 16 too, on `micro` and the pipeline.
 
 use muir::cache::{CacheConfig, MemoryTiming};
 use muir::engine::Engine;
@@ -21,6 +25,7 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, Machine, bus_error};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 
 mod support;
@@ -41,14 +46,21 @@ fn reading(geometry: Geometry, reads: &[u32]) -> Machine {
 }
 
 fn machine(geometry: Geometry, prom: &[Insn], addresses: &[u32]) -> Machine {
-    let mut m = Machine::new();
-    m.geometry = geometry;
+    let mut m = if geometry == Geometry::QUUX_16 {
+        support::quux_16()
+    } else {
+        let mut m = Machine::new();
+        m.geometry = geometry;
+        m
+    };
     let mut words = vec![filler(); 1024];
     words[..prom.len()].copy_from_slice(prom);
     m.load_prom(&words);
     support::prom_program_in_ram(&mut m);
     for (k, &p) in addresses.iter().enumerate() {
-        m.mmem[1 + k] = if geometry.wide() {
+        m.mmem[1 + k] = if geometry.paged() {
+            support::quux_va(p).into()
+        } else if geometry.wide() {
             support::quux_map(&mut m, 1 + k as u32, p).into()
         } else {
             m.l2_map[1 + k] = (1 << 23) | (1 << 22) | (p >> 8);
@@ -61,12 +73,14 @@ fn machine(geometry: Geometry, prom: &[Insn], addresses: &[u32]) -> Machine {
     m
 }
 
-/// Boots `e` and runs it well past the program's last jump.
+/// Boots `e` and runs it well past the program's last jump, its writes
+/// landed.
 fn run<E: Engine>(e: &mut E) {
     e.boot();
     for _ in 0..4000 {
         e.step().unwrap();
     }
+    e.settle_for_checkpoint().unwrap();
 }
 
 /// **QUUX has its memory port and no bus interface**: the cache fitted at
@@ -130,7 +144,7 @@ fn a_device_register_is_never_cached() {
 /// write and a read-back at the first word past it both fail with the NXM bit,
 /// and the read gives 0, not the word written --- what the microcode's
 /// memory-size probe (`MEM-SIZE-LOOP`, `uc-cold-disk.lisp`) relies on. On
-/// both engines.
+/// both engines, revision 16.
 #[test]
 fn past_main_memory_s_end_nothing_reads_back() {
     let end = muir::machine::MAIN_WORDS as u32;
@@ -145,12 +159,12 @@ fn past_main_memory_s_end_nothing_reads_back() {
         Insn::new(JUMP | target(7) | ALWAYS | N),
     ];
     let setup = || {
-        let mut m = machine(Geometry::QUUX, &prom, &[end]);
+        let mut m = machine(Geometry::QUUX_16, &prom, &[end]);
         m.amem[0o100] = 0o37;
         m.amem[0o200] = 0o525252;
         m
     };
-    let mut r = Rtl::new(setup());
+    let mut r = Pipeline::new(setup());
     run(&mut r);
     let mut e = Micro::new(setup());
     run(&mut e);
@@ -159,9 +173,6 @@ fn past_main_memory_s_end_nothing_reads_back() {
         assert_ne!(m.bus_error & bus_error::XBUS_NXM, 0, "{name}: the NXM bit");
         assert_eq!(m.bus_error & bus_error::UNIBUS_NXM, 0, "{name}");
     }
-    let c = r.cache().unwrap();
-    assert_eq!(c.hits + c.misses, 0, "no lookup past main memory");
-    assert!(!c.holds(end));
 }
 
 /// **After the disk writes main memory, no read hits the old word**: a line

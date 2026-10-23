@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! QUUX without the Unibus (contract Q5). The CADR's Unibus window, its
-//! physical pages 37000 up, is no window on QUUX: in QUUX's 28-bit space
-//! (contract G2 §4.1) those are main memory's addresses when there is that
-//! much of it, and on a machine of 2MW, as here, past its end, where a read
+//! physical pages 37000 up, is no window on QUUX: those are main memory's
+//! bus addresses when there is that much of it (contract G3 revision 14,
+//! A14.1), and on a machine of 2MW, as here, past its end, where a read
 //! or a write fails as any empty address does, the Xbus NXM bit set, and
 //! changes nothing. The I/O board's registers, the bus interface's, the
 //! Unibus map's and the diagnostic registers are all there; the Unibus
 //! interrupt does not reach QUUX's processor; and the debug cable, a Unibus
 //! master, is refused. QUUX's own devices are on the register page at
-//! `1777777400` (contracts Q2-Q4, Q13). The CADR keeps all of it.
+//! `35777777400` (contracts Q2-Q4, Q13). The CADR keeps all of it.
 
 use muir::busint::{interrupt_status, unibus_physical};
 use muir::machine::{Geometry, Machine, bus_error};
@@ -18,9 +18,14 @@ use muir::machine::{Geometry, Machine, bus_error};
 mod support;
 
 fn quux() -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
-    m
+    support::quux_16()
+}
+
+/// The machine's whole state, as a checkpoint has it.
+fn state(m: &Machine) -> Vec<u8> {
+    let mut w = muir::checkpoint::Writer::new();
+    m.save(&mut w);
+    w.finish()
 }
 
 /// The Unibus registers QUUX's software once used, and the rest of the
@@ -35,12 +40,12 @@ const WINDOW: [u32; 12] = [
 
 /// **Every Unibus address is nothing on QUUX**: a read times out with the
 /// Xbus NXM bit, not the Unibus one, and reads 0; a write times out and
-/// changes nothing --- the mode register, the interrupt control and the
-/// Chaosnet interface's CSR as they were.
+/// changes nothing --- the mode register and the interrupt control as they
+/// were, and the whole machine but the error bits.
 #[test]
 fn every_unibus_address_is_nothing_on_quux() {
     let mut m = quux();
-    let csr_before = m.bus_read(muir::machine::REGISTER_PAGE_13 | 0o140);
+    let before = state(&m);
     for u in WINDOW {
         let p = unibus_physical(u);
         m.bus_error = 0;
@@ -53,22 +58,18 @@ fn every_unibus_address_is_nothing_on_quux() {
     assert!(!m.mode.errstop && !m.mode.prom_disable, "766012 wrote nothing");
     assert_eq!(m.interrupt_status & interrupt_status::ENABLE_UB_INTS, 0, "766040 wrote nothing");
     m.bus_error = 0;
-    assert_eq!(
-        m.bus_read(muir::machine::REGISTER_PAGE_13 | 0o140),
-        csr_before,
-        "764140 wrote nothing to the Chaosnet CSR"
-    );
+    assert!(state(&m) == before, "the writes changed the machine");
 }
 
-/// **The space's last page is the register page, and the CADR's last
-/// page is not**: word 0 at `1777777400` is the MACHINE-ID with no NXM; the
-/// word below it, past the frame buffer window's end, fails, and so does
+/// **The device window's last page is the register page, and the CADR's
+/// last page is not**: word 0 at `35777777400` is the MACHINE-ID with no
+/// NXM; the word below it, past the frame buffer's end, fails, and so does
 /// `17777400`, the CADR's last page, past the end of 2MW.
 #[test]
 fn the_space_s_last_page_is_the_register_page() {
     let mut m = quux();
-    let page = muir::machine::REGISTER_PAGE_13;
-    assert_eq!(m.bus_read(page), Geometry::QUUX.machine_id.unwrap().into());
+    let page = support::PAGE_16;
+    assert_eq!(m.bus_read(page), Geometry::QUUX_16.machine_id.unwrap().into());
     assert_eq!(m.bus_error, 0, "the page answers");
     for nothing in [page - 1, 0o17777400] {
         m.bus_error = 0;
@@ -94,9 +95,8 @@ fn the_cadr_keeps_its_unibus() {
 #[test]
 fn the_unibus_interrupt_does_not_reach_quux() {
     use muir::ioboard::{self, csr};
-    for (geometry, want) in [(Geometry::CADR, true), (Geometry::QUUX, false)] {
-        let mut m = Machine::new();
-        m.geometry = geometry;
+    for (geometry, want) in [(Geometry::CADR, true), (Geometry::QUUX_16, false)] {
+        let mut m = Machine::with_geometry(geometry, 32);
         m.interrupt_status |= interrupt_status::ENABLE_UB_INTS;
         m.ioboard.write(ioboard::CSR, csr::CLOCK_INT_ENABLE, 0);
         m.ioboard.write(ioboard::CLOCK, 1, 0);
@@ -114,7 +114,7 @@ fn both_engines_time_out_on_the_unibus_window() {
     use muir::isa::Insn;
     use muir::isa::asm::{ALU, SETM, SRC_MD, START_READ, a_dest, filler, m_src};
     use muir::micro::Micro;
-    use muir::rtl::Rtl;
+    use muir::pipeline::Pipeline;
     let mut prom = Vec::new();
     for k in 0..2u64 {
         prom.push(Insn::new(ALU | SETM | m_src(1 + k) | START_READ));
@@ -127,13 +127,9 @@ fn both_engines_time_out_on_the_unibus_window() {
         words[..prom.len()].copy_from_slice(&prom);
         m.load_prom(&words);
         support::prom_program_in_ram(&mut m);
-        // Virtual pages 1 and 2 of 1024 words on the frames that hold
-        // the two addresses (contract G2 §2.6).
-        let rw = (1 << 27) | (1 << 26);
+        // The two addresses through the physical memory window.
         for (k, u) in [0o764120u32, 0o764140].into_iter().enumerate() {
-            let p = unibus_physical(u);
-            m.l2_map[1 + k] = rw | (p >> 10);
-            m.mmem[1 + k] = u64::from(((1 + k as u32) << 10) | (p & 0o1777));
+            m.mmem[1 + k] = u64::from(support::quux_va(unibus_physical(u)));
         }
         m.amem[0o200] = 0o525252;
         m.amem[0o201] = 0o525252;
@@ -141,7 +137,7 @@ fn both_engines_time_out_on_the_unibus_window() {
     };
     let mut e = Micro::new(machine());
     e.boot();
-    let mut r = Rtl::new(machine());
+    let mut r = Pipeline::new(machine());
     r.boot();
     for _ in 0..400 {
         e.step().unwrap();

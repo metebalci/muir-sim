@@ -19,9 +19,28 @@ use muir::checkpoint::{Reader, Writer};
 use muir::engine::Engine;
 use muir::machine::{Geometry, Machine};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 use muir::spy;
-use support::{Run, cadr, executable, scratch, text};
+use support::{Run, cadr, scratch, text};
+
+/// The executable for `exe`, `cadr` or `quux` on revision 16.
+fn executable(exe: &str) -> std::process::Command {
+    match exe {
+        "quux" => support::quux_on_16(),
+        _ => support::executable(exe),
+    }
+}
+
+/// [`executable`] for a run from the PROM: on QUUX a PROM of its own whose
+/// loop keeps the PC moving, as revision 16 has no PROM built in.
+fn starting(exe: &str, dir: &Path) -> std::process::Command {
+    let mut c = executable(exe);
+    if exe == "quux" {
+        c.arg("--prom").arg(support::loop_prom_16(dir));
+    }
+    c
+}
 
 /// Where a checkpoint's machine stands: its PC, its microcycles, and
 /// whether `RUN` is set.
@@ -45,12 +64,13 @@ impl<E: Engine> Halting for E {
     /// The console stops the machine as a board's checkpoint tool does,
     /// `RUN` cleared through the clock control register (CC's
     /// `CC-STOP-MACH`, `SPY-WRITE SPY-CLK 0`), and the master clock run on
-    /// a few edges so that `SRUN` has followed it.
+    /// a few edges so that `SRUN` has followed it, the pipeline drained.
     fn halt(&mut self) -> Stands {
         self.spy_write(spy::CLK, 0);
         for _ in 0..8 {
             self.step().unwrap();
         }
+        self.settle_for_checkpoint().unwrap();
         let f = spy::Flag1::of(self.spy_read(spy::FLAG_1));
         assert!(!f.srun, "SRUN has followed RUN down");
         stands(self)
@@ -82,6 +102,13 @@ fn halted_copy(from: &Path, to: &Path) -> Stands {
             e.save(&mut w);
             at
         }
+        "rtl" if m.geometry.paged() => {
+            let mut e = Pipeline::new(m);
+            e.load(&mut c.reader()).unwrap();
+            let at = e.halt();
+            e.save(&mut w);
+            at
+        }
         "rtl" => {
             let mut e = Rtl::new(m);
             e.load(&mut c.reader()).unwrap();
@@ -92,7 +119,8 @@ fn halted_copy(from: &Path, to: &Path) -> Stands {
         other => panic!("{other} is no engine this test halts"),
     };
     assert!(!at.run, "the copy is halted");
-    muir::checkpoint::write(to, &c.engine, c.memory_boards, c.word_bits, &w.finish()).unwrap();
+    muir::checkpoint::write_version(to, &c.engine, c.memory_boards, c.version, &w.finish())
+        .unwrap();
     at
 }
 
@@ -107,6 +135,11 @@ fn stands_in(path: &Path) -> Stands {
             e.load(&mut r).unwrap();
             stands(&e)
         }
+        "rtl" if m.geometry.paged() => {
+            let mut e = Pipeline::new(m);
+            e.load(&mut r).unwrap();
+            stands(&e)
+        }
         "rtl" => {
             let mut e = Rtl::new(m);
             e.load(&mut r).unwrap();
@@ -114,6 +147,11 @@ fn stands_in(path: &Path) -> Stands {
         }
         other => panic!("{other} is no engine this test reads"),
     }
+}
+
+/// Whether `exe`'s `engine` is the pipeline: QUUX's `rtl`.
+fn pipeline(exe: &str, engine: &str) -> bool {
+    exe == "quux" && engine == "--rtl"
 }
 
 /// Every machine and engine that resumes a `micro` or `rtl` checkpoint.
@@ -125,7 +163,7 @@ const RUNS: [(&str, &str); 4] =
 fn a_halted_checkpoint(dir: &Path, exe: &str, engine: &str) -> (std::path::PathBuf, Stands) {
     let ran = dir.join(format!("{exe}{engine}-ran.chk"));
     let out =
-        executable(exe).args([engine, "--stop-after", "3000", "--checkpoint"]).arg(&ran).run();
+        starting(exe, dir).args([engine, "--stop-after", "3000", "--checkpoint"]).arg(&ran).run();
     assert!(out.status.success(), "{exe} {engine}:\n{}", text(&out));
     let halted = dir.join(format!("{exe}{engine}-halted.chk"));
     let at = halted_copy(&ran, &halted);
@@ -160,10 +198,11 @@ fn continue_runs_a_halted_checkpoint_on() {
         let now = stands_in(&after);
         assert!(now.run, "{exe} {engine}: RUN is set: {now:?}");
         // All but the first master clock edge of the step, which takes
-        // `RUN` into `SRUN` and runs no microcycle.
+        // `RUN` into `SRUN` and runs no microcycle; the pipeline counts
+        // its own, a drained checkpoint's microcycle among them.
+        let want = if pipeline(exe, engine) { at.cycles + 1001 } else { at.cycles + 999 };
         assert_eq!(
-            now.cycles,
-            at.cycles + 999,
+            now.cycles, want,
             "{exe} {engine}: the microcycles carry on from {at:?}: {now:?}\n{t}"
         );
         assert_ne!(now.pc, at.pc, "{exe} {engine}: the PC moved from {at:?}: {now:?}");
@@ -190,8 +229,10 @@ fn the_continue_flag_runs_a_halted_checkpoint_at_once() {
         assert!(t.contains("continue: RUN set"), "{exe} {engine}: the start says so:\n{t}");
         let now = stands_in(&after);
         assert!(now.run, "{exe} {engine}: {now:?}");
-        // Every one but the edge that takes `RUN` into `SRUN`.
-        assert_eq!(now.cycles, at.cycles + 1999, "{exe} {engine}: from {at:?}: {now:?}\n{t}");
+        // Every one but the edge that takes `RUN` into `SRUN`; on the
+        // pipeline its own count, as above.
+        let want = if pipeline(exe, engine) { at.cycles + 2001 } else { at.cycles + 1999 };
+        assert_eq!(now.cycles, want, "{exe} {engine}: from {at:?}: {now:?}\n{t}");
         assert_ne!(now.pc, at.pc, "{exe} {engine}: the PC moved from {at:?}: {now:?}");
         // And it is where the machine that was never halted is at the same
         // microcycle: the halt and the continue cost master clock edges

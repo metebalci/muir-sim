@@ -4,9 +4,9 @@
 //! **The word width as a parameter of the engines** (contract G2 §8.1):
 //! `micro`, `rtl`, the machine, main memory and the checkpoint carry a word
 //! of 32 or 40 bits, as [`Geometry::word_bits`] says. The CADR is 32;
-//! QUUX, revision 13, [`Geometry::QUUX`], is 40.
+//! QUUX, [`Geometry::QUUX_16`], is 40.
 //!
-//! Revision 13's geometry runs a hand program that moves words with `<39:32>` set through every
+//! QUUX's geometry runs a hand program that moves words with `<39:32>` set through every
 //! word register G2 §2.1 widens: main memory into `MD`, `MD` into M, M
 //! into A, A back into M on the A pass-around, M into M on the M
 //! pass-around, `Q`, the PDL buffer, `VMA`, and `MD` back into main memory
@@ -17,9 +17,8 @@
 //! What the ALU does to `<39:32>` is G2 §2.2's output rule: a logical
 //! function acts on all 40 bits, and an arithmetic one leaves M's. The
 //! program uses `SETM` and `SETA`, which are logical, to move the words, and
-//! one `XOR` and one `ADD` to show the rule. The rest of revision 13's
-//! datapath, its fields, rotator, conditions and map, is
-//! `tests/revision_13.rs`'s.
+//! one `XOR` and one `ADD` to show the rule. The rest of the 40-bit
+//! datapath, its fields, rotator and conditions, is `tests/revision_13.rs`'s.
 
 use muir::checkpoint::{Reader, Writer};
 use muir::engine::Engine;
@@ -30,24 +29,30 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, Machine, Word};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 
 mod support;
 
-/// QUUX's 40-bit geometry, revision 13.
-const WIDE: Geometry = Geometry::QUUX;
+/// QUUX's 40-bit geometry.
+const WIDE: Geometry = Geometry::QUUX_16;
+
+/// The physical memory window, main memory at `VA<27:0>` on QUUX (contract
+/// G3 revision 14, A14.1).
+const PHYS: Word = muir::tlb::PHYSICAL_WINDOW as Word;
 
 /// The words the program moves, each with `<39:32>` set, and `W1`'s and
 /// `W3`'s `<31>` too so that a sign extension would show. `W2`'s `<31:0>`
-/// is an address on the mapped page, so that it can stand in `VMA` for a
-/// store: revision 13's map translates `<27:0>`, ignores `<39:32>` and
-/// faults on `<31:28>` (contract G2 §2.6).
+/// is [`OUT_W3`]'s address in the physical memory window, so that it can
+/// stand in `VMA` for a store: the address is `VA<31:0>`, and `<39:32>`
+/// are no part of it.
 const W1: Word = 0xa5 << 32 | 0x8000_0001;
-const W2: Word = 0x3c << 32 | 0o411;
+const W2: Word = 0x3c << 32 | PHYS | 0o411;
 const W3: Word = 0xc3 << 32 | 0x8765_4321;
 
-/// Where the words are in main memory, on page 0, which the map sends to
-/// physical page 0.
+/// Where the words are in main memory, which the program reaches through
+/// the physical memory window on QUUX and page 1, mapped to itself, on the
+/// CADR.
 const IN_W1: u32 = 0o400;
 const IN_W2: u32 = 0o401;
 const IN_W3: u32 = 0o402;
@@ -115,26 +120,29 @@ fn program() -> Vec<Insn> {
 }
 
 /// The machine the program runs on, with its words in main memory and its
-/// addresses in A memory, and the page they are on mapped to itself,
-/// readable and writable: on revision 13 page 0 of 1024 words, its
-/// level-2 entry's access bits `<27:26>` (appendix A1.7); on the CADR
-/// page 1 of 256, `<23:22>`.
+/// addresses in A memory: on QUUX in the physical memory window; on the
+/// CADR page 1 of 256 words mapped to itself, readable and writable,
+/// `<23:22>`.
 fn machine(geometry: Geometry) -> Machine {
-    let mut m = Machine::new();
-    m.geometry = geometry;
+    let mut m = if geometry == WIDE {
+        support::quux_16()
+    } else {
+        let mut m = Machine::new();
+        m.geometry = geometry;
+        m
+    };
     m.load_prom(&program());
     support::prom_program_in_ram(&mut m);
     m.main[IN_W1 as usize] = W1;
     m.main[IN_W2 as usize] = W2;
     m.main[IN_W3 as usize] = W3;
-    m.amem[0o40] = IN_W1 as Word;
-    m.amem[0o41] = IN_W2 as Word;
-    m.amem[0o42] = IN_W3 as Word;
-    m.amem[0o43] = OUT_W1 as Word;
-    m.amem[0o44] = OUT_W3 as Word;
-    if geometry.wide() {
-        m.l2_map[0] = (1 << 27) | (1 << 26);
-    } else {
+    let window = if geometry.wide() { PHYS } else { 0 };
+    m.amem[0o40] = window | IN_W1 as Word;
+    m.amem[0o41] = window | IN_W2 as Word;
+    m.amem[0o42] = window | IN_W3 as Word;
+    m.amem[0o43] = window | OUT_W1 as Word;
+    m.amem[0o44] = window | OUT_W3 as Word;
+    if !geometry.wide() {
         m.l2_map[1] = (1 << 23) | (1 << 22) | 1;
     }
     m
@@ -200,7 +208,7 @@ fn expected() -> Vec<Word> {
         W3,
         W1,
         W3,
-        OUT_W3 as Word,
+        PHYS | OUT_W3 as Word,
         W3,
     ]
 }
@@ -219,14 +227,16 @@ fn both_engines_carry_40_bit_words() {
     e.boot();
     finish(&mut e);
     check("micro", e.machine(), &expected());
-    let mut e = Rtl::new(machine(WIDE));
+    let mut e = Pipeline::new(machine(WIDE));
     e.boot();
     finish(&mut e);
     check("rtl", e.machine(), &expected());
 }
 
-/// A checkpoint of `e`, as the resume reads it: at the machine's width.
-fn round_trip<E: Engine>(e: &E, mut into: E) -> E {
+/// A checkpoint of `e`, as the resume reads it: at the machine's width,
+/// the pipeline drained first, as its checkpoint is taken.
+fn round_trip<E: Engine>(e: &mut E, mut into: E) -> E {
+    e.settle_for_checkpoint().unwrap();
     let mut w = Writer::new();
     e.save(&mut w);
     let body = w.finish();
@@ -252,7 +262,7 @@ fn a_checkpoint_keeps_40_bit_words_at_every_microcycle() {
             let stopped = e.machine().opc == STOP;
             let mut fresh = new(machine(WIDE));
             fresh.boot();
-            let mut back = round_trip(&e, fresh);
+            let mut back = round_trip(&mut e, fresh);
             finish(&mut back);
             check(&format!("{name}, resumed after {n} microcycles"), back.machine(), &expect);
             if stopped {
@@ -263,7 +273,7 @@ fn a_checkpoint_keeps_40_bit_words_at_every_microcycle() {
         }
     }
     every("micro", Micro::new);
-    every("rtl", Rtl::new);
+    every("rtl", Pipeline::new);
 }
 
 /// **On a 32-bit machine, the CADR, the same program leaves 32-bit words**: main
@@ -282,10 +292,16 @@ fn a_32_bit_machine_keeps_32_bits() {
         finish(&mut e);
         e.machine().clone()
     }
+    let vma = words(&Machine::new()).iter().position(|w| w.0 == "VMA").unwrap();
     let expect: Vec<Word> = expected()
         .into_iter()
         .enumerate()
-        .map(|(k, w)| if k == 12 { (low(W1) + low(W2)) & 0xffff_ffff } else { low(w) })
+        .map(|(k, w)| match k {
+            12 => (low(W1) + low(W2)) & 0xffff_ffff,
+            // The CADR's addresses have no window.
+            k if k == vma => OUT_W3 as Word,
+            _ => low(w),
+        })
         .collect();
     check("micro", &run(Micro::new(machine(Geometry::CADR))), &expect);
     check("rtl", &run(Rtl::new(machine(Geometry::CADR))), &expect);
@@ -310,11 +326,12 @@ fn a_40_bit_machine_writes_a_checkpoint_file() {
 
 /// **A 32-bit machine's checkpoint is the bytes it always was**: every
 /// word four bytes, so that a checkpoint written before the width was a
-/// parameter reads the same, and the 40-bit machine's is longer by a byte
-/// a word, and by revision 13's larger dispatch memory and map and its
-/// overflow flag (contract G2 §2.4, §2.6, §2.2).
+/// parameter reads the same, and revision 13's is longer by a byte a word,
+/// and by its larger dispatch memory and map and its overflow flag
+/// (contract G2 §2.4, §2.6, §2.2).
 #[test]
 fn a_32_bit_checkpoint_writes_four_bytes_a_word() {
+    const WIDE: Geometry = Geometry::QUUX;
     let body = |g: Geometry| {
         let mut w = Writer::new();
         machine(g).save(&mut w);

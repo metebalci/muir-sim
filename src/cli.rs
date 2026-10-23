@@ -7936,15 +7936,15 @@ mod tests {
         assert_eq!(endpoint_at(Some("x"), base), None);
     }
 
-    /// **A paced run on revision 15 counts the machine's units of 0.5 ns as
-    /// half nanoseconds**: anchored on the machine, 4 ms of its units at
-    /// the anchor's instant is 2 ms ahead, and 2 ms is what it waits. On
-    /// the CADR's clock a unit is a nanosecond. **Fails** a pace that takes
-    /// the units for nanoseconds, which runs revision 15 at half speed.
+    /// **A paced run on QUUX counts the machine's units of 0.5 ns as half
+    /// nanoseconds**: anchored on the machine, 4 ms of its units at the
+    /// anchor's instant is 2 ms ahead, and 2 ms is what it waits. On the
+    /// CADR's clock a unit is a nanosecond. **Fails** a pace that takes the
+    /// units for nanoseconds, which runs QUUX at half speed.
     #[test]
     fn the_pace_counts_revision_15_s_units() {
         let t = Instant::now();
-        let mut m = Machine::with_geometry(crate::machine::Geometry::QUUX_15, 1);
+        let mut m = Machine::with_geometry(crate::machine::Geometry::QUUX_16, 1);
         m.ns = 1_000;
         let mut pace = Pace::of_machine(t, &m);
         assert_eq!(pace.owed(t, 1_000 + 4_000_000), Some(Duration::from_millis(2)));

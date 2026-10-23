@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! QUUX's keyboard and mouse (contract Q3), on the register page at
-//! `1777777400`: word 120 the keyboard's status, 121 its data, 122 the mouse,
+//! `35777777400`: word 120 the keyboard's status, 121 its data, 122 the mouse,
 //! 123 the mouse's status. No CADR keyboard timing and no quadrature: a
 //! FIFO of 64 of the key words the CADR's keyboard gives, and the CADR's
 //! twelve-bit mouse counts with the host's motion added to them.
 
-use muir::machine::{Geometry, Machine, bus_error};
+use muir::machine::{Machine, bus_error};
 use muir::quux_input::KeyboardMouse;
 
-const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
+const PAGE: u32 = support::PAGE_16;
 const INTERRUPTS: u32 = PAGE + 0o100;
 const KBD_STATUS: u32 = PAGE + 0o120;
 const KBD_DATA: u32 = PAGE + 0o121;
@@ -19,9 +19,7 @@ const MOUSE_STATUS: u32 = PAGE + 0o123;
 const ENABLE: u32 = 1 << 8;
 
 fn quux() -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
-    m
+    support::quux_16()
 }
 
 /// **Key words come out of word 121 in the order they went in**, each the
@@ -164,27 +162,26 @@ fn a_checkpoint_keeps_it() {
     }
 }
 
-/// **The CADR has none of it**: words 120-123 time out, as the page does,
-/// in the CADR's Unibus window.
+/// **The CADR has none of it**: words 120-123 of its last page, `17777400`,
+/// time out, as the page does, in the CADR's Unibus window.
 #[test]
 fn the_cadr_has_none_of_it() {
     let mut m = Machine::new();
-    m.bus_read(KBD_DATA);
+    m.bus_read(0o17777521);
     assert_eq!(m.bus_error, bus_error::UNIBUS_NXM);
 }
 
 mod support;
 
 /// **The microcode takes key words through the bus on both engines**: two
-/// reads of word 121 give the two words typed, in order. Virtual page 1
-/// maps the register page.
+/// reads of word 121 give the two words typed, in order, through the
+/// device window.
 #[test]
 fn both_engines_read_the_fifo() {
     use muir::engine::Engine;
     use muir::isa::Insn;
     use muir::isa::asm::{ALU, SETM, SRC_MD, START_READ, a_dest, filler, m_src};
     use muir::micro::Micro;
-    use muir::rtl::Rtl;
     let mut prom = Vec::new();
     for k in 0..2 {
         prom.push(Insn::new(ALU | SETM | m_src(1) | START_READ));
@@ -197,14 +194,14 @@ fn both_engines_read_the_fifo() {
         words[..prom.len()].copy_from_slice(&prom);
         m.load_prom(&words);
         support::prom_program_in_ram(&mut m);
-        m.mmem[1] = support::quux_map(&mut m, 1, PAGE | 0o121).into();
+        m.mmem[1] = support::quux_va(PAGE | 0o121).into();
         m.quux_input.press(0o101);
         m.quux_input.press(0o102);
         m
     };
     let mut e = Micro::new(machine());
     e.boot();
-    let mut r = Rtl::new(machine());
+    let mut r = muir::pipeline::Pipeline::new(machine());
     r.boot();
     for _ in 0..400 {
         e.step().unwrap();

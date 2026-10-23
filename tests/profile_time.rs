@@ -27,7 +27,7 @@ const QUUX_PERIOD_NS: u64 = 40;
 
 /// A loop reading main memory a line apart, 64 lines round, so that
 /// with QUUX's 4K-word cache fitted the first round misses on every read
-/// and waits for its line, and the later rounds hit.
+/// and waits for its line, and the later rounds hit: revision 13.
 fn reading() -> Machine {
     let mut prom = vec![
         Insn::new(ALU | SETM | m_src(1) | START_READ),
@@ -49,6 +49,19 @@ fn reading() -> Machine {
     m
 }
 
+/// [`reading`] on revision 16: page 4 through the physical memory window.
+fn reading_16() -> Machine {
+    let mut m = reading();
+    let mut q = support::quux_16();
+    q.prom = m.prom.clone();
+    q.imem = std::mem::take(&mut m.imem);
+    q.mmem[1] = PHYS | 4 << 10;
+    q
+}
+
+/// The physical memory window (contract G3 revision 14, A14.1).
+const PHYS: u64 = 0o36000000000;
+
 /// Runs `e` `n` steps, moving M 1 a line of 8 on, round 64 lines of the
 /// page, after each read so the next read is another line's.
 fn run<E: Engine>(e: &mut E, n: usize) {
@@ -56,7 +69,7 @@ fn run<E: Engine>(e: &mut E, n: usize) {
         e.step().unwrap();
         let m = e.machine_mut();
         if m.opc == 0 {
-            m.mmem[1] = (1 << 10) | ((m.mmem[1] + 8) & 0o777);
+            m.mmem[1] = (m.mmem[1] & !0o777) | ((m.mmem[1] + 8) & 0o777);
         }
     }
 }
@@ -125,10 +138,10 @@ fn rtl_s_time_in_all_has_the_stalls_in_it() {
 
 /// **On `micro` the memory's time is a charge, and the line says so**:
 /// `micro` has no waits, and its clock is the microcycles' time and a
-/// fixed charge a memory cycle.
+/// fixed charge a memory cycle. On revision 16, at its period of 10 ns.
 #[test]
 fn micro_s_memory_time_is_named_a_charge() {
-    let mut e = Micro::new(reading());
+    let mut e = Micro::new(reading_16());
     e.boot();
     run(&mut e, 100);
     let start = Span::of_micro(&e);
@@ -144,21 +157,26 @@ fn micro_s_memory_time_is_named_a_charge() {
     assert_eq!(each, e.memory_cycle_ns);
     assert!(e.memory_cycles() > mc0, "the loop reads");
     assert_eq!(charged, (e.memory_cycles() - mc0) * each);
-    assert_eq!(in_all, e.machine().ns - ns0, "the line's time in all is the clock's: {line}");
-    assert_eq!(in_all, QUUX_PERIOD_NS * microcycles + charged, "{line}");
+    let per_ns = e.machine().time_base().per_ns;
+    assert_eq!(
+        in_all,
+        (e.machine().ns - ns0) / per_ns,
+        "the line's time in all is the clock's: {line}"
+    );
+    let period_ns = muir::clock::PERIOD_15 / 2;
+    assert_eq!(in_all, period_ns * microcycles + charged, "{line}");
     assert!(line.contains("% of the time in all"), "{line}");
 }
 
 /// **Under the time-neutral harness `micro` charges no memory time, and the
 /// line says so** (MP2b ruling Q12: neutral time is `Machine::cycles` times
-/// the period, with no memory charge): revision 14's machine reading main
-/// memory through the physical memory window, at the pipeline's revision-14
-/// period of 9 ns, its clock 9 ns a microcycle and nothing more. The line's
+/// the period, with no memory charge): revision 16's machine reading main
+/// memory through the physical memory window, at its period of 10 ns, its
+/// clock 10 ns a microcycle and nothing more. The line's
 /// time in all is the clock's, all of it the microcycles', none charged.
 /// It subtracted a charge never made and printed an underflowed time.
 #[test]
 fn micro_under_neutral_time_charges_no_memory_time() {
-    const PHYS: u64 = 0o36000000000;
     let prom = [
         Insn::new(ALU | muir::isa::asm::SETA | muir::isa::asm::a_src(0o100) | START_READ),
         filler(),
@@ -166,7 +184,7 @@ fn micro_under_neutral_time_charges_no_memory_time() {
         Insn::new(JUMP | target(0) | ALWAYS | N),
         filler(),
     ];
-    let mut m = Machine::with_geometry(Geometry::QUUX_14, 1);
+    let mut m = Machine::with_geometry(Geometry::QUUX_16, 1);
     let mut words = vec![filler(); 1024];
     words[..prom.len()].copy_from_slice(&prom);
     m.load_prom(&words);
@@ -174,7 +192,7 @@ fn micro_under_neutral_time_charges_no_memory_time() {
     m.amem[0o100] = PHYS | 0o4000;
     let mut e = Micro::new(m);
     e.neutral = true;
-    e.period = muir::pipeline::PERIOD_14;
+    e.period = muir::clock::PERIOD_15;
     e.boot();
     run(&mut e, 100);
     let start = Span::of_micro(&e);
@@ -187,15 +205,20 @@ fn micro_under_neutral_time_charges_no_memory_time() {
     let microcycles = after(&line, "time:");
     let microcycle_ns = after(&line, " microcycles in");
     let in_all = before(&line, " ns in all");
-    assert_eq!(in_all, e.machine().ns - ns0, "the line's time in all is the clock's: {line}");
-    assert_eq!(in_all, muir::pipeline::PERIOD_14 * microcycles, "{line}");
+    let per_ns = e.machine().time_base().per_ns;
+    assert_eq!(
+        in_all,
+        (e.machine().ns - ns0) / per_ns,
+        "the line's time in all is the clock's: {line}"
+    );
+    assert_eq!(in_all, muir::clock::PERIOD_15 / 2 * microcycles, "{line}");
     assert_eq!(microcycle_ns, in_all, "all of it the microcycles': {line}");
     assert!(line.contains("neutral time, no memory charged"), "{line}");
 }
 
 /// **The pipeline's line names its clock's period in ns** on both revisions
 /// it runs: revision 14's, a measurement aid whose period counts whole ns,
-/// at 9 ns (`muir::pipeline::PERIOD_14`), and revision 15's, in units of
+/// at 9 ns (`muir::pipeline::PERIOD_14`), and revision 16's, in units of
 /// 0.5 ns, at 8.5, set, so that the half shows. The line's time in all is
 /// clocks times that period. A line that reads revision 14's period as
 /// half-ns units says 4.5.
@@ -203,7 +226,7 @@ fn micro_under_neutral_time_charges_no_memory_time() {
 fn the_pipeline_s_line_names_its_period_in_ns() {
     use muir::pipeline::{CACHE_WORDS, Pipeline, PortTiming};
     for (geometry, text, ns_tenths) in
-        [(Geometry::QUUX_14, "clocks of 9 ns", 90), (Geometry::QUUX_15, "clocks of 8.5 ns", 85)]
+        [(Geometry::QUUX_14, "clocks of 9 ns", 90), (Geometry::QUUX_16, "clocks of 8.5 ns", 85)]
     {
         let mut m = Machine::with_geometry(geometry, 1);
         let mut words = vec![filler(); 1024];

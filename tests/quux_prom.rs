@@ -11,7 +11,7 @@ use muir::isa::Insn;
 use muir::isa::asm::{ALU, ALWAYS, JUMP, N, SETO, filler, m_dest, target};
 use muir::machine::{Geometry, Machine, Word};
 use muir::micro::Micro;
-use muir::rtl::Rtl;
+use muir::pipeline::Pipeline;
 
 mod support;
 
@@ -20,8 +20,7 @@ const BASE: u16 = 0o36000;
 
 /// A QUUX with `prom` at 36000, the RAM word `ram` at 6 and at 36005.
 fn quux(prom: &[Insn], ram: Insn) -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
+    let mut m = support::quux_16();
     let mut words = vec![filler(); 1024];
     words[..prom.len()].copy_from_slice(prom);
     m.load_prom(&words);
@@ -41,8 +40,8 @@ fn program() -> Vec<Insn> {
     p
 }
 
-/// Both engines booted and run `steps` microcycles; M 1 to M 3 and the PCs
-/// each executed.
+/// Both engines booted and run `steps` microcycles, `rtl` the pipeline;
+/// M 1 to M 3 and the PCs each executed.
 fn run(m: Machine, steps: usize) -> [([Word; 3], Vec<u16>); 2] {
     let mut e = Micro::new(m.clone());
     e.boot();
@@ -51,7 +50,7 @@ fn run(m: Machine, steps: usize) -> [([Word; 3], Vec<u16>); 2] {
         pe.push(e.pc());
         e.step().unwrap();
     }
-    let mut r = Rtl::new(m);
+    let mut r = Pipeline::new(m);
     r.boot();
     let mut pr = Vec::new();
     for _ in 0..steps {
@@ -74,7 +73,7 @@ fn quux_boots_at_36000_and_the_ram_below_is_live() {
         let name = ["micro", "rtl"][k];
         let first = pcs.iter().position(|&p| p != 0).map(|i| pcs[i]);
         assert_eq!(first, Some(BASE), "{name}: the PC after the boot, {pcs:?}");
-        let ones = Geometry::QUUX.word_mask();
+        let ones = Geometry::QUUX_16.word_mask();
         assert_eq!(m, [ones; 3], "{name}: the PROM's 0 and 5, then the RAM's 6");
     }
 }

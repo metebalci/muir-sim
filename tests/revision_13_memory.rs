@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! **QUUX revision 13's memory and devices** (contract G1 §3-§4, G2 §3-§4,
+//! **QUUX's memory and devices at 40 bits** (contract G1 §3-§4, G2 §3-§4,
 //! appendix A1.10-A1.13), through the machine's register page and its
-//! parts: packed storage, block-disk's packed and 4-byte transfers, the
-//! file device's tags and 28-bit addresses, the checkpoint at 40 bits, the
-//! `.mcr` at 40 bits, and the cache's 8-word lines with the prefetch's
-//! page reach. `tests/revision_13.rs` runs the physical space itself on
-//! both engines.
+//! parts, on revision 16: packed storage, block-disk's packed and 4-byte
+//! transfers, the file device's tags and 28-bit addresses, and the
+//! checkpoint at 40 bits; and revision 13's own: the `.mcr` at 40 bits in
+//! MIT's sections, and its memory port's 8-word lines with the prefetch's
+//! page reach.
 
 use std::path::PathBuf;
 
@@ -23,8 +23,8 @@ use muir::micro::Micro;
 
 mod support;
 
-/// The register page at 28 bits (G1 §3.2).
-const PAGE: u32 = 0o1777777400;
+/// The register page's bus address.
+const PAGE: u32 = support::PAGE_16;
 /// A 40-bit word from its tag and field.
 const fn w(tag: u64, field: u64) -> Word {
     tag << 32 | (field & 0xffff_ffff)
@@ -57,6 +57,13 @@ impl Drop for Scratch {
     }
 }
 
+/// Revision 16 with `words` of main memory.
+fn rev16(words: usize) -> Machine {
+    let mut m = support::quux_16();
+    m.main = vec![0; words];
+    m
+}
+
 /// Revision 13 with `words` of main memory.
 fn rev13(words: usize) -> Machine {
     let mut m = Machine::new();
@@ -87,19 +94,20 @@ fn pattern(seed: u64) -> Vec<Word> {
         .collect()
 }
 
-/// **The CADR's device addresses are nothing on revision 13** when main
-/// memory does not reach them (G1 §3.2): its last page, `17777400`, and its
-/// TV's buffer, `17000000`, fail with word 101's NXM bit; the register
-/// page answers.
+/// **The CADR's device addresses are nothing on QUUX** when main memory
+/// does not reach them (G1 §3.2): its last page, `17777400`, and its TV's
+/// buffer, `17000000`, fail with word 101's NXM bit; the register page
+/// answers.
 #[test]
 fn the_cadr_s_device_addresses_are_nothing_on_revision_13() {
-    let mut m = rev13(2 << 20);
+    let mut m = rev16(2 << 20);
     for phys in [0o17777400, 0o17777500, 0o17000000, 2 << 20] {
         m.bus_error = 0;
         assert_eq!(m.bus_read(phys), 0, "{phys:o}");
         assert_eq!(m.bus_read(PAGE + 0o101), 1, "{phys:o}: NXM");
     }
-    assert_eq!(m.bus_read(PAGE), (0x5155 << 16) | (13 << 4) | 4, "the page's MACHINE-ID");
+    let id = Geometry::QUUX_16.machine_id.unwrap();
+    assert_eq!(m.bus_read(PAGE), id.into(), "the page's MACHINE-ID");
 }
 
 // --- block-disk ---------------------------------------------------------------
@@ -132,7 +140,7 @@ fn transfer(m: &mut Machine, cmd: u32, clp: u32, da: u32) -> (u32, u32, u32) {
     m.bus_write(CLP, clp.into());
     m.bus_write(DA, da.into());
     m.bus_write(START, 0);
-    m.ns += 1_000_000_000;
+    m.ns += m.time_base().per_s();
     let status = m.bus_read(CMD) as u32;
     assert_eq!(status & 1, 1, "not active after a second");
     (status, m.bus_read(CLP) as u32, m.bus_read(DA) as u32)
@@ -148,7 +156,7 @@ fn transfer(m: &mut Machine, cmd: u32, clp: u32, da: u32) -> (u32, u32, u32) {
 #[test]
 fn the_packed_transfer_moves_a_page_as_5_blocks() {
     let dir = Scratch::new("packed");
-    let mut m = rev13(0o20004000);
+    let mut m = rev16(0o20004000);
     let path = attach_disk(&mut m, &dir, 64);
     let (p1, p2) = (0o4000usize, 0o20000000usize);
     let (a, b) = (pattern(1), pattern(7));
@@ -189,7 +197,7 @@ fn the_packed_transfer_moves_a_page_as_5_blocks() {
 #[test]
 fn the_4_byte_transfer_moves_a_page_as_4_blocks() {
     let dir = Scratch::new("four");
-    let mut m = rev13(0o100000);
+    let mut m = rev16(0o100000);
     let path = attach_disk(&mut m, &dir, 64);
     let a = pattern(3);
     m.main[0o4000..0o6000].copy_from_slice(&a);
@@ -215,7 +223,7 @@ fn the_4_byte_transfer_moves_a_page_as_4_blocks() {
 /// the same blocks would put every fifth byte in a tag.
 #[test]
 fn the_gpt_reads_through_a_4_byte_transfer() {
-    let mut m = rev13(0o100000);
+    let mut m = rev16(0o100000);
     let mut d = BlockDisk::new(muir::block_disk::BLOCK_NS);
     d.attach(Disk::open(data("quux-disk.img")).unwrap());
     m.block_disk = Some(d);
@@ -237,7 +245,7 @@ fn the_gpt_reads_through_a_4_byte_transfer() {
 #[test]
 fn a_page_outside_main_memory_is_nxm() {
     let dir = Scratch::new("nxm");
-    let mut m = rev13(0o100000);
+    let mut m = rev16(0o100000);
     attach_disk(&mut m, &dir, 64);
     for page in [0o100000u64, 0o1760000000] {
         m.main[0o100] = page;
@@ -253,7 +261,7 @@ fn a_page_outside_main_memory_is_nxm() {
 #[test]
 fn the_command_list_takes_28_bit_addresses() {
     let dir = Scratch::new("clp28");
-    let mut m = rev13(0o100004000);
+    let mut m = rev16(0o100004000);
     attach_disk(&mut m, &dir, 64);
     let (list, page) = (0o100002000usize, 0o100000000usize);
     m.main[list] = page as Word;
@@ -286,7 +294,7 @@ fn the_file_device_takes_28_bit_addresses_and_writes_fixnums() {
     let mut mounts = Mounts::default();
     mounts.add(&dir.0.display().to_string()).unwrap();
     let base = 0o100000000usize;
-    let mut m = rev13(base + 0o10000);
+    let mut m = rev16(base + 0o10000);
     m.file_device.mounts = mounts;
     let (cmd, resp, a, b) = (base, base + 0o100, base + 0o200, base + 0o400);
     // A ring on a 4-word line: refused.
@@ -315,7 +323,7 @@ fn the_file_device_takes_28_bit_addresses_and_writes_fixnums() {
         let start = m.ns;
         while m.bus_read(RESP_PROD) != prod {
             m.ns += 1_000;
-            assert!(m.ns - start < 10_000_000_000, "no response");
+            assert!(m.ns - start < 20_000_000_000, "no response");
         }
     };
     post(&mut m, 0, [1 | (op::OPEN as u64) << 16, 0, a as u64, name.len() as u64, 0, 0, 0, 0], 1);
@@ -340,10 +348,10 @@ fn the_file_device_takes_28_bit_addresses_and_writes_fixnums() {
 /// a 4 KiB boundary (G1 §4.1: `40L mod 4096` = 4088).
 const LINE_4K: usize = 307 * 8;
 
-/// A revision-13 machine on `micro` with words at every offset of line 0
-/// and of [`LINE_4K`], tags and all.
+/// A QUUX machine on `micro` with words at every offset of line 0 and of
+/// [`LINE_4K`], tags and all.
 fn with_lines() -> (Micro, Vec<Word>) {
-    let mut m = rev13(0o100000);
+    let mut m = rev16(0o100000);
     let words: Vec<Word> = pattern(11)[..16].to_vec();
     m.main[..8].copy_from_slice(&words[..8]);
     m.main[LINE_4K..LINE_4K + 8].copy_from_slice(&words[8..]);
@@ -368,22 +376,20 @@ fn a_40_bit_checkpoint_is_packed_and_round_trips() {
     assert_eq!(line4k - line0, 5 * LINE_4K, "five bytes a word between them");
     let dir = Scratch::new("ckpt");
     let path = dir.path("m.chk");
-    let bits = e.machine().geometry.word_bits;
-    muir::checkpoint::write(&path, "micro", e.machine().memory_boards(), bits, &body).unwrap();
+    let version = muir::checkpoint::version_for(&e.machine().geometry);
+    muir::checkpoint::write_version(&path, "micro", e.machine().memory_boards(), version, &body)
+        .unwrap();
     let c = muir::checkpoint::read(&path).unwrap();
     assert_eq!(c.word_bits, 40, "the file says its words are 40 bits");
-    assert_eq!(c.version, muir::checkpoint::VERSION_40, "a version of its own");
-    let mut back = Micro::new(rev13(0o100000));
+    assert_eq!(c.version, muir::checkpoint::VERSION_16, "a version of its own");
+    let mut back = Micro::new(rev16(0o100000));
     back.load(&mut c.reader()).unwrap();
     assert_eq!(back.machine().main, e.machine().main, "main memory back");
-    assert_eq!(back.machine().geometry, Geometry::QUUX);
+    assert_eq!(back.machine().geometry, Geometry::QUUX_16);
 }
 
-/// **A 32-bit checkpoint, the CADR's, is refused on revision 13** (G2
-/// §2.8), and a 32-bit machine's file keeps its version. A checkpoint of
-/// revision 12 is refused by the machine it records
-/// (`a_revision_12_checkpoint_is_refused_by_its_machine` in
-/// `tests/quux_revision.rs`).
+/// **A 32-bit checkpoint, the CADR's, is refused on QUUX** (G2 §2.8), and
+/// a 32-bit machine's file keeps its version.
 #[test]
 fn a_32_bit_checkpoint_is_refused_on_revision_13() {
     let mut e = Micro::new(Machine::new());
@@ -396,12 +402,13 @@ fn a_32_bit_checkpoint_is_refused_on_revision_13() {
     muir::checkpoint::write(&path, "micro", e.machine().memory_boards(), 32, &body).unwrap();
     let c = muir::checkpoint::read(&path).unwrap();
     assert_eq!((c.version, c.word_bits), (muir::checkpoint::VERSION, 32));
-    let mut back = Micro::new(rev13(0o100000));
+    let mut back = Micro::new(rev16(0o100000));
     let err = back.load(&mut c.reader()).expect_err("refused");
     assert!(err.to_string().contains("32-bit words, the CADR's"), "{err}");
 }
 
-/// **`rtl` resumes revision 13 on revision 13's memory port** (G2 §3): a
+/// **`rtl` resumes revision 13 on revision 13's memory port** (G2 §3), the
+/// single-edge engine: a
 /// program reading main memory a line of 8 apart, every read a miss and a
 /// fill of 5 beats, saved at its microcycle 200 and loaded into a fresh
 /// engine, runs on to the same end as the run never saved: the same

@@ -4,9 +4,9 @@
 //! QUUX's reset devices (contract Q11, revision 10): word 104 `<0>` of the
 //! register page. A write with `<0>` set resets every device, at the
 //! instant the write is taken --- the interval timers to their reset state,
-//! the file device, block-disk and the network as the CADR's
-//! `PROG.UNIBUS.RESET` resets them, the video controller with nothing to show for it,
-//! and the keyboard and mouse not at all; a write with `<0>` clear does
+//! the file device and block-disk as the CADR's `PROG.UNIBUS.RESET` resets
+//! them, the Ethernet device, the video controller with nothing to show
+//! for it, and the keyboard and mouse not at all; a write with `<0>` clear does
 //! nothing; the word reads 0. On QUUX `INTERRUPT-CONTROL<28>`,
 //! `PROG.UNIBUS.RESET`, drives nothing.
 
@@ -19,16 +19,19 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, IntervalTimer, Machine};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::quux_input::KeyboardMouse;
-use muir::rtl::Rtl;
 use muir::tv::Board;
 
 mod support;
 
-const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
+const PAGE: u32 = support::PAGE_16;
 const INTERRUPTS: u32 = PAGE + 0o100;
 const RESET_DEVICES: u32 = PAGE + 0o104;
-const CHAOS_CSR: u32 = PAGE + 0o140;
+/// The Ethernet device's control and status, words 240 and 241 (QUUX's
+/// Ethernet contract, §2.2).
+const ETH_CONTROL: u32 = PAGE + 0o240;
+const ETH_STATUS: u32 = PAGE + 0o241;
 const KBD_STATUS: u32 = PAGE + 0o120;
 const KBD_DATA: u32 = PAGE + 0o121;
 const MOUSE_STATUS: u32 = PAGE + 0o123;
@@ -60,14 +63,13 @@ fn state(m: &Machine) -> Vec<u8> {
 
 /// A QUUX machine with every device busy at `ns`: timers 0 to 2 on under
 /// their interrupt enables, timer 1 up; block-disk in the middle of a
-/// transfer under its interrupt enable; the Chaosnet interface's
-/// interrupt enables and loop back set; the file device enabled with a
+/// transfer under its interrupt enable; the Ethernet device enabled under
+/// its interrupt enable; the file device enabled with a
 /// command queued whose due time is a millisecond on; the video controller; and the
 /// keyboard's FIFO holding two key words and the mouse moved, both under
 /// their interrupt enables.
 fn busy() -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
+    let mut m = support::quux_16();
     make_busy(&mut m);
     m
 }
@@ -88,9 +90,11 @@ fn make_busy(m: &mut Machine) {
     m.bus_write(DISK_CLP, 0o100);
     m.bus_write(DISK_COMMAND, 1 << 11);
     m.bus_write(DISK_START, 0);
-    // The Chaosnet interface: receive and transmit interrupt enables, loop
-    // back.
-    m.bus_write(CHAOS_CSR, 0o62);
+    // The Ethernet device: its rings at 1000 and 6000, enabled under its
+    // interrupt enable.
+    m.bus_write(PAGE + 0o242, 0o1000);
+    m.bus_write(PAGE + 0o246, 0o6000);
+    m.bus_write(ETH_CONTROL, 0x101);
     // The keyboard and the mouse.
     m.quux_input.press(0o1234);
     m.quux_input.press(0o4321);
@@ -123,6 +127,7 @@ fn make_busy(m: &mut Machine) {
     assert_eq!(up & 0o3, 0o2, "timer 1 up, word 100 {up:o}");
     assert_eq!(up & 0o10, 0, "block-disk in flight");
     assert_ne!(m.bus_read(FDEV_STATUS) & 1, 0, "the file device enabled");
+    assert_eq!(m.bus_read(ETH_STATUS) & 1, 1, "the Ethernet device enabled");
     assert_eq!(up & 0o60, 0o60, "the keyboard and the mouse");
 }
 
@@ -154,8 +159,8 @@ fn m5_a_write_with_bit_0_clear_changes_nothing() {
 /// **M5, reset devices against revision 9's `<28>`**: from the same busy
 /// machine, a write of word 104 with 1 leaves every device as revision 9's
 /// `PROG.UNIBUS.RESET` left it, `Machine::bus_reset` --- block-disk, the
-/// network, the video controller and the file device, the whole machine's state compared
-/// --- and every timer in its reset state besides, which `<28>` never
+/// Ethernet device, the video controller and the file device, the whole
+/// machine's state compared --- and every timer in its reset state besides, which `<28>` never
 /// reached. The keyboard's FIFO, the mouse's counts and both their
 /// interrupt enables are kept: `bus_reset` never reached them either, and
 /// they are what they were before the write.
@@ -177,11 +182,14 @@ fn m5_reset_devices_does_what_revision_9_s_28_did_and_resets_the_timers() {
     assert_ne!(reference.timers, m.timers, "revision 9's <28> reached no timer");
     let mut with_timers = reference.clone();
     with_timers.timers = m.timers;
+    // `<28>` reached no Ethernet device either, which a reset disables
+    // (`tests/quux_ethernet.rs`).
+    with_timers.ethernet = m.ethernet.clone();
     assert!(state(&with_timers) == state(&m), "every device as <28> left it");
-    // Something was reset: the file device, block-disk, the network.
+    // Something was reset: the file device, block-disk, the Ethernet device.
     assert_eq!(m.bus_read(FDEV_STATUS) & 1, 0, "the file device disabled");
     assert_eq!(m.bus_read(DISK_COMMAND) & (1 << 11), 0);
-    assert_eq!(m.bus_read(CHAOS_CSR) & 0o62, 0, "the network's enables");
+    assert_eq!(m.bus_read(ETH_CONTROL), 0, "the Ethernet device disabled");
     // Kept.
     let mut w = muir::checkpoint::Writer::new();
     m.quux_input.save(&mut w);
@@ -193,7 +201,7 @@ fn m5_reset_devices_does_what_revision_9_s_28_did_and_resets_the_timers() {
 /// **M5, what the file device had due by the write's instant runs first**,
 /// as for a write of 160, and what was due later never runs: the queued
 /// OPEN's response is in the ring when the reset is written at its due
-/// time, and not when it is written a nanosecond before it.
+/// time, and not when it is written a unit, 0.5 ns, before it.
 #[test]
 fn m5_what_the_file_device_had_due_runs_first() {
     let due = {
@@ -232,10 +240,9 @@ fn m5_what_the_file_device_had_due_runs_first() {
     }
 }
 
-/// The register page's word `w` through virtual page 1, the page being at
-/// word 1400 of its 1024-word frame.
-const fn va(w: u32) -> u64 {
-    (1 << 10 | PAGE & 0o1777 | w) as u64
+/// The register page's word `w` in the device window.
+fn va(w: u32) -> u64 {
+    support::quux_va(PAGE + w).into()
 }
 
 /// `INTERRUPT-CONTROL`'s `INT.ENABLE`, `<35>` on QUUX (contract G2
@@ -247,24 +254,29 @@ const DEST_3: u64 = (3 << 19) | (0o37 << 14);
 const PGF_OR_INT: u64 = (1 << 5) | 5;
 
 fn engine_machine(prom: &[Insn], m_words: &[(usize, u64)]) -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
+    let mut m = support::quux_16();
     let mut words = vec![filler(); 1024];
     words[..prom.len()].copy_from_slice(prom);
     m.load_prom(&words);
     support::prom_program_in_ram(&mut m);
-    support::quux_map(&mut m, 0, 0);
-    support::quux_map(&mut m, 1, PAGE);
     for &(k, v) in m_words {
         m.mmem[k] = v;
     }
     m
 }
 
-/// **M4, a destination 3 write by a reset-devices write** (`rtl`): Q1's
-/// turn-on, 1, written to destination 3 at the edge that takes a
-/// reset-devices write, or a microcycle later, leaves timer 0 off:
-/// destination 3 writes only M at revision 10.
+/// `m` on `engine`, `micro` or `rtl`, the pipeline.
+fn engine(name: &str, m: Machine) -> Box<dyn Engine> {
+    match name {
+        "micro" => Box::new(Micro::new(m)),
+        _ => Box::new(Pipeline::new(m)),
+    }
+}
+
+/// **M4, a destination 3 write by a reset-devices write**, on both
+/// engines: Q1's turn-on, 1, written to destination 3 in the microcycle
+/// right after a reset-devices write, or a microcycle later, leaves timer 0
+/// off: destination 3 writes only M at revision 10.
 #[test]
 fn m4_a_destination_3_write_by_reset_devices_turns_nothing_on() {
     for gap in [0usize, 1] {
@@ -273,39 +285,31 @@ fn m4_a_destination_3_write_by_reset_devices_turns_nothing_on() {
             Insn::new(ALU | SETM | m_src(1) | START_WRITE),
         ];
         prom.extend(vec![filler(); gap]);
-        let dest_3 = Insn::new(ALU | SETM | m_src(3) | DEST_3);
-        prom.push(dest_3);
-        let mut r = Rtl::new(engine_machine(&prom, &[(1, va(0o104)), (2, 1), (3, 1)]));
-        r.boot();
-        let mut edge = None;
-        for _ in 0..40 {
-            let ir = r.ir();
-            let taken = r.bus_answered_at();
-            r.step().unwrap();
-            if ir == dest_3.raw() && edge.is_none() {
-                edge = Some(r.ns());
-                if gap == 0 {
-                    assert_eq!(r.bus_answered_at(), Some(r.ns()), "the reset taken at the edge");
-                } else {
-                    assert!(taken.is_some_and(|t| t < r.ns()), "the reset taken before");
-                }
+        prom.push(Insn::new(ALU | SETM | m_src(3) | DEST_3));
+        for name in ["micro", "rtl"] {
+            let mut e = engine(name, engine_machine(&prom, &[(1, va(0o104)), (2, 1), (3, 1)]));
+            e.boot();
+            for _ in 0..40 {
+                e.step().unwrap();
             }
+            let m = e.machine();
+            assert_eq!(
+                m.timers.timer[0],
+                IntervalTimer::RESET,
+                "{name}: destination 3 {gap} microcycles on"
+            );
+            assert_eq!(m.mmem[0o37], 1, "{name}: destination 3 {gap} microcycles on wrote M 37");
         }
-        assert!(edge.is_some());
-        let m = r.machine();
-        assert_eq!(m.timers.timer[0], IntervalTimer::RESET, "destination 3 {gap} microcycles on");
-        assert_eq!(m.mmem[0o37], 1, "destination 3 {gap} microcycles on wrote M 37");
     }
 }
 
-/// **M5, `SINTR` at the reset-devices write's edge** (`rtl`): a term the
-/// reset takes down, timer 1's flag under its interrupt enable, is still
-/// in the `SINTR` the edge that takes the write registers, and not in the
-/// next edge's: the jump right after that edge is taken, one a microcycle
-/// later is not. With the reset written as 0 both are taken.
+/// **M5, a jump after a reset-devices write sees what it reset down**, on
+/// both engines: a term the reset takes down, timer 1's flag under its
+/// interrupt enable, is not seen by an interrupt jump two microcycles after
+/// the write, nor three. With the reset written as 0 the jump is taken.
 #[test]
-fn m5_sintr_at_the_reset_s_edge_still_has_what_it_resets() {
-    for (reset, jump_after, taken) in [(1, 0usize, true), (1, 1, false), (0, 1, true)] {
+fn m5_a_jump_after_the_reset_sees_what_it_resets_down() {
+    for (reset, jump_after, taken) in [(1, 0usize, false), (1, 1, false), (0, 1, true)] {
         let mut prom = vec![
             Insn::new(ALU | SETM | m_src(6) | INTERRUPT_CONTROL),
             Insn::new(ALU | SETM | m_src(2) | MD),
@@ -319,23 +323,26 @@ fn m5_sintr_at_the_reset_s_edge_still_has_what_it_resets() {
         prom.push(filler());
         prom.push(Insn::new(ALU | SETO | m_dest(5)));
         prom.push(Insn::new(JUMP | target(at + 4) | ALWAYS | N));
-        let mut r = Rtl::new(engine_machine(&prom, &[(1, va(0o104)), (2, reset), (6, INT_ENABLE)]));
-        r.boot();
-        r.machine_mut().timers.timer[1] = IntervalTimer {
-            on: true,
-            one_shot: false,
-            interrupt_enable: true,
-            period_us: 1000,
-            deadline_ns: 0,
-        };
-        for _ in 0..40 {
-            r.step().unwrap();
+        for name in ["micro", "rtl"] {
+            let mut e =
+                engine(name, engine_machine(&prom, &[(1, va(0o104)), (2, reset), (6, INT_ENABLE)]));
+            e.boot();
+            e.machine_mut().timers.timer[1] = IntervalTimer {
+                on: true,
+                one_shot: false,
+                interrupt_enable: true,
+                period_us: 1000,
+                deadline_ns: 0,
+            };
+            for _ in 0..40 {
+                e.step().unwrap();
+            }
+            assert_eq!(
+                e.machine().mmem[5] == Geometry::QUUX_16.word_mask(),
+                taken,
+                "{name}: reset {reset}, the jump {jump_after} microcycles after the write"
+            );
         }
-        assert_eq!(
-            r.machine().mmem[5] == Geometry::QUUX.word_mask(),
-            taken,
-            "reset {reset}, the jump {jump_after} microcycles after the write's edge"
-        );
     }
 }
 
@@ -343,7 +350,7 @@ fn m5_sintr_at_the_reset_s_edge_still_has_what_it_resets() {
 /// engines: a program that raises and drops `INTERRUPT-CONTROL`'s
 /// `PROG.UNIBUS.RESET`, `<36>` on QUUX where the CADR has `<28>` (contract G2
 /// appendix A1.6), leaves the timers, the file device, block-disk and the
-/// network as they were.
+/// Ethernet device as they were.
 #[test]
 fn m5_prog_unibus_reset_drives_nothing_on_quux() {
     // <36> up, `LOCATION-COUNTER` (source 13, which carries the flags)
@@ -360,7 +367,7 @@ fn m5_prog_unibus_reset_drives_nothing_on_quux() {
             m.bus_read(FDEV_CONTROL),
             m.bus_read(FDEV_STATUS) & 0xff_00ff,
             m.bus_read(DISK_COMMAND),
-            m.bus_read(CHAOS_CSR) & 0o62,
+            m.bus_read(ETH_CONTROL),
             m.bus_read(control(0)) & !2,
             m.bus_read(control(1)) & !2,
             m.bus_read(control(2)) & !2,
@@ -369,10 +376,7 @@ fn m5_prog_unibus_reset_drives_nothing_on_quux() {
     };
     for engine in ["micro", "rtl"] {
         let m = engine_machine(&prom, &[(1, 1 << 36), (2, 0)]);
-        let mut e: Box<dyn Engine> = match engine {
-            "micro" => Box::new(Micro::new(m)),
-            _ => Box::new(Rtl::new(m)),
-        };
+        let mut e = self::engine(engine, m);
         e.boot();
         make_busy(e.machine_mut());
         let before = look(e.machine_mut());

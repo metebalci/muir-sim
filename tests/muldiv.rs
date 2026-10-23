@@ -27,6 +27,7 @@ use muir::isa::asm::{
 use muir::machine::{Geometry, Machine};
 use muir::micro::Micro;
 use muir::muldiv;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 
 mod support;
@@ -169,8 +170,10 @@ fn on_machine<E: Engine>(
     q: bool,
 ) -> u32 {
     let p = program(body.to_vec(), q);
-    let mut m = Machine::new();
-    m.geometry = geometry;
+    let mut m = match geometry.machine_id {
+        Some(_) => Machine::with_geometry(geometry, 32),
+        None => Machine::new(),
+    };
     m.load_prom(&p.prom);
     support::prom_program_in_ram(&mut m);
     let mut e = new(m);
@@ -179,9 +182,13 @@ fn on_machine<E: Engine>(
 }
 
 /// The high word and `Q` a body leaves, on both engines as `geometry`: the
-/// two must agree.
+/// two must agree. `rtl` is the single-edge machine on the CADR and the
+/// pipeline on QUUX.
 fn words(geometry: Geometry, body: &[Insn], name: &str) -> (u32, u32) {
-    let r = |q| on_machine(geometry, Rtl::new, Rtl::boot, body, q);
+    let r = |q| match geometry.machine_id {
+        Some(_) => on_machine(geometry, Pipeline::new, Pipeline::boot, body, q),
+        None => on_machine(geometry, Rtl::new, Rtl::boot, body, q),
+    };
     let e = |q| on_machine(geometry, Micro::new, Micro::boot, body, q);
     let (rm, rq) = (r(false), r(true));
     assert_eq!((e(false), e(true)), (rm, rq), "micro against rtl: {name}");
@@ -201,7 +208,11 @@ fn quux_s_mul_is_32_multiply_steps() {
         let steps = words(Geometry::CADR, &multiply(x, y), &name);
         assert_eq!(muldiv::run(muldiv::Op::Mul, 0, y, x), steps, "muldiv::run: {name}");
         for extra in [ALU, OB_RIGHT | Q_RIGHT, OB_LEFT | Q_LOAD] {
-            assert_eq!(words(Geometry::QUUX, &one_multiply(x, y, extra), &name), steps, "{name}");
+            assert_eq!(
+                words(Geometry::QUUX_16, &one_multiply(x, y, extra), &name),
+                steps,
+                "{name}"
+            );
         }
     }
 }
@@ -224,7 +235,7 @@ fn quux_s_div_is_the_first_and_31_divide_steps() {
         assert_eq!(muldiv::run(muldiv::Op::Div, hi, d, lo), steps, "muldiv::run: {name}");
         for extra in [ALU, OB_LEFT | Q_LEFT, OB_RIGHT | Q_RIGHT] {
             assert_eq!(
-                words(Geometry::QUUX, &one_divide(hi, lo, d, extra), &name),
+                words(Geometry::QUUX_16, &one_divide(hi, lo, d, extra), &name),
                 steps,
                 "{name}"
             );
@@ -263,7 +274,7 @@ fn on_the_cadr_42_and_43_are_the_board_s() {
         }
         let cadr = words(Geometry::CADR, &body, name);
         assert_eq!([cadr.0, cadr.1], board, "{name}");
-        assert_ne!(words(Geometry::QUUX, &quux, name), cadr, "{name}: QUUX's differs");
+        assert_ne!(words(Geometry::QUUX_16, &quux, name), cadr, "{name}: QUUX's differs");
     }
 }
 

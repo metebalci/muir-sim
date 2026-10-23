@@ -22,13 +22,17 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, Machine, Word};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 use muir::tlb;
 
 mod support;
 
-/// Revision 14.
+/// Revision 14, for its single-edge `rtl`'s own timing and its `.mcr`.
 const REV14: Geometry = Geometry::QUUX_14;
+/// Revision 16, which keeps revision 14's address space, page table and
+/// TLB.
+const REV16: Geometry = Geometry::QUUX_16;
 
 /// A memory's constants: 0, 1, 2.
 const ZERO: u64 = 0o40;
@@ -206,15 +210,25 @@ fn map_page(m: &mut Machine, va: u32, e: Word) {
     m.main[at] = e;
 }
 
-/// The machine for `p`, revision 14, `setup` last.
+/// The machine for `p`, revision 16, `setup` last.
 fn machine(p: &Prog, setup: &dyn Fn(&mut Machine)) -> Machine {
+    machine_on(REV16, p, setup)
+}
+
+/// The machine for `p` on `geometry`, `setup` last.
+fn machine_on(geometry: Geometry, p: &Prog, setup: &dyn Fn(&mut Machine)) -> Machine {
     let mut prom: Vec<Insn> = p.words.iter().map(|&w| Insn::new(w)).collect();
     assert!(prom.len() <= STOP as usize, "the program runs into its stop");
     prom.resize(STOP as usize, filler());
     prom.push(Insn::new(JUMP | target(STOP) | ALWAYS | N));
     prom.resize(1024, filler());
-    let mut m = Machine::new();
-    m.geometry = REV14;
+    let mut m = if geometry == REV14 {
+        let mut m = Machine::new();
+        m.geometry = REV14;
+        m
+    } else {
+        Machine::with_geometry(geometry, 32)
+    };
     m.load_prom(&prom);
     support::prom_program_in_ram(&mut m);
     m.amem[ZERO as usize] = 0;
@@ -239,11 +253,13 @@ fn machine(p: &Prog, setup: &dyn Fn(&mut Machine)) -> Machine {
 
 /// Runs to the stop, and 64 microcycles on: on `rtl` a last write's cycle
 /// waits behind its write-back, whose re-reads of the tables may be two
-/// line fills (A14.6), about 1.1 us in all at the nominal timing.
+/// line fills (A14.6), about 1.1 us in all at the nominal timing; the
+/// pipeline drained.
 fn finish<E: Engine>(e: &mut E, name: &str) {
     for _ in 0..20_000 {
         if e.machine().opc == STOP as u16 {
             e.run(64);
+            e.settle_for_checkpoint().unwrap();
             return;
         }
         e.step().unwrap();
@@ -256,8 +272,9 @@ fn with_directory(m: &mut Machine) {
     m.memory_words.directory = DIR;
 }
 
-/// Both engines' machines after `p`: `setup` before the boot, the
-/// directory base and `after_boot` after it.
+/// Both engines' machines after `p`, `micro` and `rtl`, the pipeline, on
+/// revision 16: `setup` before the boot, the directory base and
+/// `after_boot` after it.
 fn run_with(
     p: &Prog,
     setup: &dyn Fn(&mut Machine),
@@ -268,7 +285,7 @@ fn run_with(
     with_directory(u.machine_mut());
     after_boot(u.machine_mut());
     finish(&mut u, "micro");
-    let mut r = Rtl::new(machine(p, setup));
+    let mut r = Pipeline::new(machine(p, setup));
     r.boot();
     with_directory(r.machine_mut());
     after_boot(r.machine_mut());
@@ -326,7 +343,7 @@ fn the_windows_never_touch_the_tlb() {
         &[
             (0o10, w(0o031, 0x600d), "the physical memory window's word"),
             (0o11, 0, "no fault"),
-            (0o12, (0x5155 << 16) | (14 << 4) | 4, "MACHINE-ID through the device window"),
+            (0o12, REV16.machine_id.unwrap().into(), "MACHINE-ID through the device window"),
             (0o13, 0, "no fault"),
         ],
     );
@@ -410,7 +427,7 @@ fn the_device_window_and_its_register_page() {
             (0o10, 0, "the frame buffer's write"),
             (0o11, w(0o005, 0x1234_5678), "the frame buffer: the field, tag 005"),
             (0o12, 0, "no fault"),
-            (0o20, (0x5155 << 16) | (14 << 4) | 4, "word 0, MACHINE-ID revision 14"),
+            (0o20, REV16.machine_id.unwrap().into(), "word 0, MACHINE-ID"),
             (0o21, 0, "word 1, no level-1 map"),
             (0o22, 4096, "word 2, the TLB's entries"),
             (0o23, 0o34000000000, "word 13, the buffer's device-window address"),
@@ -652,7 +669,7 @@ fn an_empty_takes_n_ticks_on_rtl() {
     p.stop();
     let time = |entries: usize| {
         let setup = move |m: &mut Machine| m.set_tlb_entries(entries);
-        let mut r = Rtl::new(machine(&p, &setup));
+        let mut r = Rtl::new(machine_on(REV14, &p, &setup));
         r.boot();
         finish(&mut r, "rtl");
         let mut u = Micro::new(machine(&p, &setup));
@@ -718,7 +735,7 @@ fn no_entry_faults_and_loads_nothing() {
 #[test]
 fn a_walk_with_no_directory_reads_nothing() {
     let mut m = Machine::new();
-    m.geometry = REV14;
+    m.geometry = REV16;
     let va = 0o1234 << 10;
     map_page(&mut m, va, rw(0o200));
     assert_eq!(tlb::walk(&m.main, 0, va).reads, [None, None]);
@@ -1140,10 +1157,10 @@ fn the_memory_system_words_read_back_and_set_the_directory() {
 
 // --- the checkpoint (A14.14) ------------------------------------------------
 
-/// **A revision-14 checkpoint** (A14.14): the location counter's 34 bits
-/// and the memory system's words come back on both engines; the TLB does
-/// not, a resume starting with it swept; and the geometry it records is
-/// revision 14's. **Fails** a checkpoint that keeps revision 13's 32-bit
+/// **The checkpoint of the 34-bit counter** (A14.14): the location
+/// counter's 34 bits and the memory system's words come back on both
+/// engines; the TLB does not, a resume starting with it swept; and the
+/// geometry it records is the machine's, revision 16's. **Fails** a checkpoint that keeps revision 13's 32-bit
 /// counter word alone.
 #[test]
 fn a_checkpoint_keeps_the_34_bit_counter_and_the_words() {
@@ -1170,7 +1187,7 @@ fn a_checkpoint_keeps_the_34_bit_counter_and_the_words() {
                 (wr.finish(), u.lc_wide())
             }
             _ => {
-                let mut r = Rtl::new(machine(&p, &setup));
+                let mut r = Pipeline::new(machine(&p, &setup));
                 r.boot();
                 with_directory(r.machine_mut());
                 words(r.machine_mut());
@@ -1182,14 +1199,14 @@ fn a_checkpoint_keeps_the_34_bit_counter_and_the_words() {
         };
         assert_eq!(saved_lc >> 32, 3, "{engine}: <33:32> before the save");
         let g = Machine::checkpointed_geometry_at(&body, 40).unwrap();
-        assert_eq!(g.revision(), Some(14), "{engine}: the revision recorded");
+        assert_eq!(g.revision(), REV16.revision(), "{engine}: the revision recorded");
         let fresh = machine(&p, &setup);
         let (lc, m) = if engine == "micro" {
             let mut u = Micro::new(fresh);
             u.load(&mut muir::checkpoint::Reader::for_word_bits(&body, 40)).unwrap();
             (u.lc_wide(), u.machine().clone())
         } else {
-            let mut r = Rtl::new(fresh);
+            let mut r = Pipeline::new(fresh);
             r.load(&mut muir::checkpoint::Reader::for_word_bits(&body, 40)).unwrap();
             (r.lc_wide(), r.machine().clone())
         };
@@ -1450,7 +1467,7 @@ fn a_write_back_holds_the_reference_on_rtl() {
         p.op(ALU | SETM | SRC_MD | m_dest(0o11));
         p.stop();
         let setup = |m: &mut Machine| map_page(m, PAGE, rw(0o200) | A);
-        let mut r = Rtl::new(machine(&p, &setup));
+        let mut r = Rtl::new(machine_on(REV14, &p, &setup));
         r.boot();
         with_directory(r.machine_mut());
         finish(&mut r, "rtl");
@@ -1657,7 +1674,7 @@ fn a_redirect_inside_holds_one_microcycle_on_rtl() {
             plant_pdl(m);
             map_page(m, PAGE, pdl_entry(0o200));
         };
-        let mut r = Rtl::new(machine(&p, &setup));
+        let mut r = Rtl::new(machine_on(REV14, &p, &setup));
         r.boot();
         with_directory(r.machine_mut());
         r.machine_mut().pdl_pointer = 0o107;
@@ -1828,7 +1845,9 @@ fn a_1_entry_tlb_runs_e1_s_control_and_evicts_on_every_fill() {
 /// entry directly written for a third page R at the index, counted as port
 /// A's eviction of a status-4 entry; port B's replaces P's walked entry,
 /// not counted. The control, Q at another index, counts no double miss.
-/// **Fails** a count that misses either engine's pairing of the two ports.
+/// On `micro`, whose two ports look up in the one microcycle; the
+/// pipeline's lookups are a stage apart. **Fails** a count that misses
+/// the pairing of the two ports.
 #[test]
 fn a_double_miss_at_one_index_and_a_port_a_eviction_are_counted() {
     const P: u32 = 0o3001 << 10;
@@ -1846,23 +1865,26 @@ fn a_double_miss_at_one_index_and_a_port_a_eviction_are_counted() {
             map_page(m, P, rw(0o300));
             map_page(m, q, rw(0o301));
         };
-        let ms = run_with(&p, &setup, &|_| {});
-        for (engine, m) in &ms {
-            assert_eq!(m.tlb.double_misses, doubles, "{engine}: Q at {q:o}");
-            let mut want = [[0; 8]; 2];
-            want[0][4] = 1;
-            assert_eq!(m.tlb.evicted, want, "{engine}: port A evicted R's direct write");
-            assert_eq!(m.main[0o300 << 10], LIST | q as Word, "{engine}: the write went out");
-        }
-        assert_eq!(walks(&ms), [2, 2], "P and Q walked");
+        let mut u = Micro::new(machine(&p, &setup));
+        u.boot();
+        with_directory(u.machine_mut());
+        finish(&mut u, "micro");
+        let m = u.machine();
+        assert_eq!(m.tlb.double_misses, doubles, "Q at {q:o}");
+        let mut want = [[0; 8]; 2];
+        want[0][4] = 1;
+        assert_eq!(m.tlb.evicted, want, "port A evicted R's direct write");
+        assert_eq!(m.main[0o300 << 10], LIST | q as Word, "the write went out");
+        assert_eq!(m.tlb.walks, 2, "P and Q walked");
     }
 }
 
 // --- rtl's time for the walk and the write-back (A14.6) ----------------------
 
-/// `p`'s machine on `rtl`, booted, the directory base and `after_boot` set.
+/// `p`'s machine on revision 14's single-edge `rtl`, booted, the directory
+/// base and `after_boot` set.
 fn rtl_for(p: &Prog, setup: &dyn Fn(&mut Machine), after_boot: &dyn Fn(&mut Machine)) -> Rtl {
-    let mut r = Rtl::new(machine(p, setup));
+    let mut r = Rtl::new(machine_on(REV14, p, setup));
     r.boot();
     with_directory(r.machine_mut());
     after_boot(r.machine_mut());

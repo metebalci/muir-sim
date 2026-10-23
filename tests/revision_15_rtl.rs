@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! **QUUX revision 15 on `rtl`: the pipeline** (contract G3 revision 15,
-//! §3, §5, §6, §9, §12.1; appendix A15b; its MP2b rulings), held to `micro`,
-//! the specification, on hand-built programs, and to the clock counts the
-//! contract gives each row.
+//! **QUUX on `rtl`: the pipeline** (contract G3 revision 15, §3, §5, §6,
+//! §9, §12.1; appendix A15b; its MP2b rulings), on revision 16, held to
+//! `micro`, the specification, on hand-built programs, and to the clock
+//! counts the contract gives each row. Three tests keep revisions 14 and
+//! 15's own: revision 15's checkpoint versions, and revision 14's engines.
 //!
 //! Each test says the partial implementation it fails. Programs run from
 //! control store 0, the PROM's first word jumping there; the words are
@@ -22,7 +23,8 @@ use muir::pipeline::{Mutation, Pipeline};
 
 mod support;
 
-const REV15: Geometry = Geometry::QUUX_15;
+/// Revision 16, the machine the pipeline runs.
+const REV16: Geometry = Geometry::QUUX_16;
 
 /// A memory's constants 0 and 1, and M memory's.
 const ZERO: u64 = 0o40;
@@ -185,14 +187,14 @@ fn run_engine<E: Engine>(mut e: E) -> Result<E, (Halt, Box<E>)> {
 }
 
 fn micro(p: &Prog) -> Micro {
-    match run_engine(Micro::new(machine(p, REV15))) {
+    match run_engine(Micro::new(machine(p, REV16))) {
         Ok(u) => u,
         Err((h, _)) => panic!("micro halted: {h:?}"),
     }
 }
 
 fn pipeline_with(p: &Prog, set: impl FnOnce(&mut Pipeline)) -> Pipeline {
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     set(&mut e);
     match run_engine(e).and_then(settled) {
         Ok(e) => e,
@@ -245,7 +247,7 @@ fn straight_line_alu_words_end_as_on_micro() {
 /// catches it.
 fn differs(p: &Prog, mutation: Mutation) {
     let u = micro(p);
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     e.mutation = mutation;
     match run_engine(e).and_then(settled) {
         Ok(e) => assert_ne!(
@@ -774,7 +776,7 @@ fn random_program(seed: u64, features: u32) -> Prog {
 type Traces = (Vec<Option<u16>>, Vec<(u16, u32, u32)>, Vec<[u64; 8]>);
 
 fn micro_trace(p: &Prog) -> (Micro, Traces) {
-    let mut u = Micro::new(machine(p, REV15));
+    let mut u = Micro::new(machine(p, REV16));
     u.boot();
     let mut t = Vec::new();
     let mut ops = Vec::new();
@@ -803,7 +805,7 @@ fn oct(r: &[u64; 8]) -> String {
 /// The pipeline's meters, for the coverage.
 fn compare(p: &Prog, seed: u64) -> muir::pipeline::Meters {
     let (u, (ut, uops, uregs)) = micro_trace(p);
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     e.trace = Some(Vec::new());
     e.operands = Some(Vec::new());
     e.registers = Some(Vec::new());
@@ -1159,7 +1161,7 @@ fn ml_same(m: Machine) -> Pipeline {
 #[test]
 fn d_and_the_fused_return_end_as_on_micro() {
     for d in [false, true] {
-        let e = ml_same(d_machine(REV15, d_register(d), &ONES, CODE, false, false));
+        let e = ml_same(d_machine(REV16, d_register(d), &ONES, CODE, false, false));
         assert_eq!(e.meters.rd_disagreements, 0);
     }
 }
@@ -1170,15 +1172,15 @@ fn d_and_the_fused_return_end_as_on_micro() {
 #[test]
 fn the_main_loop_s_paths_end_as_on_micro() {
     for d in [false, true] {
-        ml_same(d_machine(REV15, d_register(d), &ONES, CODE, true, false));
-        ml_same(d_machine(REV15, d_register(d), &ONES, UNMAPPED, false, true));
+        ml_same(d_machine(REV16, d_register(d), &ONES, CODE, true, false));
+        ml_same(d_machine(REV16, d_register(d), &ONES, UNMAPPED, false, true));
         let mut program = ONES;
         program[4] = hw(6, 0, 0);
-        ml_same(d_machine(REV15, d_register(d), &program, CODE, false, false));
+        ml_same(d_machine(REV16, d_register(d), &program, CODE, false, false));
         let program = [hw(1, 0, 0), hw(1, 0, 0), hw(0o10, 5, 5), hw(7, 0, 0)];
-        ml_same(d_machine(REV15, d_register(d), &program, CODE, false, false));
+        ml_same(d_machine(REV16, d_register(d), &program, CODE, false, false));
         let program = [hw(0o10, 5, 5), hw(0o10, 6, 3), hw(1, 0, 0), hw(0o10, 5, 1), hw(7, 0, 0)];
-        ml_same(d_machine(REV15, d_register(d), &program, CODE, false, false));
+        ml_same(d_machine(REV16, d_register(d), &program, CODE, false, false));
     }
 }
 
@@ -1194,9 +1196,9 @@ fn d_held_off_runs_the_main_loop_machines_as_d_off() {
     let programs: [&[u32]; 2] =
         [&ONES, &[hw(0o10, 5, 5), hw(0o10, 6, 3), hw(1, 0, 0), hw(0o10, 5, 1), hw(7, 0, 0)]];
     for program in programs {
-        let mut held = d_machine(REV15, d_register(true), program, CODE, false, false);
+        let mut held = d_machine(REV16, d_register(true), program, CODE, false, false);
         held.macro_dispatch.d = DSwitch::Off;
-        let off = d_machine(REV15, d_register(false), program, CODE, false, false);
+        let off = d_machine(REV16, d_register(false), program, CODE, false, false);
         let (eh, eo) = (ml_same(held), ml_same(off));
         let fused = |e: &Pipeline| e.machine().macro_dispatch.fused;
         assert_eq!(e_cycles(&eh), e_cycles(&eo), "the microcycles, D held off and D off");
@@ -1207,7 +1209,7 @@ fn d_held_off_runs_the_main_loop_machines_as_d_off() {
         let d = muir::machine::macro_dispatch::D_ENABLE;
         assert_eq!(eh.machine().macro_dispatch.register & d, 0, "D's enable clear");
         // The control: D on, as written, runs other microcycles.
-        let on = ml_same(d_machine(REV15, d_register(true), program, CODE, false, false));
+        let on = ml_same(d_machine(REV16, d_register(true), program, CODE, false, false));
         assert!(fused(&on) > fused(&eo), "D on fuses more: {} {}", fused(&on), fused(&eo));
     }
 }
@@ -1217,7 +1219,7 @@ fn d_held_off_runs_the_main_loop_machines_as_d_off() {
 /// Runs `p` on the pipeline at the period `period`, the TLB's sweep
 /// skipped, to the stop.
 fn pipeline_at(p: &Prog, period: u64) -> Pipeline {
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     e.configure(period, muir::pipeline::PortTiming::KRIA, 65_536);
     e.boot();
     e.skip_sweep();
@@ -1254,7 +1256,7 @@ fn word_25_reads_the_period_on_rtl() {
 /// whole ns.
 #[test]
 fn a_1_us_timer_rises_at_clock_1649_the_14th_time() {
-    let mut m = Machine::with_geometry(REV15, 1);
+    let mut m = Machine::with_geometry(REV16, 1);
     m.period = 17;
     let page = muir::tlb::REGISTER_PAGE_BUS;
     m.ns = 17;
@@ -1283,7 +1285,7 @@ fn a_1_us_timer_rises_at_clock_1649_the_14th_time() {
 #[test]
 fn the_accumulators_keep_true_time_over_a_second() {
     for period in [14u64, 16, 17, 22, 38, 96, 127] {
-        let mut m = Machine::with_geometry(REV15, 1);
+        let mut m = Machine::with_geometry(REV16, 1);
         m.period = period;
         let first = |t: u64| t.div_ceil(period);
         // The microsecond clock.
@@ -1383,7 +1385,7 @@ fn events(
     period: u64,
     timing: muir::pipeline::PortTiming,
 ) -> (Pipeline, Vec<(u64, muir::pipeline::Event)>) {
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     e.configure(period, timing, 65_536);
     e.events = Some(Vec::new());
     e.boot();
@@ -1517,7 +1519,7 @@ fn a_register_takes_a_clock_more_than_nothing() {
     p.read(REGISTER_PAGE, 0o20).read(PHYS | 0o7777777, 0o21).stop();
     let (e, ev) = events(&p, 17, muir::pipeline::PortTiming::KRIA);
     assert_eq!(grant_to_md(&ev), [2, 1], "a register, then nothing there");
-    assert_eq!(e.machine().mmem[0o20], 0x5155_00f4, "MACHINE-ID");
+    assert_eq!(e.machine().mmem[0o20], REV16.machine_id.unwrap().into(), "MACHINE-ID");
     assert_eq!(e.machine().mmem[0o21], 0, "nothing there reads 0");
 }
 
@@ -1550,7 +1552,7 @@ fn an_empty_sweeps_the_tlb_one_entry_a_clock() {
 /// `micro` on `p` with its OA select check off: a select may stand words
 /// after its write here, as the pipeline's hold is measured on.
 fn micro_unchecked(p: &Prog) -> Micro {
-    let mut u = Micro::new(machine(p, REV15));
+    let mut u = Micro::new(machine(p, REV16));
     u.oa_select_check = false;
     match run_engine(u) {
         Ok(u) => u,
@@ -1634,7 +1636,7 @@ const OP_3: u64 = 0o250;
 /// The main-loop machine with opcodes 2 and 3 added: opcode 3's handler
 /// the words `body`, then its return.
 fn ml_machine(d: bool, program: &[u32], body: &[u64], setup: &dyn Fn(&mut Machine)) -> Machine {
-    let mut m = d_machine(REV15, d_register(d), program, CODE, false, false);
+    let mut m = d_machine(REV16, d_register(d), program, CODE, false, false);
     let mut put = |at: u64, w: u64| m.imem[at as usize] = Insn::extended(w);
     put(OP_2, filler().raw() | POPJ);
     put(OP_2 + 1, ALU | SETM | m_src(0o31) | fd(0o11));
@@ -2040,7 +2042,7 @@ fn matrix() -> Vec<(String, Prog)> {
 /// with `mutation`.
 fn ends(p: &Prog, mutation: Mutation) -> (Micro, Result<Pipeline, Halt>) {
     let u = micro_unchecked(p);
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     e.mutation = mutation;
     e.boot();
     e.skip_sweep();
@@ -2325,7 +2327,7 @@ fn raise_at(m: &mut Machine, at: u64) {
 /// The pipeline on `p` with the interrupt raised at clock `c` (never, for
 /// `None`): its trace of microcycles to the stop and its end.
 fn rtl_raised(p: &Prog, c: Option<u64>, mutation: Mutation) -> (Vec<Option<u16>>, Pipeline) {
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     e.mutation = mutation;
     e.trace = Some(Vec::new());
     e.boot();
@@ -2349,7 +2351,7 @@ fn rtl_raised(p: &Prog, c: Option<u64>, mutation: Mutation) -> (Vec<Option<u16>>
 /// `micro` on `p` with the interrupt raised before microcycle `m`: its
 /// trace to the stop and its end.
 fn micro_raised(p: &Prog, mc: u64) -> (Vec<Option<u16>>, Micro) {
-    let mut u = Micro::new(machine(p, REV15));
+    let mut u = Micro::new(machine(p, REV16));
     u.boot();
     raise_at(u.machine_mut(), u64::MAX);
     let mut t = Vec::new();
@@ -2384,7 +2386,7 @@ fn to_stop(mut t: Vec<Option<u16>>) -> Vec<Option<u16>> {
 /// number of clocks at which `mutation`'s end differs from `micro`'s.
 fn interrupt_around(p: &Prog, check: u64, mutation: Mutation) -> (usize, usize) {
     // The reference run: the stages and the commits, clock by clock.
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     e.trace = Some(Vec::new());
     e.boot();
     e.skip_sweep();
@@ -2481,7 +2483,7 @@ fn halted_run_with(
     u: &mut Micro,
     set: &dyn Fn(&mut Pipeline),
 ) -> (Vec<Option<u16>>, Pipeline) {
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     set(&mut e);
     e.trace = Some(Vec::new());
     e.boot();
@@ -2540,7 +2542,7 @@ fn halted_run_with(
                 e.save(&mut w);
                 let bytes = w.finish();
                 t.extend(e.trace.take().unwrap());
-                let mut f = Pipeline::new(machine(p, REV15));
+                let mut f = Pipeline::new(machine(p, REV16));
                 set(&mut f);
                 f.load(&mut muir::checkpoint::Reader::for_word_bits(&bytes, 40)).unwrap();
                 assert_eq!(f.clock(), e.clock(), "the clock goes on from the checkpoint's time");
@@ -2575,7 +2577,7 @@ fn a_halt_at_every_clock_resumes_to_the_same_end() {
     for seed in 1..=12 {
         let p = random_program(seed, ALL);
         let fresh = || {
-            let mut u = Micro::new(machine(&p, REV15));
+            let mut u = Micro::new(machine(&p, REV16));
             u.boot();
             u
         };
@@ -2617,10 +2619,10 @@ fn a_halt_at_every_clock_resumes_to_the_same_end() {
 fn a_single_step_runs_one_microcycle() {
     for seed in 1..=6 {
         let p = random_program(seed, ALL);
-        let (t0, e0) = halted_run(&p, None, false, &mut Micro::new(machine(&p, REV15)));
-        let mut u = Micro::new(machine(&p, REV15));
+        let (t0, e0) = halted_run(&p, None, false, &mut Micro::new(machine(&p, REV16)));
+        let mut u = Micro::new(machine(&p, REV16));
         u.boot();
-        let mut e = Pipeline::new(machine(&p, REV15));
+        let mut e = Pipeline::new(machine(&p, REV16));
         e.trace = Some(Vec::new());
         e.boot();
         e.skip_sweep();
@@ -2688,7 +2690,7 @@ fn a_single_step_runs_one_microcycle() {
 #[test]
 fn the_pdl_buffer_across_its_wrap() {
     use muir::isa::asm::{ADD, src};
-    let top = Word::from(REV15.pdl_mask());
+    let top = Word::from(REV16.pdl_mask());
     let mut p = Prog::default();
     let start = p.k(top - 2);
     p.op(ALU | SETA | a_src(start) | fd(0o14));
@@ -2781,7 +2783,7 @@ fn a_wrong_path_map_md_evicts_nothing() {
     use muir::isa::asm::{HINT, src};
     let mut p = Prog::default();
     let x: Word = 0o4000;
-    let entries = machine(&Prog::default(), REV15).tlb.len() as Word;
+    let entries = machine(&Prog::default(), REV16).tlb.len() as Word;
     let y: Word = x + (entries << 10);
     p.main.push(((3 << 10) + 5, 0o777));
     walkable(&mut p, y, 5);
@@ -2816,7 +2818,7 @@ fn a_wrong_path_map_md_evicts_nothing() {
 /// `p` on `micro` and on the pipeline, each machine set up by `setup` and
 /// the pipeline by `set`: the same end. The pipeline.
 fn same_on(p: &Prog, setup: &dyn Fn(&mut Machine), set: &dyn Fn(&mut Pipeline)) -> Pipeline {
-    let mut m = machine(p, REV15);
+    let mut m = machine(p, REV16);
     setup(&mut m);
     let u = match run_engine(Micro::new(m.clone())) {
         Ok(u) => u,
@@ -2862,7 +2864,7 @@ fn the_read_rule_returns_the_word_written() {
         let e = same_on(&p, &|_| {}, &|e| e.port.model = Some(late(seed)));
         assert_eq!(e.machine().mmem[0o26], 0o5252, "seed {seed}");
         assert!(e.port.meters.read_rule_reads > 0, "seed {seed}: the read waited");
-        let e = ends_on(machine(&p, REV15), &|e| {
+        let e = ends_on(machine(&p, REV16), &|e| {
             e.port.model = Some(late(seed));
             e.port.read_rule_waits_for_responses = false;
         });
@@ -2876,7 +2878,7 @@ fn the_read_rule_returns_the_word_written() {
 
 /// A port of the Kria's period, its writes answered after `write_ns`.
 fn port(write_ns: u64) -> muir::pipeline::port::Port {
-    let time = Pipeline::new(machine(&Prog::default(), REV15)).time();
+    let time = Pipeline::new(machine(&Prog::default(), REV16)).time();
     let timing = muir::pipeline::PortTiming { read_ns: 247, write_ns, occupancy_ns: 10 };
     muir::pipeline::port::Port::new(timing, time, 65_536)
 }
@@ -2885,7 +2887,7 @@ fn port(write_ns: u64) -> muir::pipeline::port::Port {
 /// waits for the first's acceptance, which frees its entry.
 #[test]
 fn the_ninth_write_waits_for_the_first_s_acceptance() {
-    let mut m = machine(&Prog::default(), REV15);
+    let mut m = machine(&Prog::default(), REV16);
     let mut port = port(130);
     for k in 0..8 {
         assert!(port.write(0, 0o100 + 8 * k, k.into()), "the queue has room");
@@ -2902,7 +2904,7 @@ fn the_ninth_write_waits_for_the_first_s_acceptance() {
 /// response.
 #[test]
 fn the_seventeenth_write_is_not_issued() {
-    let mut m = machine(&Prog::default(), REV15);
+    let mut m = machine(&Prog::default(), REV16);
     let mut port = port(100_000);
     let mut now = 0;
     for k in 0..17u32 {
@@ -2929,7 +2931,7 @@ fn the_seventeenth_write_is_not_issued() {
 
 /// A port at the period `period`, in 0.5 ns, and the timing `timing`.
 fn port_at(period: u64, timing: muir::pipeline::PortTiming) -> muir::pipeline::port::Port {
-    let mut e = Pipeline::new(machine(&Prog::default(), REV15));
+    let mut e = Pipeline::new(machine(&Prog::default(), REV16));
     e.configure(period, timing, 65_536);
     muir::pipeline::port::Port::new(timing, e.time(), 65_536)
 }
@@ -2943,7 +2945,7 @@ fn accept_gap(
     a: u32,
     b: u32,
 ) -> (u64, muir::pipeline::port::Port) {
-    let mut m = machine(&Prog::default(), REV15);
+    let mut m = machine(&Prog::default(), REV16);
     let mut port = port_at(period, timing);
     for (bus, word) in [(a, 0o1111), (b, 0o2222)] {
         assert!(port.write(0, bus, word), "the queue has room");
@@ -3002,7 +3004,7 @@ fn a_two_beat_write_holds_the_next_accept_by_its_second_beat() {
 fn a_two_beat_write_is_answered_from_its_accept() {
     use muir::pipeline::PortTiming;
     for first in [0o100, 0o101] {
-        let mut m = machine(&Prog::default(), REV15);
+        let mut m = machine(&Prog::default(), REV16);
         let mut port = port_at(20, PortTiming::KRIA);
         assert!(port.write(0, first, 0o4321), "room");
         let mut landed = None;
@@ -3065,7 +3067,7 @@ fn consecutive_words_written_at_10_ns_wait_for_the_second_beats() {
 fn a_write_behind_a_fill_lands_after_it() {
     use muir::pipeline::port::{Answer, Reader};
     for ahead in [false, true] {
-        let mut m = machine(&Prog::default(), REV15);
+        let mut m = machine(&Prog::default(), REV16);
         m.main[0o101] = 0o1111;
         // A write answered after a fill's whole time, so that one gone
         // ahead reaches main memory after the fill has read it.
@@ -3113,9 +3115,9 @@ fn word_225_counts_error_responses() {
     p.write(0, REGISTER_PAGE | 0o225);
     p.read(REGISTER_PAGE | 0o225, 0o27);
     p.stop();
-    let e = ends_on(machine(&p, REV15), &|e| e.port.model = Some(late(7)));
+    let e = ends_on(machine(&p, REV16), &|e| e.port.model = Some(late(7)));
     assert_eq!((e.machine().mmem[0o26], e.machine().mmem[0o27]), (0, 0), "no error, 0");
-    let e = ends_on(machine(&p, REV15), &|e| {
+    let e = ends_on(machine(&p, REV16), &|e| {
         e.port.model = Some(muir::pipeline::port::LateModel { errors: 1, ..late(7) })
     });
     assert_eq!(e.machine().mmem[0o26], 1, "the planted error counted");
@@ -3169,7 +3171,7 @@ fn block_disk_s_start_lands_the_posted_writes() {
         let e = same_on(&p, &with_block_disk, &|e| e.port.model = Some(late(seed)));
         assert_eq!(e.machine().mmem[0o26], disk_word(3, 5), "seed {seed}: the disk's word read");
         assert_eq!(e.machine().main[0o2005], disk_word(3, 5), "seed {seed}");
-        let mut m = machine(&p, REV15);
+        let mut m = machine(&p, REV16);
         with_block_disk(&mut m);
         let e = ends_on(m, &|e| {
             e.port.model = Some(late(seed));
@@ -3199,7 +3201,7 @@ fn block_disk_s_start_lands_the_posted_writes() {
     let written: Vec<u64> = (0..6).map(|k| 0o100 + k).collect();
     let e = same_on(&p, &with_block_disk, &|e| e.port.model = Some(late(3)));
     assert_eq!(on_disk(&e), written, "every word written before START is on the disk");
-    let mut m = machine(&p, REV15);
+    let mut m = machine(&p, REV16);
     with_block_disk(&mut m);
     let e = ends_on(m, &|e| {
         e.port.model = Some(late(3));
@@ -3229,7 +3231,7 @@ fn a_halt_mid_burst_loses_no_write() {
         e.configure(e.period(), t, 65_536);
     };
     let fresh = || {
-        let mut u = Micro::new(machine(&p, REV15));
+        let mut u = Micro::new(machine(&p, REV16));
         u.boot();
         u
     };
@@ -3259,7 +3261,7 @@ fn a_halt_mid_burst_loses_no_write() {
 #[test]
 fn a_checkpoint_refuses_another_period_timing_or_cache() {
     let p = random_program(1, 0);
-    let mut e = Pipeline::new(machine(&p, REV15));
+    let mut e = Pipeline::new(machine(&p, REV16));
     e.boot();
     e.skip_sweep();
     for _ in 0..50 {
@@ -3273,7 +3275,7 @@ fn a_checkpoint_refuses_another_period_timing_or_cache() {
     e.save(&mut w);
     let bytes = w.finish();
     let load = |set: &dyn Fn(&mut Pipeline)| {
-        let mut f = Pipeline::new(machine(&p, REV15));
+        let mut f = Pipeline::new(machine(&p, REV16));
         set(&mut f);
         f.load(&mut muir::checkpoint::Reader::for_word_bits(&bytes, 40)).map_err(|e| e.to_string())
     };
@@ -3535,7 +3537,7 @@ fn differs_unchecked(p: &Prog, mutation: Mutation) -> bool {
 /// microcycles for three master clocks, run on to the stop and 16
 /// microcycles more.
 fn micro_halted_at(p: &Prog, k: u64) -> Micro {
-    let mut u = Micro::new(machine(p, REV15));
+    let mut u = Micro::new(machine(p, REV16));
     u.oa_select_check = false;
     u.boot();
     while u.machine().cycles < k && u.machine().opc != STOP as u16 {
@@ -3565,7 +3567,7 @@ fn micro_halted_at(p: &Prog, k: u64) -> Micro {
 fn halts_end_alike(p: &Prog, what: &str) {
     let u0 = micro_unchecked(p);
     let fresh = || {
-        let mut u = Micro::new(machine(p, REV15));
+        let mut u = Micro::new(machine(p, REV16));
         u.oa_select_check = false;
         u.boot();
         u
@@ -3628,7 +3630,7 @@ fn row_a_write_carries_its_start_s_md() {
             caught += usize::from(differs_unchecked(&p, Mutation::WriteMdOfNextWord));
             halts_end_alike(&p, &what);
             // The check: the word right after the start writes MD.
-            let mut u = Micro::new(machine(&p, REV15));
+            let mut u = Micro::new(machine(&p, REV16));
             u.boot();
             let mut halt = None;
             for _ in 0..2000 {
@@ -3815,7 +3817,7 @@ fn md_writes_right_after_a_read_start_end_alike() {
 #[test]
 fn the_md_after_start_check_halts_micro() {
     let run = |p: &Prog, check: bool| {
-        let mut u = Micro::new(machine(p, REV15));
+        let mut u = Micro::new(machine(p, REV16));
         u.oa_select_check = check;
         u.boot();
         for _ in 0..2000 {
@@ -3914,7 +3916,7 @@ fn row_the_word_after_a_read_start_reads_the_old_md() {
                 }
                 if gap == 0 && k == 0 && !hit {
                     let fresh = || {
-                        let mut u = Micro::new(machine(&p, REV15));
+                        let mut u = Micro::new(machine(&p, REV16));
                         u.oa_select_check = false;
                         u.boot();
                         u
@@ -4123,7 +4125,7 @@ fn the_file_device_reads_its_entry_whole_and_the_sweep_shows_its_response() {
         (Mutation::NoCmdProdWait, "CMD_PROD taken at once"),
         (Mutation::SweepMissesASet, "a sweep that misses a set"),
     ] {
-        let mut m = machine(&p, REV15);
+        let mut m = machine(&p, REV16);
         with_device_log(&mut m);
         let e = ends_on(m, &|e| {
             slow(e);
@@ -4165,7 +4167,7 @@ fn a_block_disk_transfer_clears_the_sets_it_writes_and_no_more() {
     assert_eq!(m.mmem[0o27], 0o2222);
     let c = &e.port.cache;
     assert_eq!((c.misses, c.hits), (3, 1), "the page's word missed again, the other hit");
-    let mut m = machine(&p, REV15);
+    let mut m = machine(&p, REV16);
     with_block_disk(&mut m);
     let e = ends_on(m, &|e| e.mutation = Mutation::NoClearSet);
     assert_eq!(
@@ -4226,12 +4228,12 @@ fn harness_machines() -> Vec<(String, Machine)> {
     for d in [false, true] {
         out.push((
             format!("ones, D {d}"),
-            d_machine(REV15, d_register(d), &ONES, CODE, false, false),
+            d_machine(REV16, d_register(d), &ONES, CODE, false, false),
         ));
         let program = [hw(0o10, 5, 5), hw(0o10, 6, 3), hw(1, 0, 0), hw(0o10, 5, 1), hw(7, 0, 0)];
         out.push((
             format!("operands, D {d}"),
-            d_machine(REV15, d_register(d), &program, CODE, false, false),
+            d_machine(REV16, d_register(d), &program, CODE, false, false),
         ));
         let never = JUMP | m_src(2) | R | HINT;
         out.push((
@@ -4477,7 +4479,7 @@ fn a_halt_that_squashes_one_word_keeps_the_address_after_it() {
     p.op(ALU | ADD | a_src(ONE) | m_src(0o25) | m_dest(0o25));
     p.stop();
     let fresh = || {
-        let mut u = Micro::new(machine(&p, REV15));
+        let mut u = Micro::new(machine(&p, REV16));
         u.oa_select_check = false;
         u.boot();
         u
@@ -4517,7 +4519,7 @@ fn a_halt_that_squashes_one_word_keeps_the_address_after_it() {
 #[test]
 fn a_halt_keeps_d_s_wait_for_the_stream_s_word() {
     use muir::isa::asm::src;
-    let mut m = d_machine(REV15, d_register(true), &ONES, CODE, false, false);
+    let mut m = d_machine(REV16, d_register(true), &ONES, CODE, false, false);
     m.amem[0o56] = 0o100;
     m.pdl[0o100] = 0o4242;
     m.imem[(OP_1 + 1) as usize] = Insn::extended(ALU | SETA | a_src(0o56) | fd(0o14) | POPJ);
@@ -4616,7 +4618,7 @@ fn a_register_write_s_interrupt_is_seen_by_the_check_after_the_next() {
     check_handlers(&mut p);
     for neutral in [false, true] {
         let u = {
-            let mut m = machine(&p, REV15);
+            let mut m = machine(&p, REV16);
             with_block_disk(&mut m);
             let mut u = Micro::new(m);
             u.neutral = neutral;
@@ -4625,7 +4627,7 @@ fn a_register_write_s_interrupt_is_seen_by_the_check_after_the_next() {
                 Err((h, _)) => panic!("micro halted: {h:?}"),
             }
         };
-        let mut m = machine(&p, REV15);
+        let mut m = machine(&p, REV16);
         with_block_disk(&mut m);
         let e = ends_on(m, &|e| e.neutral = neutral);
         for (what, m) in [("micro", u.machine()), ("rtl", e.machine())] {
@@ -4660,7 +4662,7 @@ fn a_register_write_waits_for_the_word_after_its_start_held_in_cs() {
     p.fill(2);
     p.stop();
     check_handlers(&mut p);
-    let mut m = machine(&p, REV15);
+    let mut m = machine(&p, REV16);
     with_block_disk(&mut m);
     let mut u = Micro::new(m.clone());
     u.oa_select_check = false;
@@ -4760,7 +4762,7 @@ fn a_boundary_between_a_register_write_and_the_next_word_digests_alike() {
         }
         e
     }
-    let mut m = machine(&p, REV15);
+    let mut m = machine(&p, REV16);
     with_block_disk(&mut m);
     let u = run(Digests::new(Micro::new(m.clone()), 1));
     let mut x = Pipeline::new(m);
@@ -4835,7 +4837,7 @@ fn a_register_read_s_side_effect_is_seen_from_the_clock_after_its_grant() {
         for (gap, calls) in [(0, (1, 0)), (1, (0, 0))] {
             let p = read_then_checks(word, gap);
             for neutral in [false, true] {
-                let mut m = machine(&p, REV15);
+                let mut m = machine(&p, REV16);
                 setup(&mut m);
                 assert_ne!(m.quux_input.interrupts(), 0, "{what}: the level up before the read");
                 let u = {
@@ -4880,7 +4882,7 @@ fn read_calls(
     neutral: bool,
     set: &dyn Fn(&mut Pipeline),
 ) -> ((Word, Word), (Word, Word), bool, Vec<(u64, muir::pipeline::Event)>) {
-    let mut m = machine(p, REV15);
+    let mut m = machine(p, REV16);
     setup(&mut m);
     let mut u = Micro::new(m.clone());
     u.neutral = neutral;
@@ -5030,7 +5032,7 @@ fn a_register_read_holds_the_level_for_the_word_after_its_start_held_in_cs() {
         p.fill(2);
         p.stop();
         check_handlers(&mut p);
-        let mut m = machine(&p, REV15);
+        let mut m = machine(&p, REV16);
         setup(&mut m);
         let mut u = Micro::new(m.clone());
         u.oa_select_check = false;
@@ -5090,7 +5092,7 @@ fn a_boundary_between_a_register_read_and_the_next_word_digests_alike() {
             d.step().unwrap();
         }
     }
-    let mut m = machine(&p, REV15);
+    let mut m = machine(&p, REV16);
     key_waiting(&mut m);
     let mut u = Digests::new(Micro::new(m.clone()), 1);
     u.engine.time_neutral();
@@ -5254,7 +5256,7 @@ fn micro_access_run(
 fn a_halt_between_a_register_access_s_start_and_the_next_instruction_sends_it_out() {
     let mut wrong = Vec::new();
     for (what, p, setup, unhalted, sent) in halt_accesses() {
-        let mut m = machine(&p, REV15);
+        let mut m = machine(&p, REV16);
         setup(&mut m);
         let (_, _, e0) = pipeline_access_run(&m, None, false);
         let (_, _, u0) = micro_access_run(&m, None, false);
@@ -5485,14 +5487,14 @@ fn under_neutral_time_a_device_sees_a_write_at_its_start_s_instant() {
     p.op(filler().raw() | POPJ);
     p.fill(1);
     let u = {
-        let mut u = Micro::new(machine(&p, REV15));
+        let mut u = Micro::new(machine(&p, REV16));
         u.neutral = true;
         match run_engine(u) {
             Ok(u) => u,
             Err((h, _)) => panic!("micro halted: {h:?}"),
         }
     };
-    let e = ends_on(machine(&p, REV15), &|e| e.neutral = true);
+    let e = ends_on(machine(&p, REV16), &|e| e.neutral = true);
     assert_ne!(u.machine().mmem[0o26], 0, "a check called");
     assert_eq!(e.machine().mmem[0o26], u.machine().mmem[0o26], "the same check");
     assert_eq!(state(e.machine()), state(u.machine()), "the ends");
@@ -5530,7 +5532,7 @@ fn the_harness_acts_between_two_microcycles_on_both_engines() {
     p.fill(1);
     p.stop();
     let video = |p: &Prog| {
-        let mut m = machine(p, REV15);
+        let mut m = machine(p, REV16);
         m.tv.set_board(muir::tv::Board::Video);
         m
     };
@@ -5603,7 +5605,12 @@ fn micro_halted(p: &Prog, geometry: Geometry) -> Micro {
 /// The pipeline on `p`, run a while and halted by the clock control
 /// register, drained.
 fn pipeline_halted(p: &Prog) -> Pipeline {
-    let mut e = Pipeline::new(machine(p, REV15));
+    pipeline_halted_on(p, REV16)
+}
+
+/// [`pipeline_halted`] on `geometry`.
+fn pipeline_halted_on(p: &Prog, geometry: Geometry) -> Pipeline {
+    let mut e = Pipeline::new(machine(p, geometry));
     e.boot();
     e.skip_sweep();
     for _ in 0..40 {
@@ -5626,7 +5633,7 @@ fn pipeline_halted(p: &Prog) -> Pipeline {
 fn spy_register_3_and_write_strobe_6_are_ir_s_extension_on_revision_15() {
     use muir::spy;
     for (what, mut m, connected) in [
-        ("revision 15", Machine::with_geometry(REV15, 1), true),
+        ("revision 15", Machine::with_geometry(REV16, 1), true),
         ("revision 14", Machine::with_geometry(Geometry::QUUX_14, 1), false),
         ("the CADR", Machine::new(), false),
     ] {
@@ -5642,7 +5649,7 @@ fn spy_register_3_and_write_strobe_6_are_ir_s_extension_on_revision_15() {
         assert_eq!(m.debug_ir, want, "{what}: 7 and 15 load nothing");
     }
     let p = hinted_loop();
-    let u = micro_halted(&p, REV15);
+    let u = micro_halted(&p, REV16);
     assert_eq!(u.spy_read(spy::IR_EXT), 1, "micro: IR<63:48>");
     let e = pipeline_halted(&p);
     assert_eq!(e.spy_read(spy::IR_EXT), 1, "the pipeline: IR<63:48>");
@@ -5690,7 +5697,7 @@ fn the_pipeline_runs_the_debug_ir_s_64_bits_as_micro_does() {
         ALU | SETA | a_src(v) | fd(0o17),
         ALU | ADD | a_src(0o1700) | m_src(0o20) | m_dest(0o25) | OA_HIGH_SELECT,
     ];
-    let mut u = micro_halted(&p, REV15);
+    let mut u = micro_halted(&p, REV16);
     let (pc, cycles) = (u.pc(), u.machine().cycles);
     for ir in words {
         execute_debug_ir(&mut u, ir, &mut |e| {
@@ -5726,11 +5733,12 @@ fn the_pipeline_runs_the_debug_ir_s_64_bits_as_micro_does() {
 #[test]
 fn a_revision_15_checkpoint_keeps_no_imod_flag_and_a_version_55_one_loads() {
     use muir::checkpoint::{Checkpoint, VERSION_15, VERSION_40, Writer, version_for};
+    const REV15: Geometry = Geometry::QUUX_15;
     assert_eq!(version_for(&REV15), VERSION_15);
     assert_eq!(VERSION_15, 56);
     assert_eq!(version_for(&Geometry::QUUX_14), VERSION_40);
     let p = Prog::default();
-    let e = pipeline_halted(&p);
+    let e = pipeline_halted_on(&p, REV15);
     let saved = |e: &Pipeline| {
         let mut w = Writer::new();
         e.save(&mut w);
@@ -5788,7 +5796,7 @@ fn a_dispatch_memory_write_loads_the_dispatch_constant_on_revision_15() {
 /// The pipeline on `p` with `set` applied, its events recorded, run to the
 /// stop and settled; and the clock each address first commits at.
 fn commits(p: &Prog, set: &dyn Fn(&mut Pipeline)) -> (Pipeline, Vec<(u64, muir::pipeline::Event)>) {
-    let mut e = Pipeline::new(machine(p, REV15));
+    let mut e = Pipeline::new(machine(p, REV16));
     set(&mut e);
     e.events = Some(Vec::new());
     let e = match run_engine(e).and_then(settled) {
@@ -5910,7 +5918,7 @@ fn two_bubbles_fetch_the_target_a_clock_later() {
     }
     for (what, p) in &matrix() {
         let u = micro_unchecked(p);
-        let mut e = Pipeline::new(machine(p, REV15));
+        let mut e = Pipeline::new(machine(p, REV16));
         e.bubbles = 2;
         let e = match run_engine(e).and_then(settled) {
             Ok(e) => e,
@@ -5939,7 +5947,7 @@ fn two_bubbles_fetch_the_target_a_clock_later() {
 #[test]
 fn p3_writes_are_answered_in_order_one_a_clock() {
     let run = |seed: u64, in_order: bool| {
-        let mut m = machine(&Prog::default(), REV15);
+        let mut m = machine(&Prog::default(), REV16);
         let mut port = port(130);
         port.model = Some(late(seed));
         // The default answers in order; the planted run turns it off.
@@ -6027,9 +6035,9 @@ fn a_data_push_keeps_the_stack_s_19_bits() {
         wr.finish()
     };
     let (ub, eb) = (body(&|wr| u.save(wr)), body(&|wr| e.save(wr)));
-    let mut v = Micro::new(machine(&p, REV15));
+    let mut v = Micro::new(machine(&p, REV16));
     v.load(&mut muir::checkpoint::Reader::for_word_bits(&ub, 40)).unwrap();
-    let mut f = Pipeline::new(machine(&p, REV15));
+    let mut f = Pipeline::new(machine(&p, REV16));
     f.load(&mut muir::checkpoint::Reader::for_word_bits(&eb, 40)).unwrap();
     for (what, m) in [
         ("micro", u.machine()),
@@ -6237,7 +6245,7 @@ fn d_s_switch_keeps_or_clears_d_s_enable() {
         p.op(ALU | SETA | a_src(v) | fd(5));
         p.fill(2);
         p.stop();
-        let mut m = machine(&p, REV15);
+        let mut m = machine(&p, REV16);
         m.macro_dispatch.d = d;
         let u = run_engine(Micro::new(m.clone())).unwrap_or_else(|(h, _)| panic!("micro: {h:?}"));
         let e = ends_on(m, &|_| {});
@@ -6342,7 +6350,7 @@ fn d_s_effects_wait_for_its_word() {
     let programs: [&[u32]; 2] =
         [&ONES, &[hw(0o10, 5, 5), hw(0o10, 6, 3), hw(1, 0, 0), hw(0o10, 5, 1), hw(7, 0, 0)]];
     for program in programs {
-        let mut e = Pipeline::new(d_machine(REV15, d_register(true), program, CODE, false, false));
+        let mut e = Pipeline::new(d_machine(REV16, d_register(true), program, CODE, false, false));
         e.boot();
         e.skip_sweep();
         let regs = |e: &Pipeline| {
@@ -6377,7 +6385,7 @@ fn d_s_effects_wait_for_its_word() {
 /// `micro`. A wait the fault does not end hangs the pipeline.
 #[test]
 fn a_faulting_fetch_ends_d_s_wait() {
-    let m = d_machine(REV15, d_register(true), &ONES, UNMAPPED, false, true);
+    let m = d_machine(REV16, d_register(true), &ONES, UNMAPPED, false, true);
     let e = ml_same(m.clone());
     assert_eq!(e.machine().mmem[0o10], 1, "condition 6 took the fault");
     let hung = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -6403,7 +6411,7 @@ fn a_faulting_fetch_ends_d_s_wait() {
 #[test]
 fn d_s_slot_does_not_wait_in_rd() {
     let gaps = |mutation: Mutation| {
-        let m = d_machine(REV15, d_register(true), &ONES, CODE, false, false);
+        let m = d_machine(REV16, d_register(true), &ONES, CODE, false, false);
         let (commits, _) = commits_to_the_stop(m, &|e| e.mutation = mutation);
         // Opcode 1's return at OP_1 + 1, its slot, then the next handler.
         commits
@@ -6458,7 +6466,7 @@ fn d_s_slot_sees_the_stack_popped() {
 #[test]
 fn d_decides_on_its_slot_s_fetch_not_an_earlier_one() {
     let program = [hw(1, 0, 0), hw(7, 0, 0), hw(1, 0, 0), hw(7, 0, 0)];
-    let mut m = d_machine(REV15, d_register(true), &program, CODE, true, false);
+    let mut m = d_machine(REV16, d_register(true), &program, CODE, true, false);
     use muir::isa::asm::{CARRY_IN, M_PLUS_C};
     let mut put = |at: u64, w: u64| m.imem[at as usize] = Insn::extended(w);
     // The call with N, as microcode 2002's `QMLP` makes it: its slot, which
@@ -6488,12 +6496,12 @@ fn d_decides_on_its_slot_s_fetch_not_an_earlier_one() {
 /// hit (`d_s_slot_does_not_wait_in_rd`), 84 in all. D off, neither counts.
 #[test]
 fn d_s_wait_is_metered() {
-    let run = |d: bool| ml_same(d_machine(REV15, d_register(d), &ONES, CODE, false, false)).meters;
+    let run = |d: bool| ml_same(d_machine(REV16, d_register(d), &ONES, CODE, false, false)).meters;
     let (off, on) = (run(false), run(true));
     assert_eq!((off.d_waits, off.d_wait), (0, 0), "no wait with D off");
     assert_eq!(on.d_waits, 6, "the boot's return and the five that need a fetch");
     assert_eq!(on.fused - off.fused, on.d_waits, "D dispatched each");
-    let m = d_machine(REV15, d_register(true), &ONES, CODE, false, false);
+    let m = d_machine(REV16, d_register(true), &ONES, CODE, false, false);
     let (commits, e) = commits_to_the_stop(m, &|_| {});
     // Each return D waits on, its slot, and the next word committed.
     let gaps: Vec<u64> = commits
@@ -6511,9 +6519,6 @@ fn d_s_wait_is_metered() {
 }
 
 // --- Revision 16's Ethernet device behind the posted writes and the cache ------
-
-/// Revision 16 (QUUX's Ethernet contract, §10).
-const REV16: Geometry = Geometry::QUUX_16;
 
 /// The Ethernet device's rings, buffers and frame, physical word
 /// addresses, each on a line: one entry a ring; buffers A and B; a word

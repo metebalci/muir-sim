@@ -40,6 +40,44 @@ pub fn quux_map(m: &mut muir::machine::Machine, vpage: u32, phys: u32) -> u32 {
     vpage << 10 | phys & 0o1777
 }
 
+/// QUUX revision 16 with 2MW of main memory, [`muir::machine::MAIN_WORDS`],
+/// what `Machine::new` gives the CADR.
+pub fn quux_16() -> muir::machine::Machine {
+    muir::machine::Machine::with_geometry(
+        muir::machine::Geometry::QUUX_16,
+        muir::machine::MAIN_WORDS >> 16,
+    )
+}
+
+/// The register page's bus address on revision 16, the address
+/// [`muir::machine::Machine::bus_read`] takes ([`muir::tlb::REGISTER_PAGE_BUS`]).
+pub const PAGE_16: u32 = muir::tlb::REGISTER_PAGE_BUS;
+
+/// The pipeline on `m` with its clock at the machine's time `at`, in its
+/// units, by a checkpoint's round trip: a pipeline takes its clock from
+/// the machine's time when it loads one, and starts at 0 otherwise.
+pub fn pipeline_at(m: muir::machine::Machine, at: u64) -> muir::pipeline::Pipeline {
+    use muir::checkpoint::{Reader, Writer};
+    let bits = m.geometry.word_bits;
+    let mut first = muir::pipeline::Pipeline::new(m.clone());
+    first.machine_mut().ns = at;
+    let mut w = Writer::new();
+    first.save(&mut w);
+    let body = w.finish();
+    let mut p = muir::pipeline::Pipeline::new(m);
+    p.load(&mut Reader::for_word_bits(&body, bits)).unwrap();
+    p
+}
+
+/// The virtual address of the bus address `bus` on revision 16 through its
+/// fixed windows, with no TLB entry (contract G3 revision 14, A14.1): the
+/// device window for a device address, `<28>` set, and the physical memory
+/// window for main memory.
+pub fn quux_va(bus: u32) -> u32 {
+    use muir::tlb::{DEVICE, DEVICE_WINDOW, PHYSICAL_WINDOW};
+    if bus & DEVICE != 0 { DEVICE_WINDOW | (bus & !DEVICE) } else { PHYSICAL_WINDOW | bus }
+}
+
 pub use server::ChaosServer;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1086,6 +1124,49 @@ pub fn quux() -> std::process::Command {
     let mut c = quux_default();
     c.arg("--no-pace");
     c
+}
+
+/// `quux` on revision 16: [`quux`] with `MUIR_QUUX_REVISION=16`.
+pub fn quux_on_16() -> std::process::Command {
+    let mut c = quux();
+    c.env("MUIR_QUUX_REVISION", "16");
+    c
+}
+
+/// A boot PROM for revision 16 under `dir`, for the runs that need one
+/// and not what it does: a jump to itself at 36000 ([`prom_16`]).
+pub fn idle_prom_16(dir: &std::path::Path) -> PathBuf {
+    use muir::isa::asm::{ALWAYS, JUMP, N, target};
+    prom_16(dir, "idle-prom-16.mcr", &[JUMP | target(0o36000) | ALWAYS | N])
+}
+
+/// A boot PROM for revision 16 under `dir` that keeps its PC moving: six
+/// fillers from 36000 and a jump back to 36000, a loop of eight
+/// microcycles with the jump's nopped slot ([`prom_16`]).
+pub fn loop_prom_16(dir: &std::path::Path) -> PathBuf {
+    use muir::isa::asm::{ALWAYS, JUMP, N, filler, target};
+    let mut words = vec![filler().raw(); 6];
+    words.push(JUMP | target(0o36000) | ALWAYS | N);
+    prom_16(dir, "loop-prom-16.mcr", &words)
+}
+
+/// A boot PROM for revision 16 under `dir` named `name`: `words` from
+/// 36000, in a revision-15 `.mcr`, format word 51550001 with section 6
+/// saying 15 (contract G3 revision 15, A15b.7), which revision 16 loads
+/// (QUUX's Ethernet contract, §10).
+pub fn prom_16(dir: &std::path::Path, name: &str, words: &[u64]) -> PathBuf {
+    use muir::mcr;
+    let mut w = vec![mcr::FORMAT_WORD, 2];
+    w.extend_from_slice(&[6, 1, 32, 32, 0, 0, 0, 0, 15]);
+    w.extend_from_slice(&[1, words.len() as u32, 64, 64, 0o36000, 0, 0, 0]);
+    for &x in words {
+        w.extend_from_slice(&[x as u32, (x >> 32) as u32]);
+    }
+    let mut b: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
+    b.resize(b.len().div_ceil(mcr::BLOCK_BYTES) * mcr::BLOCK_BYTES, 0);
+    let path = dir.join(name);
+    std::fs::write(&path, b).unwrap();
+    path
 }
 
 /// `quux` as a person runs it: [`quux`] without `--no-pace`.

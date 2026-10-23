@@ -11,7 +11,8 @@
 //! memory, writes the producer index, moves the machine's clock on, and
 //! reads the responses back, against a scratch folder on the host. The
 //! engines' own tests at the end run a program that does the same through
-//! the bus, on `micro` and on `rtl`.
+//! the bus, on `micro` and on `rtl`, the pipeline, on revision 16; the
+//! cache of revisions 13 and 14 on the single-edge `rtl`, on revision 13.
 
 mod support;
 
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 use muir::file_device::{self, Mounts, op, status};
 use muir::machine::{Geometry, Machine};
 
-const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
+const PAGE: u32 = support::PAGE_16;
 const CONTROL: u32 = PAGE + 0o160;
 const STATUS: u32 = PAGE + 0o161;
 const CMD_BASE: u32 = PAGE + 0o162;
@@ -40,10 +41,14 @@ const RESP_RING: u32 = 0o110000;
 const BUF_A: u32 = 0o120000;
 const BUF_B: u32 = 0o160000;
 
-/// The time a command takes, as the device charges it: 20 us and 100 us a
-/// KiB of the lengths its entry names, rounded up to the ns.
+/// The machine's units a nanosecond, revision 16's of 0.5 ns.
+const UNITS_NS: u64 = 2;
+
+/// The time a command takes, as the device charges it, in the machine's
+/// units: 20 us and 100 us a KiB of the lengths its entry names, rounded up
+/// to the ns.
 fn cost(a_len: u32, b_len: u32) -> u64 {
-    20_000 + ((a_len as u64 + b_len as u64) * 100_000).div_ceil(1024)
+    (20_000 + ((a_len as u64 + b_len as u64) * 100_000).div_ceil(1024)) * UNITS_NS
 }
 
 // --- the scratch folder ---------------------------------------------------
@@ -210,8 +215,7 @@ fn get_bytes(m: &Machine, at: u32, n: usize) -> Vec<u8> {
 }
 
 fn quux(mounts: Mounts) -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
+    let mut m = support::quux_16();
     m.file_device.mounts = mounts;
     m
 }
@@ -261,7 +265,7 @@ impl Dev {
         let start = self.m.ns;
         while self.m.bus_read(RESP_PROD) as u16 == self.cons {
             self.m.ns += 1_000;
-            assert!(self.m.ns - start < 10_000_000_000, "no response in ten seconds");
+            assert!(self.m.ns - start < 10_000_000_000, "no response in five seconds");
         }
         let r = self.response(self.cons);
         self.cons = self.cons.wrapping_add(1);
@@ -509,7 +513,7 @@ fn an_index_that_claims_too_much_is_a_fault_and_ignored() {
 // --- rings, order and time ----------------------------------------------------
 
 /// **Nothing completes within the producer write, and a response appears at
-/// its due time and not a nanosecond before**: 20 us and 100 us a KiB of the
+/// its due time and not a unit, 0.5 ns, before**: 20 us and 100 us a KiB of the
 /// lengths the entry names, from when the producer write landed. The
 /// command ring's consumer and the response ring's producer move together.
 #[test]
@@ -525,7 +529,7 @@ fn a_response_comes_at_its_due_time_and_not_before() {
     assert_eq!(d.m.bus_read(RESP_PROD), 0, "not within the producer write");
     assert_eq!(d.m.bus_read(CMD_CONS), 0);
     d.m.ns = due - 1;
-    assert_eq!(d.m.bus_read(RESP_PROD), 0, "a nanosecond before");
+    assert_eq!(d.m.bus_read(RESP_PROD), 0, "a unit before");
     d.m.advance_file_device();
     assert_eq!(d.m.main[RESP_RING as usize..], before[RESP_RING as usize..], "memory unchanged");
     assert!(!d.m.dma_written);
@@ -728,16 +732,12 @@ fn a_prog_unibus_reset_leaves_the_device_as_it_was() {
         d.m.load_prom(&words);
         support::prom_program_in_ram(&mut d.m);
         d.m.mmem[1] = 1 << 36;
-        d.m.mmem[3] = support::quux_map(&mut d.m, 1, PAGE | 0o100).into();
+        d.m.mmem[3] = support::quux_va(PAGE | 0o100).into();
         let mut e: Box<dyn Engine> = match engine {
             "micro" => Box::new(muir::micro::Micro::new(d.m)),
-            _ => {
-                // Its clock where the scripted driver left the machine's.
-                let ns = d.m.ns;
-                let mut r = muir::rtl::Rtl::new(d.m);
-                r.set_clock(ns);
-                Box::new(r)
-            }
+            // Its clock from 0: a checkpoint, which would start it where
+            // the scripted driver left the machine's, closes the handles.
+            _ => Box::new(muir::pipeline::Pipeline::new(d.m)),
         };
         e.boot();
         // A READ of 64 KiB queued, some 6 ms of the device's time.
@@ -1393,6 +1393,7 @@ mod engines {
         ALU, ALWAYS, JUMP, MD, SETM, SRC_MD, START_READ, START_WRITE, a_dest, filler, m_src, target,
     };
     use muir::micro::Micro;
+    use muir::pipeline::Pipeline;
     use muir::rtl::Rtl;
 
     const TAG: u32 = 0o4321;
@@ -1425,9 +1426,49 @@ mod engines {
 
     /// A machine with a file open for reading at handle `h`, its rings set
     /// up, the READ of its first 8 bytes in the command slot but for word 0,
-    /// which the program writes, and the interrupt enabled.
+    /// which the program writes, and the interrupt enabled: revision 16,
+    /// the addresses in their windows.
     fn machine(f: &Folder) -> (Machine, [u32; 2]) {
-        let mut d = Dev::new(default_root(f));
+        let (mut m, ends, prod) = loaded(Dev::new(default_root(f)));
+        let va = |a: u32| u64::from(support::quux_va(a));
+        m.mmem[1] = va(PAGE | 0o164);
+        m.mmem[2] = u64::from(prod + 1);
+        m.mmem[3] = va(CMD_RING + 8 * prod);
+        m.mmem[4] = u64::from(TAG | op::READ << 16);
+        m.mmem[5] = va(PAGE | 0o170);
+        m.mmem[6] = va(PAGE | 0o100);
+        m.mmem[7] = va(BUF_B);
+        (m, ends)
+    }
+
+    /// [`machine`]'s on revision 13, through its map, for the single-edge
+    /// `rtl`'s cache.
+    fn machine_13(f: &Folder) -> (Machine, [u32; 2]) {
+        // The device set up on revision 16, the machine then revision 13's.
+        let (mut m, ends, prod) = loaded(Dev::new(default_root(f)));
+        m.geometry = Geometry::QUUX;
+        // Virtual pages of 1024 words: 1 the register page's frame, the
+        // page at its word 1400; 2 the command ring; 3 buffer B.
+        let page_13 = muir::machine::REGISTER_PAGE_13;
+        let rw = (1 << 27) | (1 << 26);
+        m.l2_map[1] = rw | (page_13 >> 10);
+        m.l2_map[2] = rw | (CMD_RING >> 10);
+        m.l2_map[3] = rw | (BUF_B >> 10);
+        let page = u64::from((1 << 10) | (page_13 & 0o1777));
+        m.mmem[1] = page | 0o164;
+        m.mmem[2] = u64::from(prod + 1);
+        m.mmem[3] = u64::from((2 << 10) | (8 * prod));
+        m.mmem[4] = u64::from(TAG | op::READ << 16);
+        m.mmem[5] = page | 0o170;
+        m.mmem[6] = page | 0o100;
+        m.mmem[7] = 3 << 10;
+        (m, ends)
+    }
+
+    /// `d`'s machine with the file open, the command slot and the program
+    /// loaded: the machine, the response index and slot the READ answers
+    /// at, and the producer index before the program's write.
+    fn loaded(mut d: Dev) -> (Machine, [u32; 2], u32) {
         let o = d.open("/data", READ);
         assert_eq!(o.status(), 0);
         d.m.bus_write(CONTROL, 0x101);
@@ -1449,22 +1490,8 @@ mod engines {
         words[..p.len()].copy_from_slice(&p);
         m.load_prom(&words);
         support::prom_program_in_ram(&mut m);
-        // Virtual pages of 1024 words: 1 the register page's frame, the
-        // page at its word 1400; 2 the command ring; 3 buffer B.
-        let rw = (1 << 27) | (1 << 26);
-        m.l2_map[1] = rw | (PAGE >> 10);
-        m.l2_map[2] = rw | (CMD_RING >> 10);
-        m.l2_map[3] = rw | (BUF_B >> 10);
-        let page = u64::from((1 << 10) | (PAGE & 0o1777));
-        m.mmem[1] = page | 0o164;
-        m.mmem[2] = u64::from(d.prod as u32 + 1);
-        m.mmem[3] = u64::from((2 << 10) | (8 * d.prod as u32));
-        m.mmem[4] = u64::from(TAG | op::READ << 16);
-        m.mmem[5] = page | 0o170;
-        m.mmem[6] = page | 0o100;
-        m.mmem[7] = 3 << 10;
         let resp = RESP_RING + 8 * d.cons as u32;
-        (m, [d.cons as u32 + 1, resp])
+        (m, [d.cons as u32 + 1, resp], d.prod as u32)
     }
 
     /// Steps `e` until the response index moves: the head's due time as the
@@ -1531,20 +1558,21 @@ mod engines {
         e.boot();
         check("micro", &mut e, answered, resp, |e| e.machine().ns);
         let (m, [answered, resp]) = machine(&f);
-        let mut r = Rtl::new(m);
+        let mut r = Pipeline::new(m);
         r.boot();
-        check("rtl", &mut r, answered, resp, Rtl::ns);
+        check("rtl", &mut r, answered, resp, |e| e.machine().ns);
     }
 
-    /// **A device write never hits stale in the cache**: `rtl`'s loop reads
-    /// B's first word, a hit each time once its line is filled, until the
-    /// READ lands there; the next read of it misses, the whole cache having
-    /// been invalidated before the response index moved.
+    /// **A device write never hits stale in the cache** of revisions 13 and
+    /// 14: the single-edge `rtl`'s loop reads B's first word, a hit each
+    /// time once its line is filled, until the READ lands there; the next
+    /// read of it misses, the whole cache having been invalidated before the
+    /// response index moved.
     #[test]
     fn a_device_write_invalidates_the_cache() {
         let f = Folder::new("cache");
         f.file("data", b"0123456789");
-        let (m, [answered, _]) = machine(&f);
+        let (m, [answered, _]) = machine_13(&f);
         let mut r = Rtl::new(m);
         r.boot();
         let _ = run_to_response(&mut r, answered, Rtl::ns);
@@ -1557,7 +1585,8 @@ mod engines {
         assert_eq!(fixnum(r.machine().amem[0o202]), u32::from_le_bytes(*b"0123"));
     }
 
-    /// **The producer index is taken once the write buffer is empty**: with
+    /// **The producer index is taken once the write buffer is empty**, on
+    /// revision 13's single-edge `rtl` and its one-word buffer: with
     /// main memory taking 25 us a write, the command entry's word 0 is
     /// still going in when the producer write lands, and the command's time
     /// counts from when it is in. (Longer than about 40 us and the loop's
@@ -1567,10 +1596,12 @@ mod engines {
         use muir::cache::MemoryTiming;
         let f = Folder::new("drain");
         f.file("data", b"0123456789");
+        // The command's time in nanoseconds, revision 13's unit.
+        let cost_ns = cost(0, 8) / UNITS_NS;
         for (write_ns, least, most) in
-            [(25_000u64, 25_000 + cost(0, 8), 50_000), (290, cost(0, 8), 25_000)]
+            [(25_000u64, 25_000 + cost_ns, 50_000), (290, cost_ns, 25_000)]
         {
-            let (m, [answered, resp]) = machine(&f);
+            let (m, [answered, resp]) = machine_13(&f);
             let mut r = Rtl::new(m);
             r.set_memory_timing(Some(MemoryTiming { read_ns: 380, write_ns }));
             r.boot();

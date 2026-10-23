@@ -17,13 +17,15 @@
 //! LOCAL or ARG, PDL-INDEX is loaded with the operand's address at the end
 //! of the microcycle after the return.
 //!
-//! On `rtl`, QUUX has the cache-only prefetch too, with the page's reach
-//! (contract H8a §3.5, G2 §9): a return that needs the next word in
-//! sequence fuses when the fetch before left it in the buffer. `micro` has
-//! no cache and fuses only the returns that need no fetch, so the two
-//! engines fuse different returns and take different microcycles, and leave
-//! the same state wherever the handlers keep §3.3's rule; the tests that
-//! compare them count each engine's fused returns ([`fused_on`]).
+//! These run on revision 16, where `rtl` is the pipeline, which fuses the
+//! returns `micro` does: those that need no fetch (its fused returns use no
+//! prefetched word, and D, the dispatch from the fetched word, is off
+//! unless the register's `<30>` says otherwise). Revision 13's single-edge
+//! `rtl` has the cache-only prefetch too, with the page's reach (contract
+//! H8a §3.5, G2 §9): a return that needs the next word in sequence fuses
+//! when the fetch before left it in the buffer, so that engine fuses more
+//! returns than `micro`, and leaves the same state wherever the handlers
+//! keep §3.3's rule; its tests run on revision 13 ([`fused_on_13`]).
 //!
 //! The main loop here is made as microcode 2001's `QMLP` is
 //! (`uc-macrocode.lisp:9-13`): the condition-6 call, `M-INST-BUFFER <- MD`,
@@ -38,11 +40,17 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, Machine, Operand, macro_dispatch};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 
 mod support;
 
 use support::macro_dispatch::{Checked, Counts, Executes, PdlAt, Write, fill_generic, writes};
+
+/// Revision 16, where these run, and revision 13, whose single-edge `rtl`
+/// has the prefetch.
+const REV16: Geometry = Geometry::QUUX_16;
+const REV13: Geometry = Geometry::QUUX;
 
 /// The main loop, at an address with `<1:0>` clear as the stream hardware
 /// requires (`uc-macrocode.lisp:6`).
@@ -249,7 +257,7 @@ struct Setup {
 impl Setup {
     fn off() -> Setup {
         Setup {
-            geometry: Geometry::QUUX,
+            geometry: REV16,
             register: 0,
             sequence_break: false,
             pop: Pop::Plain,
@@ -292,8 +300,13 @@ fn specialised_index() -> usize {
 /// (the generic handlers, OPDTB's entry for each index's opcode), A
 /// memory and map.
 fn machine(s: Setup) -> Machine {
-    let mut m = Machine::new();
-    m.geometry = s.geometry;
+    let mut m = if s.geometry == REV16 {
+        Machine::with_geometry(REV16, 32)
+    } else {
+        let mut m = Machine::new();
+        m.geometry = s.geometry;
+        m
+    };
     let mut prom = vec![filler(); 1024];
     let put = |prom: &mut Vec<Insn>, at: u64, w: u64| prom[at as usize] = Insn::new(w);
     // Start: MACRO-DISPATCH, LC, INTERRUPT-CONTROL (the sequence break),
@@ -399,7 +412,10 @@ fn machine(s: Setup) -> Machine {
 
     m.amem[0o50] = u64::from(MAIN);
     m.amem[0o51] = u64::from(s.register);
-    m.amem[0o52] = u64::from(s.code * 4);
+    // The location counter, a byte address: of the code's word in the
+    // physical memory window on revision 16.
+    let window = if s.geometry.paged() { u64::from(muir::tlb::PHYSICAL_WINDOW) } else { 0 };
+    m.amem[0o52] = (window | u64::from(s.code)) * 4;
     // `SEQUENCE.BREAK`: `<26>` on the CADR, `<34>` on QUUX (contract G2
     // appendix A1.6).
     let sequence_break = if s.geometry.wide() { 1 << 34 } else { 1 << 26 };
@@ -410,9 +426,11 @@ fn machine(s: Setup) -> Machine {
     m.mmem[AP_AT as usize] = u64::from(AP);
     m.amem[AP_AT as usize] = u64::from(AP);
     m.pdl_index = SENTINEL as u16;
-    // QUUX's virtual pages 0 and 1, of 1024 words, onto physical pages 0
-    // and 1 (contract G2 §2.6); the CADR's 1 and 2, of 256.
-    if s.geometry.wide() {
+    // Revision 13's virtual pages 0 and 1, of 1024 words, onto physical
+    // pages 0 and 1 (contract G2 §2.6); the CADR's 1 and 2, of 256;
+    // revision 16 reads them in the physical memory window.
+    if s.geometry.paged() {
+    } else if s.geometry.wide() {
         let rw = (1 << 27) | (1 << 26);
         m.l2_map[0] = rw;
         m.l2_map[1] = rw | 1;
@@ -448,9 +466,25 @@ fn run<E: Engine>(mut e: E) -> (u64, Machine) {
     panic!("the program never reached its end");
 }
 
+/// `s` on revision 13 where it is revision 16's: for the single-edge
+/// `rtl`'s prefetch, which revision 16 does not have.
+fn on_13(s: Setup) -> Setup {
+    if s.geometry.paged() { Setup { geometry: REV13, ..s } } else { s }
+}
+
+/// `s` on `micro` and on `rtl`: the pipeline on revision 16, the
+/// single-edge machine on revision 13 and the CADR.
 fn both(s: Setup) -> [(&'static str, u64, Machine); 2] {
     let (n, m) = run(Micro::new(machine(s)));
-    let (rn, rm) = run(Rtl::new(machine(s)));
+    let (rn, rm) =
+        if s.geometry.paged() { run(Pipeline::new(machine(s))) } else { run(Rtl::new(machine(s))) };
+    [("micro", n, m), ("rtl", rn, rm)]
+}
+
+/// `s` on `micro`, and on revision 13's single-edge `rtl`.
+fn micro_and_rtl_13(s: Setup) -> [(&'static str, u64, Machine); 2] {
+    let (n, m) = run(Micro::new(machine(s)));
+    let (rn, rm) = run(Rtl::new(machine(on_13(s))));
     [("micro", n, m), ("rtl", rn, rm)]
 }
 
@@ -508,25 +542,29 @@ fn fusing_prefetched(returns_fuse: impl Fn(u32) -> bool) -> Vec<usize> {
         .collect()
 }
 
-/// How many returns in [`PROGRAM`] fuse on `engine`: those
+/// How many returns in [`PROGRAM`] fuse on revision 16, on either engine:
+/// those that need no fetch.
+fn fused_on(_engine: &str, returns_fuse: impl Fn(u32) -> bool + Copy) -> u64 {
+    fusing(returns_fuse)
+}
+
+/// The microcycles the fused returns of [`fused_on`] save: two for each,
+/// `QMLP+2` and `QMLP+3`.
+fn saved_on(_engine: &str, returns_fuse: impl Fn(u32) -> bool + Copy) -> u64 {
+    2 * fusing(returns_fuse)
+}
+
+/// How many returns in [`PROGRAM`] fuse on revision 13's `engine`: those
 /// that need no fetch, and on `rtl` those its prefetch holds the word for.
-fn fused_on(engine: &str, returns_fuse: impl Fn(u32) -> bool + Copy) -> u64 {
+fn fused_on_13(engine: &str, returns_fuse: impl Fn(u32) -> bool + Copy) -> u64 {
     let prefetched = if engine == "rtl" { fusing_prefetched(returns_fuse).len() } else { 0 };
     fusing(returns_fuse) + prefetched as u64
 }
 
-/// The microcycles the fused returns of [`fused_on`] save on `engine`: two
-/// for one that needs no fetch (`QMLP+2` and `QMLP+3`), four for one on the
-/// fetch path (`QMLP` to `QMLP+3`).
-fn saved_on(engine: &str, returns_fuse: impl Fn(u32) -> bool + Copy) -> u64 {
-    let prefetched = if engine == "rtl" { fusing_prefetched(returns_fuse).len() } else { 0 };
-    2 * fusing(returns_fuse) + 4 * prefetched as u64
-}
-
 /// **Destinations 5 to 7 write the register, the index and the entry**
 /// on QUUX, each as well as M, as every functional destination does: the
-/// register keeps `<31>` and `<28:0>`, the index its ten bits and the
-/// entry its eighteen. On the CADR they write only M.
+/// register keeps `<31>`, `<30>`, D's enable, and `<28:0>`, the index its
+/// ten bits and the entry its eighteen. On the CADR they write only M.
 #[test]
 fn destinations_5_to_7_write_the_register_the_index_and_the_entry() {
     let prom = [
@@ -537,8 +575,7 @@ fn destinations_5_to_7_write_the_register_the_index_and_the_entry() {
         Insn::new(ALU | SETA | a_src(0o55) | fd(7)),
     ];
     let program = |geometry: Geometry| {
-        let mut m = Machine::new();
-        m.geometry = geometry;
+        let mut m = Machine::with_geometry(geometry, 32);
         m.load_prom(&prom);
         support::prom_program_in_ram(&mut m);
         m.amem[0o51] = 0xffff_ffff;
@@ -548,18 +585,23 @@ fn destinations_5_to_7_write_the_register_the_index_and_the_entry() {
         m.amem[0o55] = 0o1234567;
         m
     };
-    for geometry in [Geometry::QUUX, Geometry::CADR] {
+    for geometry in [REV16, Geometry::CADR] {
         let mut e = Micro::new(program(geometry));
         e.boot();
         e.run(12);
-        let mut r = Rtl::new(program(geometry));
+        let mut r: Box<dyn Engine> = match geometry.machine_id {
+            Some(_) => Box::new(Pipeline::new(program(geometry))),
+            None => Box::new(Rtl::new(program(geometry))),
+        };
         r.boot();
         r.run(12);
+        r.settle_for_checkpoint().unwrap();
         for (name, m) in [("micro", e.machine()), ("rtl", r.machine())] {
             let d = &m.macro_dispatch;
             let written = (d.register, d.index, d.entries[0o1234], d.entries[0o17]);
             if geometry.macro_dispatch {
-                let want = (1 << 31 | 0o3777777777, 0o17, 0o654321, 0o234567);
+                // `<31>` the enable, `<30>` D's (A15b.9), `<28:0>`.
+                let want = (1 << 31 | 1 << 30 | 0o3777777777, 0o17, 0o654321, 0o234567);
                 assert_eq!(written, want, "{geometry:?}, {name}");
             } else {
                 assert_eq!(written, (0, 0, 0, 0), "{geometry:?}, {name}: nothing written");
@@ -732,32 +774,35 @@ fn reset_clears_the_enable_only() {
     e.machine_mut().prog_reset = true;
     e.run(2);
     check("micro", e.machine(), &entries);
-    let mut r = Rtl::new(m);
+    let mut r = Pipeline::new(m);
     r.boot();
     r.run(10);
     assert_eq!(r.machine().macro_dispatch.register, enabled(), "rtl: written by destination 5");
+    // A reset stops the pipeline's clock; its clocks run on.
     r.machine_mut().prog_reset = true;
-    r.run(2);
+    for _ in 0..8 {
+        r.tick().unwrap();
+    }
     check("rtl", r.machine(), &entries);
 }
 
 /// **A control-store write clears the enable**, wherever it lands, and
 /// keeps the rest: a new microcode never runs on the entries the old one
 /// left (contract H8a §3.6). The register is enabled by destination 5, and
-/// a `WRITE-I-MEM` --- a jump with P and R --- follows.
+/// a `WRITE-I-MEM` --- a jump with P and R, in MIT's form with N, the one
+/// the write check takes --- follows.
 #[test]
 fn a_control_store_write_clears_the_enable() {
     let prom = [
         Insn::new(ALU | SETA | a_src(0o51) | fd(5)),
         Insn::new(filler().raw()),
         Insn::new(filler().raw()),
-        Insn::new(JUMP | target(0o700) | P | R | ALWAYS | m_src(1) | a_src(0o52)),
+        Insn::new(JUMP | target(0o700) | P | R | N | ALWAYS | m_src(1) | a_src(0o52)),
         Insn::new(filler().raw()),
         Insn::new(filler().raw()),
     ];
     let program = || {
-        let mut m = Machine::new();
-        m.geometry = Geometry::QUUX;
+        let mut m = Machine::with_geometry(REV16, 32);
         m.load_prom(&prom);
         support::prom_program_in_ram(&mut m);
         m.amem[0o51] = u64::from(enabled());
@@ -782,7 +827,7 @@ fn a_control_store_write_clears_the_enable() {
         assert_eq!(d.entries[5], 0o4321, "{name}: the entries kept");
     }
     check("micro", Micro::new(program()));
-    check("rtl", Rtl::new(program()));
+    check("rtl", Pipeline::new(program()));
 }
 
 /// **A checkpoint keeps the register, the index and the entries**, the
@@ -792,7 +837,7 @@ fn a_control_store_write_clears_the_enable() {
 #[test]
 fn a_checkpoint_keeps_the_register_and_the_memory() {
     use muir::checkpoint::{Reader, Writer};
-    let geometry = Geometry::QUUX;
+    let geometry = REV16;
     let mut m = machine(Setup { geometry, ..Setup::on() });
     m.macro_dispatch.register = enabled();
     m.macro_dispatch.index = 0o1001;
@@ -809,7 +854,7 @@ fn a_checkpoint_keeps_the_register_and_the_memory() {
     let mut w = Writer::new();
     m.save(&mut w);
     let body = w.finish();
-    let mut back = Machine::new();
+    let mut back = Machine::with_geometry(REV16, 32);
     back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
     assert_eq!(back.geometry, geometry);
     assert_eq!(back.macro_dispatch.register, enabled());
@@ -830,8 +875,8 @@ fn a_checkpoint_keeps_the_register_and_the_memory() {
 /// the CADR has no feature page.
 #[test]
 fn feature_word_17_says_so() {
-    let word_17 = muir::machine::REGISTER_PAGE_13 | 0o17;
-    assert_eq!(Geometry::QUUX.feature_word(word_17), Some(1024));
+    let word_17 = muir::tlb::REGISTER_PAGE_BUS | 0o17;
+    assert_eq!(REV16.feature_word(word_17), Some(1024));
     assert_eq!(Geometry::CADR.feature_word(word_17), None);
 }
 
@@ -879,11 +924,15 @@ fn record_returns(engine: &str) -> (u64, u64) {
 /// microcycles as without the operand bit. On `rtl` the returns into the
 /// first halfwords of the second to the seventh words fuse too, on the
 /// prefetched word (all seven are in one line of eight), and two of them,
-/// ARG and LOCAL, load.
+/// ARG and LOCAL, load: `micro` on revision 16 and the single-edge `rtl` on
+/// revision 13. (Revision 16's pipeline takes the bases from before a
+/// popping microinstruction's own write of them.)
 #[test]
 fn a_fused_return_loads_the_operand_address() {
-    let plain = both(Setup { operand: false, ..Setup::operands() });
-    for ((name, n, m), (_, n_plain, _)) in both(Setup::operands()).iter().zip(plain.iter()) {
+    let plain = micro_and_rtl_13(Setup { operand: false, ..Setup::operands() });
+    for ((name, n, m), (_, n_plain, _)) in
+        micro_and_rtl_13(Setup::operands()).iter().zip(plain.iter())
+    {
         assert_eq!(records(m), operand_records(name), "{name}");
         let fused = if *name == "rtl" { 6 + 6 } else { 6 };
         assert_eq!(m.macro_dispatch.fused, fused, "{name}: the six second halfwords");
@@ -906,13 +955,16 @@ fn without_the_operand_bit_pdl_index_is_unchanged() {
     }
 }
 
-/// Runs `s` on both engines under the checker, to opcode 7.
+/// Runs `s` under the checker, to opcode 7, on `micro` and on revision
+/// 13's single-edge `rtl`. The checker takes a fused return as counted in
+/// the microcycle the return runs, as `micro` and that `rtl` count it; the
+/// pipeline counts it a microcycle sooner, when the return is in RD.
 fn checked(s: Setup) -> [(&'static str, Counts); 2] {
     fn go<E: Executes>(e: E) -> Counts {
         let (_, counts) = run_checked(Checked::new(e));
         counts
     }
-    [("micro", go(Micro::new(machine(s)))), ("rtl", go(Rtl::new(machine(s))))]
+    [("micro", go(Micro::new(machine(s)))), ("rtl", go(Rtl::new(machine(on_13(s)))))]
 }
 
 fn run_checked<E: Executes>(mut e: Checked<E>) -> (u64, Counts) {
@@ -936,7 +988,7 @@ fn run_checked<E: Executes>(mut e: Checked<E>) -> (u64, Counts) {
 #[test]
 fn the_checkers_find_the_programs_clean() {
     for (s, fused, loads) in [
-        (Setup::on(), [fused_on("micro", fuses), fused_on("rtl", fuses)], [0, 0]),
+        (Setup::on(), [fused_on("micro", fuses), fused_on_13("rtl", fuses)], [0, 0]),
         (Setup::operands(), [6, 6 + 6], [5, 7]),
         (Setup::off(), [0, 0], [0, 0]),
     ] {
@@ -1046,12 +1098,13 @@ fn the_rule_checker_finds_each_forbidden_write() {
 /// This is why the rule of §3.3 forbids it when the entry has the operand
 /// bit, as `QSTLOC` and `QSTARG` (`uc-macrocode.lisp:327-334`) do it: the
 /// store to a local would go to the next instruction's operand instead.
-/// Without the operand bit it lands where it was aimed. On `rtl` the
-/// return into the second word's first halfword, ARG with delta 0, fuses
-/// too, on the prefetched word: its handler finds PDL-INDEX at `M-AP` + 1
-/// and pushes it, and the write lands there. The engines differ in those
-/// two words, and only there, the handler observing PDL-INDEX and breaking
-/// the rule.
+/// Without the operand bit it lands where it was aimed, on `micro` and the
+/// pipeline alike. On revision 13's
+/// single-edge `rtl` the return into the second word's first halfword, ARG
+/// with delta 0, fuses too, on the prefetched word: its handler finds
+/// PDL-INDEX at `M-AP` + 1 and pushes it, and the write lands there. The
+/// engines differ in those two words, and only there, the handler
+/// observing PDL-INDEX and breaking the rule.
 #[test]
 fn a_pdl_write_by_index_after_a_fused_return_lands_at_the_operand_address() {
     let mark = 0o525252;
@@ -1066,9 +1119,10 @@ fn a_pdl_write_by_index_after_a_fused_return_lands_at_the_operand_address() {
             m
         };
         let (_, micro) = run(Micro::new(with_mark(machine(s))));
-        let (_, rtl) = run(Rtl::new(with_mark(machine(s))));
+        let (_, pipeline) = run(Pipeline::new(with_mark(machine(s))));
+        let (_, rtl) = run(Rtl::new(with_mark(machine(on_13(s)))));
         let want = if operand { mark } else { 0 };
-        for (name, m) in [("micro", &micro), ("rtl", &rtl)] {
+        for (name, m) in [("micro", &micro), ("the pipeline", &pipeline), ("rtl", &rtl)] {
             for at in loaded {
                 assert_eq!(m.pdl[at as usize], want, "operand bit {operand}, {name}: PDL {at:o}");
             }
@@ -1117,8 +1171,7 @@ fn destination_5_does_not_load_the_base_copies() {
             prom.push(Insn::new(ALU | SETA | a_src(0o54) | m_dest(AP_AT)));
         }
         prom.extend([Insn::new(filler().raw()); 4]);
-        let mut m = Machine::new();
-        m.geometry = Geometry::QUUX;
+        let mut m = Machine::with_geometry(REV16, 32);
         m.load_prom(&prom);
         support::prom_program_in_ram(&mut m);
         m.amem[0o51] = u64::from(enabled());
@@ -1136,9 +1189,10 @@ fn destination_5_does_not_load_the_base_copies() {
         let mut e = Micro::new(program(and_write));
         e.boot();
         e.run(12);
-        let mut r = Rtl::new(program(and_write));
+        let mut r = Pipeline::new(program(and_write));
         r.boot();
         r.run(12);
+        r.settle_for_checkpoint().unwrap();
         for (name, m) in [("micro", e.machine()), ("rtl", r.machine())] {
             let d = &m.macro_dispatch;
             assert_eq!(d.register, enabled(), "{name}: destination 5 written");
@@ -1272,7 +1326,7 @@ struct Ran {
 /// handler. `touch`, when given, runs once after the first microcycle that
 /// executes its address, with the machine.
 fn run_prefetched(s: Setup, prefetch: Option<Reach>, touch: Touch) -> Ran {
-    let mut r = Rtl::new(machine(s));
+    let mut r = Rtl::new(machine(on_13(s)));
     r.set_prefetch(prefetch);
     let mut e = Checked::new(r);
     e.boot();
@@ -1604,7 +1658,7 @@ fn the_page_reach_takes_the_next_line_and_never_the_next_page() {
 /// **-RESET drops the buffered word.**
 #[test]
 fn reset_drops_the_prefetched_word() {
-    let mut r = Rtl::new(machine(Setup::on()));
+    let mut r = Rtl::new(machine(on_13(Setup::on())));
     r.boot();
     let mut n = 0;
     while r.prefetched().is_none() {
@@ -1626,11 +1680,11 @@ fn reset_drops_the_prefetched_word() {
 /// microcycles fewer each; the CADR has none, its buffer never filled.
 #[test]
 fn quux_takes_the_prefetch() {
-    let r = Rtl::new(machine(Setup::on()));
+    let r = Rtl::new(machine(on_13(Setup::on())));
     assert_eq!(r.prefetch(), Some(Reach::Page));
     let page = run_prefetched(Setup::on(), Some(Reach::Page), None);
     let off = run_prefetched(Setup::on(), None, None);
-    let (n, m) = run(Rtl::new(machine(Setup::on())));
+    let (n, m) = run(Rtl::new(machine(on_13(Setup::on()))));
     assert_eq!(n, page.n, "the default is the page's reach");
     assert_eq!(m.macro_dispatch.fused, page.m.macro_dispatch.fused);
     let k = fusing_prefetched(fuses).len() as u64;
@@ -1670,10 +1724,10 @@ fn a_checkpoint_keeps_the_prefetched_word_and_the_armed_m31() {
         e.save(&mut w);
         (n, w.finish())
     }
-    let (total, _) = run(Rtl::new(machine(Setup::on())));
+    let (total, _) = run(Rtl::new(machine(on_13(Setup::on()))));
     let (mut buffered, mut armed) = (0, 0);
     for at in 1..total {
-        let mut straight = Rtl::new(machine(Setup::on()));
+        let mut straight = Rtl::new(machine(on_13(Setup::on())));
         straight.boot();
         straight.run(at);
         buffered += straight.prefetched().is_some() as u32;
@@ -1681,7 +1735,7 @@ fn a_checkpoint_keeps_the_prefetched_word_and_the_armed_m31() {
         let mut w = Writer::new();
         straight.save(&mut w);
         let body = w.finish();
-        let mut resumed = Rtl::new(machine(Setup::on()));
+        let mut resumed = Rtl::new(machine(on_13(Setup::on())));
         resumed.boot();
         let mut r = Reader::for_word_bits(&body, 40);
         resumed.load(&mut r).unwrap();

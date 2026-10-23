@@ -3,13 +3,15 @@
 
 //! QUUX's device registers (contracts Q7 and Q13). There is no device
 //! bus: the processor's register decode reaches the device registers ---
-//! the register page at `1777777400`, with
-//! the feature page, the video controller's and block-disk's words on it
-//! --- at their addresses, never cached, a register access taking one
-//! microcycle more than a failed one. An address nothing answers fails at once, reads 0 and
-//! sets word 101's NXM bit: no timeout. The frame buffer, in its window
-//! at `1760000000` (contract G2 §4.1), is on the memory bus with main
-//! memory, through the cache.
+//! the register page at `35777777400`, with the feature page, the video
+//! controller's and block-disk's words on it --- at their addresses, never
+//! cached. An address nothing answers fails at once, reads 0 and sets word
+//! 101's NXM bit: no timeout. The frame buffer, at the device window's base
+//! (contract G3 revision 14, A14.1), is on the memory bus with main memory,
+//! through the cache. These hold revision 16 on `micro` and `rtl`, the
+//! pipeline; revision 13's memory port, on the single-edge `rtl`, keeps its
+//! own timing here, a register access taking one microcycle more than a
+//! failed one (the pipeline's in `tests/revision_15_rtl.rs`).
 
 use muir::engine::Engine;
 use muir::isa::Insn;
@@ -19,6 +21,7 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, Machine, bus_error};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 
 mod support;
@@ -26,22 +29,51 @@ mod support;
 /// Where the program stops: a jump to itself.
 const STOP: u16 = 0o77;
 
-/// A program that reads each of `reads`' physical words into A 200 up, a
-/// filler after each start, then stops at [`STOP`]; virtual page `k + 1`
-/// maps each word's page, and M `k + 1` holds its virtual address.
+/// A program that reads each of `reads`' bus words into A 200 up, a filler
+/// after each start, then stops at [`STOP`]; M `k + 1` holds each word's
+/// virtual address.
 fn reading(reads: &[u32]) -> Machine {
+    machine(&reading_program(reads.len()), reads)
+}
+
+/// [`reading`] on revision 13, through its map.
+fn reading_13(reads: &[u32]) -> Machine {
+    machine_13(&reading_program(reads.len()), reads)
+}
+
+fn reading_program(n: usize) -> Vec<Insn> {
     let mut prom = Vec::new();
-    for k in 0..reads.len() as u64 {
+    for k in 0..n as u64 {
         prom.push(Insn::new(ALU | SETM | m_src(1 + k) | START_READ));
         prom.push(filler());
         prom.push(Insn::new(ALU | SETM | SRC_MD | a_dest(0o200 + k)));
     }
-    machine(&prom, reads)
+    prom
 }
 
+/// Revision 16 with the video controller, the program loaded, and M `k +
+/// 1` the `k`th address in its window.
 fn machine(prom: &[Insn], addresses: &[u32]) -> Machine {
+    let mut m = loaded(support::quux_16(), prom);
+    for (k, &p) in addresses.iter().enumerate() {
+        m.mmem[1 + k] = support::quux_va(p).into();
+    }
+    m
+}
+
+/// Revision 13's: virtual page `k + 1` maps the `k`th physical address's
+/// page, and M `k + 1` holds its virtual address.
+fn machine_13(prom: &[Insn], addresses: &[u32]) -> Machine {
     let mut m = Machine::new();
     m.geometry = Geometry::QUUX;
+    let mut m = loaded(m, prom);
+    for (k, &p) in addresses.iter().enumerate() {
+        m.mmem[1 + k] = support::quux_map(&mut m, 1 + k as u32, p).into();
+    }
+    m
+}
+
+fn loaded(mut m: Machine, prom: &[Insn]) -> Machine {
     m.tv.set_board(muir::tv::Board::Video);
     let mut words = vec![filler(); 1024];
     words[..prom.len()].copy_from_slice(prom);
@@ -49,44 +81,51 @@ fn machine(prom: &[Insn], addresses: &[u32]) -> Machine {
     words[prom.len()] = Insn::new(JUMP | target(STOP as u64) | ALWAYS | N);
     m.load_prom(&words);
     support::prom_program_in_ram(&mut m);
-    for (k, &p) in addresses.iter().enumerate() {
-        m.mmem[1 + k] = support::quux_map(&mut m, 1 + k as u32, p).into();
-    }
     for k in 0..6 {
         m.amem[0o200 + k] = 0o525252;
     }
     m
 }
 
-/// Runs an engine to [`STOP`]: the machine, and the instant it got there.
+/// Runs an engine to [`STOP`]: the machine, its writes landed, and the
+/// instant it got there.
 fn run<E: Engine>(mut e: E, ns: impl Fn(&E) -> u64) -> (Machine, u64) {
     e.boot();
     for _ in 0..4000 {
         if e.machine().opc == STOP {
-            return (e.machine().clone(), ns(&e));
+            let at = ns(&e);
+            e.settle_for_checkpoint().unwrap();
+            return (e.machine().clone(), at);
         }
         e.step().unwrap();
     }
     panic!("the program never reached its end");
 }
 
-fn rtl(m: Machine) -> (Machine, u64) {
+/// The single-edge `rtl` on revision 13.
+fn rtl_13(m: Machine) -> (Machine, u64) {
     run(Rtl::new(m), Rtl::ns)
 }
 
+/// `rtl`, the pipeline, on revision 16.
+fn rtl(m: Machine) -> (Machine, u64) {
+    run(Pipeline::new(m), |e| e.machine().ns)
+}
+
 /// The feature page's word 0, the MACHINE-ID: a register that answers.
-const REGISTER: u32 = muir::machine::REGISTER_PAGE_13;
+const REGISTER: u32 = support::PAGE_16;
+const REGISTER_13: u32 = muir::machine::REGISTER_PAGE_13;
 /// The register page's last word, reserved: a register that answers 0.
 const RESERVED: u32 = REGISTER | 0o377;
 
-/// Addresses nothing answers (contracts Q13, G2 §4.1): past main memory's
-/// end, 2MW here; the CADR's addresses QUUX's devices once had, past it:
-/// the color TV's buffer at `17200000`, the old register page at
-/// `17377000` and the page after it, the display's old mode register at
-/// `17377760`, between it and the disk's old registers, those at
-/// `17377774`, and the CADR's Unibus window's first word and its last
-/// below its last page; past the frame buffer in its window; and the
-/// word below the register page.
+/// Addresses nothing answers (contracts Q13; G3 revision 14, A14.1): past
+/// main memory's end, 2MW here; the CADR's addresses QUUX's devices once
+/// had, past it: the color TV's buffer at `17200000`, the old register
+/// page at `17377000` and the page after it, the display's old mode
+/// register at `17377760`, between it and the disk's old registers, those
+/// at `17377774`, and the CADR's Unibus window's first word and its last
+/// below its last page; past the frame buffer in the device window; and
+/// the word below the register page.
 const EMPTY: [u32; 11] = [
     0o10000000,
     0o17200000,
@@ -97,22 +136,38 @@ const EMPTY: [u32; 11] = [
     0o17377774,
     0o17400000,
     0o17777377,
-    muir::machine::WINDOW_13 + muir::tv::VIDEO_WORDS,
+    muir::tlb::DEVICE + muir::tv::VIDEO_WORDS,
     REGISTER - 1,
 ];
 
+/// [`EMPTY`] on revision 13: the frame buffer's window and the register
+/// page in its 28-bit space.
+const EMPTY_13: [u32; 11] = [
+    0o10000000,
+    0o17200000,
+    0o17377000,
+    0o17377400,
+    0o17377760,
+    0o17377770,
+    0o17377774,
+    0o17400000,
+    0o17777377,
+    muir::machine::WINDOW_13 + muir::tv::VIDEO_WORDS,
+    REGISTER_13 - 1,
+];
+
 /// **A register access takes a microcycle more than a failed one, and a
-/// failed one is at once**: the same program, reading the MACHINE-ID or an
-/// empty address, ends one microcycle later for the register; and the
-/// empty address costs no timeout, the whole program ending well inside
-/// the CADR's 4.25 us.
+/// failed one is at once**, on revision 13's single-edge `rtl`: the same
+/// program, reading the MACHINE-ID or an empty address, ends one
+/// microcycle later for the register; and the empty address costs no
+/// timeout, the whole program ending well inside the CADR's 4.25 us.
 #[test]
 fn a_register_takes_a_microcycle_more_than_nothing() {
-    let (m, answered) = rtl(reading(&[REGISTER]));
+    let (m, answered) = rtl_13(reading_13(&[REGISTER_13]));
     assert_eq!(m.amem[0o200], Geometry::QUUX.machine_id.unwrap().into(), "the register's word");
     assert_eq!(m.bus_error & bus_error::XBUS_NXM, 0);
-    for empty in EMPTY {
-        let (m, failed) = rtl(reading(&[empty]));
+    for empty in EMPTY_13 {
+        let (m, failed) = rtl_13(reading_13(&[empty]));
         assert_eq!(m.amem[0o200], 0, "{empty:o} reads 0");
         assert_ne!(m.bus_error & bus_error::XBUS_NXM, 0, "{empty:o}: the NXM bit");
         assert_eq!(answered - failed, 40, "{empty:o}: a microcycle more for the register");
@@ -151,15 +206,19 @@ fn nothing_answers_on_either_engine() {
 /// **A reserved register reads 0 and answers**: no NXM there.
 #[test]
 fn a_reserved_register_answers_0() {
-    let (m, _) = rtl(reading(&[RESERVED]));
-    assert_eq!(m.amem[0o200], 0);
-    assert_eq!(m.bus_error & bus_error::XBUS_NXM, 0);
+    for (name, (m, _)) in [
+        ("rtl", rtl(reading(&[RESERVED]))),
+        ("micro", run(Micro::new(reading(&[RESERVED])), |_| 0)),
+    ] {
+        assert_eq!(m.amem[0o200], 0, "{name}");
+        assert_eq!(m.bus_error & bus_error::XBUS_NXM, 0, "{name}");
+    }
 }
 
-/// **The frame buffer is on the memory bus, through the cache**: a word
-/// written reaches the display, and read twice it misses once and hits
-/// once, each read a fixnum, tag `005` --- where a register is never looked
-/// up.
+/// **The frame buffer is on the memory bus, through the cache** of
+/// revision 13's memory port: a word written reaches the display, and read
+/// twice it misses once and hits once, each read a fixnum, tag `005` ---
+/// where a register is never looked up.
 #[test]
 fn the_frame_buffer_is_cached() {
     let fb = muir::machine::WINDOW_13 + 0o100;
@@ -178,7 +237,7 @@ fn the_frame_buffer_is_cached() {
         filler(),
         Insn::new(ALU | SETM | SRC_MD | a_dest(0o202)),
     ];
-    let mut m = machine(&prom, &[fb, REGISTER]);
+    let mut m = machine_13(&prom, &[fb, REGISTER_13]);
     m.amem[0o100] = 0o123456;
     let mut e = Rtl::new(m);
     e.boot();
@@ -244,7 +303,8 @@ fn a_start_right_after_a_start_waits_for_it() {
 }
 
 /// **A register write started right behind a register read holds `MD` no
-/// longer than a main memory write there**: a read of the MACHINE-ID, a
+/// longer than a main memory write there**, on revision 13's single-edge
+/// `rtl`: a read of the MACHINE-ID, a
 /// write of the register page's reserved word 105 in the next microcycle
 /// (held until the read has gone out), a filler, then `MD` read. The read's
 /// word is in `MD` when its own `READ IN PROGRESS` falls, which the write's
@@ -256,7 +316,7 @@ fn a_start_right_after_a_start_waits_for_it() {
 /// has no wait for `MD` to time.
 #[test]
 fn a_register_write_right_after_a_register_read_holds_md_no_longer() {
-    const WORD_105: u32 = REGISTER | 0o105;
+    const WORD_105: u32 = REGISTER_13 | 0o105;
     const MEMORY: u32 = 0o1000;
     let prom = [
         Insn::new(ALU | SETM | m_src(1) | START_READ),
@@ -266,7 +326,7 @@ fn a_register_write_right_after_a_register_read_holds_md_no_longer() {
     ];
     // How long the microcycle reading `MD`, at 3, takes on `rtl`.
     let md_microcycle = |behind: u32| {
-        let mut e = Rtl::new(machine(&prom, &[REGISTER, behind]));
+        let mut e = Rtl::new(machine_13(&prom, &[REGISTER_13, behind]));
         e.boot();
         let (mut from, mut to) = (None, None);
         for _ in 0..4000 {
@@ -285,7 +345,7 @@ fn a_register_write_right_after_a_register_read_holds_md_no_longer() {
     let (_, memory) = md_microcycle(MEMORY);
     assert_eq!(memory, 80, "main memory behind the read: MD read in two microcycles");
     assert_eq!(page, 80, "word 105 behind the read: MD read in two microcycles");
-    let (e, _) = run(Micro::new(machine(&prom, &[REGISTER, WORD_105])), |_| 0);
+    let (e, _) = run(Micro::new(machine_13(&prom, &[REGISTER_13, WORD_105])), |_| 0);
     for (name, m) in [("rtl", r), ("micro", e)] {
         assert_eq!(
             m.amem[0o200],

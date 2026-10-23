@@ -80,16 +80,21 @@ fn quux_runs_revision_13() {
     assert!(t.contains("cache: 8192 words, lines of 8, 2-way"), "{t}");
 }
 
-/// **`--cache` takes no size smaller than a set of revision 13's lines**:
+/// **`--cache` takes no size smaller than a set of the cache's lines**:
 /// its lines are 8 words, 2-way, so 8 words is refused at the start, as a
 /// shape of no sets, and 16 is taken.
 #[test]
 fn the_cache_is_at_least_a_set_of_the_revision_s_lines() {
-    let out = quux().args(["--rtl", "--cache", "8", "--stop-after", "1"]).run();
+    let dir = support::scratch("cache-set");
+    let prom = support::idle_prom_16(&dir);
+    let out = support::quux_on_16().args(["--rtl", "--cache", "8", "--stop-after", "1"]).run();
     let t = text(&out);
     assert_eq!(out.status.code(), Some(2), "{t}");
     assert!(t.contains("--cache: ") && t.contains("fewer words than one set's lines"), "{t}");
-    let out = quux().args(["--rtl", "--cache", "16", "--stop-after", "1"]).run();
+    let out = support::quux_on_16()
+        .args(["--rtl", "--cache", "16", "--stop-after", "1", "--prom"])
+        .arg(&prom)
+        .run();
     let t = text(&out);
     assert!(out.status.success(), "{t}");
     assert!(t.contains("cache: 16 words, lines of 8, 2-way"), "{t}");

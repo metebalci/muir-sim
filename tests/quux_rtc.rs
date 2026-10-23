@@ -14,14 +14,13 @@ use muir::machine::{Geometry, Machine, Rtc, bus_error};
 
 mod support;
 
-const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
+const PAGE: u32 = support::PAGE_16;
 const RTC: u32 = PAGE + 0o103;
-const SECOND: u64 = 1_000_000_000;
+/// A second of the machine's time, in its units of 0.5 ns.
+const SECOND: u64 = 2_000_000_000;
 
 fn quux() -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
-    m
+    support::quux_16()
 }
 
 fn host_now() -> u64 {
@@ -29,7 +28,7 @@ fn host_now() -> u64 {
 }
 
 /// **`--rtc <s>` reads `s` at power-on and counts the machine's time**: a
-/// second more for each 10^9 ns of the machine's clock, whatever the host's
+/// second more for each 10^9 ns of the machine's clock, 2 x 10^9 of its units, whatever the host's
 /// clock does, and a partial second not yet.
 #[test]
 fn a_fixed_start_counts_machine_time() {
@@ -38,7 +37,7 @@ fn a_fixed_start_counts_machine_time() {
     m.rtc = Rtc::Counted { start: s, base_ns: m.ns };
     assert_eq!(m.bus_read(RTC), s.into(), "at power-on");
     m.ns = SECOND - 1;
-    assert_eq!(m.bus_read(RTC), s.into(), "a nanosecond short of a second");
+    assert_eq!(m.bus_read(RTC), s.into(), "half a nanosecond short of a second");
     m.ns = SECOND;
     assert_eq!(m.bus_read(RTC), (s + 1).into(), "a second on");
     m.ns = 3600 * SECOND + 5;
@@ -104,25 +103,27 @@ fn a_write_changes_nothing() {
     }
 }
 
-/// **The CADR has no word 103**: nothing answers on the page there, and the
-/// read times out as any read of an empty Unibus address does.
+/// **The CADR has no word 103**: nothing answers at word 103 of its last
+/// physical page, `17777400`, in the Unibus window, and the read times out
+/// as any read of an empty Unibus address does.
 #[test]
 fn the_cadr_has_no_rtc() {
     let mut m = Machine::new();
     m.rtc = Rtc::Counted { start: 1_700_000_000, base_ns: 0 };
-    assert_eq!(m.bus_read(RTC), 0);
+    assert_eq!(m.bus_read(0o17777503), 0);
     assert_eq!(m.bus_error, bus_error::UNIBUS_NXM, "the read timed out");
 }
 
 /// **Feature word 15 says the RTC is there**, `<0>`, beside the file
-/// device, `<1>` (`tests/quux_file_device.rs`); the CADR has no page.
+/// device, `<1>` (`tests/quux_file_device.rs`), and the Ethernet device,
+/// `<2>` (`tests/quux_ethernet.rs`); the CADR has no page.
 #[test]
 fn feature_word_15_announces_it() {
-    assert_eq!(Geometry::QUUX.feature_word(PAGE + 0o15), Some(3));
+    assert_eq!(Geometry::QUUX_16.feature_word(PAGE + 0o15), Some(7));
     assert_eq!(Geometry::CADR.feature_word(PAGE + 0o15), None);
     let mut m = quux();
-    assert_eq!(m.bus_read(PAGE + 0o15), 3);
-    let id = Geometry::QUUX.machine_id.unwrap();
+    assert_eq!(m.bus_read(PAGE + 0o15), 7);
+    let id = Geometry::QUUX_16.machine_id.unwrap();
     assert!((id >> 4) & 0o7777 >= 9, "revision 9 or later");
 }
 
@@ -142,11 +143,10 @@ fn a_checkpoint_keeps_the_count() {
         let mut w = Writer::new();
         m.save(&mut w);
         let body = w.finish();
-        let mut back = Machine::new();
-        back.geometry = Geometry::QUUX;
+        let mut back = quux();
         back.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
         assert_eq!(back.rtc, rtc);
-        assert_eq!(back.geometry, Geometry::QUUX);
+        assert_eq!(back.geometry, Geometry::QUUX_16);
         if let Rtc::Counted { .. } = rtc {
             assert_eq!(back.bus_read(RTC), m.bus_read(RTC), "{rtc:?}: the same second");
             back.ns += SECOND;
@@ -157,17 +157,19 @@ fn a_checkpoint_keeps_the_count() {
 }
 
 /// **Both engines read it through the bus, and count the machine's own
-/// time**: a program reads word 103, runs about 4 us of machine time on,
-/// and reads it again. The machine's clock starts 2 us short of its first
+/// time**: a program reads word 103, runs about 1 us of machine time on,
+/// and reads it again. The machine's clock starts 1 us short of its first
 /// second, so the first read gives the start and the second one more; the
 /// test measures that the engine's clock did cross the second between.
+/// The pipeline's clock starts there, less its boot's sweep of the TLB, by
+/// a checkpoint's round trip, which takes its clock from the machine's
+/// time.
 #[test]
 fn both_engines_count_machine_seconds() {
     use muir::engine::Engine;
     use muir::isa::Insn;
     use muir::isa::asm::{ALU, SETM, SRC_MD, START_READ, a_dest, filler, m_src};
     use muir::micro::Micro;
-    use muir::rtl::Rtl;
     let s = 1_700_000_000;
     let mut prom = vec![Insn::new(ALU | SETM | m_src(1) | START_READ)];
     prom.extend([filler(); 12]);
@@ -182,7 +184,7 @@ fn both_engines_count_machine_seconds() {
         let mut words = vec![filler(); 1024];
         words[..prom.len()].copy_from_slice(&prom);
         m.load_prom(&words);
-        m.mmem[1] = support::quux_map(&mut m, 1, PAGE | 0o103).into();
+        m.mmem[1] = support::quux_va(PAGE | 0o103).into();
         m.rtc = Rtc::Counted { start: s, base_ns: 0 };
         m
     };
@@ -190,8 +192,11 @@ fn both_engines_count_machine_seconds() {
     m.ns = power_on;
     let mut e = Micro::new(m);
     e.boot();
-    let mut r = Rtl::new(machine());
-    r.set_clock(power_on);
+    // The pipeline's boot sweeps the TLB, a clock an entry, and its first
+    // read waits for the sweep: it starts that much earlier.
+    let period = muir::pipeline::Pipeline::new(machine()).period();
+    let sweep = machine().tlb.len() as u64 * period;
+    let mut r = support::pipeline_at(machine(), power_on - sweep);
     r.boot();
     let steps = prom.len() + 20;
     for _ in 0..steps {

@@ -1,22 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! QUUX's register page (contracts Q2 and Q13): 256 words at physical
-//! `1777777400`-`1777777777`, the last page of the 28-bit physical space
-//! (contract G2 §4.1).
+//! QUUX's register page (contracts Q2 and Q13): 256 words at virtual
+//! `35777777400`-`35777777777` in the device window, bus address
+//! [`muir::tlb::REGISTER_PAGE_BUS`] (contract G3 revision 14, A14.1).
 //! Words 0-77 are the feature page, 100 the interrupt status, 101 the error
 //! status, 102 the mode, 103 the real-time clock and 104 reset devices;
 //! then the interval timers (110-115), the keyboard and the mouse
-//! (120-123), the network (140-145), the file device (160-171),
-//! block-disk (200-203) and the video controller (210). Reserved words
-//! read 0 and ignore writes. It takes the place of the Unibus interrupt
+//! (120-123), the file device (160-171), block-disk (200-203), the video
+//! controller (210), the memory system (220-225) and the Ethernet device
+//! (240-257). Reserved words, 140-157 among them (QUUX's Ethernet
+//! contract, §8 R4), read 0 and ignore writes. It takes the place of the Unibus interrupt
 //! vector (`766040`), the error status (`766044`) and the mode register's
 //! error stop (`766012`) on QUUX.
 //!
 //! [`every_word_of_the_page`] holds all 256 words in one table.
 
 use muir::block_disk::{BLOCK_NS, BlockDisk};
-use muir::chaos::interface::csr;
 use muir::disk_unit::Geometry as Pack;
 use muir::engine::Engine;
 use muir::isa::Insn;
@@ -25,12 +25,12 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, Machine, bus_error};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::quux_input::KeyboardMouse;
-use muir::rtl::Rtl;
 
 mod support;
 
-const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
+const PAGE: u32 = support::PAGE_16;
 const INTERRUPTS: u32 = PAGE + 0o100;
 const ERRORS: u32 = PAGE + 0o101;
 const MODE: u32 = PAGE + 0o102;
@@ -38,8 +38,8 @@ const MODE: u32 = PAGE + 0o102;
 /// A QUUX machine as `quux` builds one: the video controller at its
 /// default size, and block-disk with a disk.
 fn quux() -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
+    let mut m = support::quux_16();
+    m.period = muir::clock::PERIOD_15;
     m.tv.set_board(muir::tv::Board::Video);
     let mut d = BlockDisk::new(BLOCK_NS);
     d.attach(muir::disk_image::Disk::blank(Pack::T300.blocks()));
@@ -56,9 +56,13 @@ fn state(m: &Machine) -> Vec<u8> {
 
 // --- word 100 --------------------------------------------------------------
 
-/// The eight sources of word 100, in its order (contract Q13, section 2),
-/// each raised alone on a machine of its own at power-on: what it takes,
-/// and the bit.
+/// The bits of word 100's sources, in its order (contract Q13, section 2;
+/// QUUX's Ethernet contract, §2.6): `<6>`, the Chaosnet interface's on
+/// revisions 13-15, has none (§8 R4).
+const SOURCES: [usize; 8] = [0, 1, 2, 3, 4, 5, 7, 8];
+
+/// The sources of word 100, each raised alone on a machine of its own at
+/// power-on, by its bit: what it takes, and the bit.
 fn raise(source: usize) -> (Machine, &'static str) {
     let mut m = quux();
     let name = match source {
@@ -66,7 +70,7 @@ fn raise(source: usize) -> (Machine, &'static str) {
         k @ 0..=2 => {
             m.bus_write(PAGE + 0o111 + 2 * k as u32, 50);
             m.bus_write(PAGE + 0o110 + 2 * k as u32, 0o401);
-            m.ns = 50_000;
+            m.ns = 50 * m.time_base().per_us();
             ["timer 0", "timer 1", "timer 2"][k]
         }
         // Block-disk's done, under command <11>: a page of 5 blocks.
@@ -75,7 +79,7 @@ fn raise(source: usize) -> (Machine, &'static str) {
             m.bus_write(PAGE + 0o201, 0o100);
             m.bus_write(PAGE + 0o200, 1 << 11);
             m.bus_write(PAGE + 0o203, 0);
-            m.ns += 5 * BLOCK_NS;
+            m.ns += 5 * BLOCK_NS * m.time_base().per_ns;
             "block-disk"
         }
         // A key word waiting, under 120 <8>.
@@ -90,19 +94,16 @@ fn raise(source: usize) -> (Machine, &'static str) {
             m.bus_write(PAGE + 0o123, 1 << 8);
             "mouse"
         }
-        // The Chaosnet interface's transmit done, under its enable.
-        6 => {
-            m.bus_write(
-                PAGE + 0o140,
-                ((csr::CLEAR_TRANSMITTER | csr::TRANSMIT_INT_ENABLE) as u32).into(),
-            );
-            "network"
-        }
         // A response waiting, under 160 <8>: a command of no opcode, which
         // the device answers with a failure.
         7 => {
             file_device_response(&mut m);
             "file device"
+        }
+        // A received Ethernet frame waiting, under 240 <8>.
+        8 => {
+            ethernet_frame(&mut m);
+            "Ethernet"
         }
         _ => unreachable!(),
     };
@@ -126,15 +127,37 @@ fn file_device_response(m: &mut Machine) {
     }
 }
 
+/// The Ethernet device's rings at `1000` and `6000`, one entry each, the
+/// device enabled under its interrupt enable, a receive buffer given, and
+/// an ARP frame to the device's own address delivered.
+fn ethernet_frame(m: &mut Machine) {
+    use muir::ethernet_device::{self as eth, Script};
+    let s = Script::default();
+    m.attach_ethernet_peer(Box::new(s.clone()));
+    for (w, v) in [(eth::TX_BASE, 0o1000u32), (eth::RX_BASE, 0o6000), (eth::CONTROL, 0x101)] {
+        m.bus_write(PAGE + w, v.into());
+    }
+    m.main[0o6000] = 0o10000;
+    m.main[0o6001] = 1536;
+    m.bus_write(PAGE + eth::RX_PROD, 1);
+    let mut f = vec![0u8; 60];
+    f[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
+    f[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+    s.arrive(0, f);
+    m.ns = m.time_base().grid(10);
+    m.advance_ethernet();
+}
+
 /// **Word 100 says who interrupted, a bit each in Q13's order**: `<0>`-`<2>`
-/// timers 0-2, `<3>` block-disk, `<4>` the keyboard, `<5>` the mouse, `<6>`
-/// the network, `<7>` the file device. Each source raised alone reads
-/// exactly its own bit, and the processor's interrupt is pending with it.
+/// timers 0-2, `<3>` block-disk, `<4>` the keyboard, `<5>` the mouse, `<7>`
+/// the file device and `<8>` the Ethernet device. Each source raised alone
+/// reads exactly its own bit, and the processor's interrupt is pending
+/// with it.
 #[test]
 fn word_100_says_who_interrupted() {
     assert_eq!(quux().bus_read(INTERRUPTS), 0, "nothing at power-on");
     assert!(!quux().interrupt());
-    for bit in 0..8 {
+    for bit in SOURCES {
         let (mut m, name) = raise(bit);
         assert_eq!(m.bus_read(INTERRUPTS), 1 << bit, "{name} alone");
         assert_eq!(m.interrupt_sources(), 1 << bit, "{name}: interrupt_sources");
@@ -215,18 +238,21 @@ use Class::*;
 /// [`quux`]'s machine. Word 103, the real-time clock, reads the host's
 /// time, and [`POWER_ON_103`] stands for it.
 fn table() -> [(Class, u32); 256] {
-    let id = Geometry::QUUX.machine_id.unwrap();
+    let id = Geometry::QUUX_16.machine_id.unwrap();
     let mut t = [(Reserved, 0); 256];
     // The feature page, 0-77: 0-17 the machine's, 20-24 the board name,
-    // the rest 0.
-    for (w, v) in [id, 7, 4096, 16384, 16384, 1024, 4096, 3, 1].into_iter().enumerate() {
+    // the rest 0. No level-1 map: word 1 is 0, and word 2 the TLB's
+    // entries (A14.9).
+    let tlb = muir::tlb::DEFAULT_ENTRIES as u32;
+    for (w, v) in [id, 0, tlb, 16384, 16384, 1024, 4096, 3, 1].into_iter().enumerate() {
         t[w] = (ReadOnly, v);
     }
     t[0o11] = (ReadOnly, 1280 << 16 | 1024);
     t[0o12] = (ReadOnly, 1 << 16 | 40);
-    t[0o13] = (ReadOnly, muir::machine::WINDOW_13);
+    // The frame buffer's address, in the device window (A14.9).
+    t[0o13] = (ReadOnly, muir::tlb::DEVICE_WINDOW);
     t[0o14] = (ReadOnly, 1);
-    t[0o15] = (ReadOnly, 3);
+    t[0o15] = (ReadOnly, 7);
     t[0o16] = (ReadOnly, 3);
     t[0o17] = (ReadOnly, 1024);
     t[0o20..=0o77].fill((ReadOnly, 0));
@@ -234,6 +260,8 @@ fn table() -> [(Class, u32); 256] {
     // zero bytes after it.
     t[0o20] = (ReadOnly, u32::from_le_bytes(*b"muir"));
     t[0o21] = (ReadOnly, u32::from_le_bytes(*b"-sim"));
+    // The microcycle in units of 0.5 ns (A15b.1).
+    t[0o25] = (ReadOnly, muir::clock::PERIOD_15 as u32);
     // The page's own words.
     t[0o100] = (ReadOnly, 0);
     t[0o101] = (ReadWrite, 0);
@@ -247,19 +275,6 @@ fn table() -> [(Class, u32); 256] {
     t[0o121] = (ReadOnly, 0);
     t[0o122] = (ReadOnly, 0);
     t[0o123] = (ReadWrite, 0);
-    // The network: the CSR, my address and the write buffer, the read
-    // buffer, the bit count, START.
-    t[0o140] = (ReadWrite, POWER_ON_CSR);
-    t[0o141] = (ReadWrite, POWER_ON_MY_ADDRESS);
-    // The read buffer with nothing received reads as the CADR's board's
-    // does (contract Q4): its read register, clear at power-on, shifted
-    // once with the buffer's first cell, which reads as a one
-    // (`a_read_with_receive_done_down_is_the_read_paths_on_both_alike` in
-    // `tests/chaos_rtl.rs`).
-    t[0o142] = (ReadOnly, 1);
-    t[0o143] = (ReadOnly, POWER_ON_BIT_COUNT);
-    // START reads the address, as the CADR's board does at `764152`.
-    t[0o145] = (ReadOnly, POWER_ON_MY_ADDRESS);
     // The file device.
     for w in [0o160, 0o162, 0o163, 0o164, 0o166, 0o167, 0o171] {
         t[w] = (ReadWrite, 0);
@@ -275,19 +290,38 @@ fn table() -> [(Class, u32); 256] {
     t[0o203] = (WriteOnly, 0);
     // The video controller's mode.
     t[0o210] = (ReadWrite, 0);
+    // The memory system (A14.9, A15b.1): the directory base, the TLB's
+    // operation words, and the posted writes' errors.
+    t[0o220] = (ReadWrite, 0);
+    t[0o221..=0o224].fill((WriteOnly, 0));
+    t[0o225] = (ReadWrite, 0);
+    // The Ethernet device (QUUX's Ethernet contract, §2.2): 241 quiet,
+    // 253-257 the default MAC address, IPv4 address, netmask and gateway.
+    for (w, class, v) in [
+        (0o240, ReadWrite, 0),
+        (0o241, ReadOnly, 2),
+        (0o242, ReadWrite, 0),
+        (0o243, ReadWrite, 0),
+        (0o244, ReadWrite, 0),
+        (0o245, ReadOnly, 0),
+        (0o246, ReadWrite, 0),
+        (0o247, ReadWrite, 0),
+        (0o250, ReadWrite, 0),
+        (0o251, ReadOnly, 0),
+        (0o252, ReadWrite, 0),
+        (0o253, ReadOnly, 0x0200),
+        (0o254, ReadOnly, 0x0000_0001),
+        (0o255, ReadOnly, 0xa9fe_6402),
+        (0o256, ReadOnly, 0xffff_fffc),
+        (0o257, ReadOnly, 0xa9fe_6401),
+    ] {
+        t[w] = (class, v);
+    }
     t
 }
 
 /// Stands for the host's time in [`table`]'s word 103.
 const POWER_ON_103: u32 = u32::MAX;
-/// What the network's CSR reads at power-on: transmit done, and the lost
-/// count's field as the board leaves it.
-const POWER_ON_CSR: u32 = 0o200;
-/// The machine's own Chaosnet address at power-on, `--chaos-address`'s
-/// default 177001.
-const POWER_ON_MY_ADDRESS: u32 = 0o177001;
-/// The bit count at power-on: nothing received.
-const POWER_ON_BIT_COUNT: u32 = 0;
 
 /// Whether a read or a write has the effect.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -327,10 +361,6 @@ const EFFECTS: &[(u32, Effect, &str, &str)] = &[
     (0o121, Effect::Read, "quux_input.rs", "keys_come_out_in_order"),
     (0o122, Effect::Read, "quux_input.rs", "the_mouse_counts_and_its_buttons"),
     (0o123, Effect::Write, "quux_input.rs", "each_interrupts_under_its_enable"),
-    (0o140, Effect::Write, "quux_network.rs", "each_word_is_its_unibus_register"),
-    (0o141, Effect::Write, "quux_network.rs", "a_frame_goes_out_and_its_answer_comes_back"),
-    (0o142, Effect::Read, "quux_network.rs", "a_frame_goes_out_and_its_answer_comes_back"),
-    (0o145, Effect::Read, "quux_network.rs", "a_frame_goes_out_and_its_answer_comes_back"),
     (
         0o160,
         Effect::Write,
@@ -368,6 +398,75 @@ const EFFECTS: &[(u32, Effect, &str, &str)] = &[
     (0o202, Effect::Write, "block_disk.rs", "on_quux_the_registers_are_the_block_disk_s"),
     (0o203, Effect::Write, "block_disk.rs", "on_quux_the_registers_are_the_block_disk_s"),
     (0o210, Effect::Write, "video.rs", "it_keeps_black_on_white_and_never_interrupts"),
+    (
+        0o220,
+        Effect::Write,
+        "revision_14.rs",
+        "the_memory_system_words_read_back_and_set_the_directory",
+    ),
+    (
+        0o221,
+        Effect::Write,
+        "revision_14.rs",
+        "the_memory_system_words_read_back_and_set_the_directory",
+    ),
+    (
+        0o222,
+        Effect::Write,
+        "revision_14.rs",
+        "the_memory_system_words_read_back_and_set_the_directory",
+    ),
+    (
+        0o223,
+        Effect::Write,
+        "revision_14.rs",
+        "the_memory_system_words_read_back_and_set_the_directory",
+    ),
+    (
+        0o224,
+        Effect::Write,
+        "revision_14.rs",
+        "the_memory_system_words_read_back_and_set_the_directory",
+    ),
+    (0o225, Effect::Write, "revision_15.rs", "word_225_reads_the_errors_and_a_write_clears_it"),
+    (
+        0o240,
+        Effect::Write,
+        "quux_ethernet.rs",
+        "the_configuration_words_read_back_and_the_indexes_go_nowhere_while_disabled",
+    ),
+    (
+        0o242,
+        Effect::Write,
+        "quux_ethernet.rs",
+        "the_configuration_words_read_back_and_the_indexes_go_nowhere_while_disabled",
+    ),
+    (
+        0o243,
+        Effect::Write,
+        "quux_ethernet.rs",
+        "the_configuration_words_read_back_and_the_indexes_go_nowhere_while_disabled",
+    ),
+    (0o244, Effect::Write, "quux_ethernet.rs", "the_rings_wrap_at_1_2_and_256_entries"),
+    (
+        0o246,
+        Effect::Write,
+        "quux_ethernet.rs",
+        "the_configuration_words_read_back_and_the_indexes_go_nowhere_while_disabled",
+    ),
+    (
+        0o247,
+        Effect::Write,
+        "quux_ethernet.rs",
+        "the_configuration_words_read_back_and_the_indexes_go_nowhere_while_disabled",
+    ),
+    (0o250, Effect::Write, "quux_ethernet.rs", "the_rings_wrap_at_1_2_and_256_entries"),
+    (
+        0o252,
+        Effect::Write,
+        "quux_ethernet.rs",
+        "word_100_bit_8_is_a_frame_waiting_under_the_interrupt_enable",
+    ),
 ];
 
 /// **Every word of the page, in one table**: at power-on each reads
@@ -431,11 +530,10 @@ fn every_word_of_the_page() {
 /// Where a program built by [`program`] stops: a jump to itself.
 const STOP: u16 = 0o500;
 
-/// A program that reads `words`' physical addresses in turn, each into A
-/// 200 up, and after each reads word 101 into A 240 up and writes it,
-/// clearing it; then stops at [`STOP`]. Virtual page `k + 1` maps the
-/// `k`th word's page, and M `k + 1` holds its virtual address; virtual page
-/// 30 and M 30 word 101.
+/// A program that reads `words`' bus addresses in turn, each into A 200
+/// up, and after each reads word 101 into A 240 up and writes it, clearing
+/// it; then stops at [`STOP`]. M `k + 1` holds the `k`th word's virtual
+/// address in its window, and M 30 word 101's.
 fn program(m: &mut Machine, words: &[u32]) {
     assert!(words.len() <= 24 && 8 * words.len() < STOP as usize);
     let mut prom = Vec::new();
@@ -456,17 +554,17 @@ fn program(m: &mut Machine, words: &[u32]) {
     m.load_prom(&code);
     support::prom_program_in_ram(m);
     for (k, &p) in words.iter().enumerate() {
-        m.mmem[1 + k] = support::quux_map(m, 1 + k as u32, p).into();
+        m.mmem[1 + k] = support::quux_va(p).into();
     }
-    m.mmem[30] = support::quux_map(m, 30, ERRORS).into();
+    m.mmem[30] = support::quux_va(ERRORS).into();
     for k in 0..words.len() {
         m.amem[0o200 + k] = 0o525252;
         m.amem[0o240 + k] = 0o525252;
     }
 }
 
-/// Runs `m` on `micro` and on `rtl` to [`STOP`]: each engine's machine,
-/// and `rtl`'s time.
+/// Runs `m` on `micro` and on `rtl`, the pipeline, to [`STOP`]: each
+/// engine's machine, and the pipeline's time in nanoseconds.
 fn on_both(m: Machine) -> [(&'static str, Machine, u64); 2] {
     fn run<E: Engine>(mut e: E, ns: impl Fn(&E) -> u64) -> (Machine, u64) {
         e.boot();
@@ -479,15 +577,15 @@ fn on_both(m: Machine) -> [(&'static str, Machine, u64); 2] {
         panic!("the program never reached its end");
     }
     let (e, _) = run(Micro::new(m.clone()), |_| 0);
-    let (r, ns) = run(Rtl::new(m), Rtl::ns);
+    let (r, ns) = run(Pipeline::new(m), |e| e.machine().device_ns());
     [("micro", e, 0), ("rtl", r, ns)]
 }
 
-/// **Both engines read every word of the page through the map**:
+/// **Both engines read every word of the page through the device window**:
 /// what each reads is the table's power-on value, and none of the 256
 /// reads sets word 101.
 #[test]
-fn both_engines_read_every_word_through_the_map() {
+fn both_engines_read_every_word_through_the_device_window() {
     let t = table();
     for batch in (0..256u32).collect::<Vec<_>>().chunks(16) {
         let words: Vec<u32> = batch.iter().map(|w| PAGE + w).collect();
@@ -538,7 +636,7 @@ fn the_old_addresses_answer_nothing() {
 }
 
 /// **On both engines too, each at once**: every old address read through
-/// the map gives 0 and word 101 `<0>`, which the program reads after each
+/// its window gives 0 and word 101 `<0>`, which the program reads after each
 /// and clears; and `rtl` takes no timeout over them, a batch of 24
 /// failing reads and 48 accesses of word 101 ending well inside one
 /// CADR timeout of 4.25 us each.
@@ -576,7 +674,7 @@ fn the_cadr_has_no_register_page() {
 
 /// **The microcode reaches the page through the bus on both engines**: a
 /// store of 1 to word 102 sets error stop, and a read of it gives 1 back.
-/// Virtual page 1 maps the register page.
+/// M 1 holds word 102's address in the device window.
 #[test]
 fn both_engines_write_and_read_the_page() {
     let mut prom =
@@ -590,13 +688,13 @@ fn both_engines_write_and_read_the_page() {
         let mut words = vec![filler(); 1024];
         words[..prom.len()].copy_from_slice(&prom);
         m.load_prom(&words);
-        m.mmem[1] = support::quux_map(&mut m, 1, MODE).into();
+        m.mmem[1] = support::quux_va(MODE).into();
         m.mmem[2] = 1;
         m
     };
     let mut e = Micro::new(machine());
     e.boot();
-    let mut r = Rtl::new(machine());
+    let mut r = Pipeline::new(machine());
     r.boot();
     for _ in 0..400 {
         e.step().unwrap();

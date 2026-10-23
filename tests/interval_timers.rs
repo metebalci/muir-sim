@@ -9,24 +9,26 @@
 //! ones, as on the CADR: no timer is reached but through the page.
 //!
 //! The rules are held on [`Machine`] at exact instants, where a word is
-//! read or written at [`Machine::ns`]; the instants the engines give those
-//! reads and writes (contract Q11, rule 10) are held on `rtl`, and the
-//! outcomes on `micro` too.
+//! read or written at [`Machine::ns`], on revision 16, whose units are
+//! 0.5 ns; the outcomes on `micro` and on `rtl`, the pipeline. The instants
+//! the single-edge `rtl` gives those reads and writes (contract Q11, rule
+//! 10) are held on revision 13, the machine it runs.
 
 use muir::engine::Engine;
 use muir::isa::Insn;
 use muir::isa::asm::{
-    ALU, ALWAYS, JUMP, MD, N, SETM, SETO, SETZ, SRC_MD, START_READ, START_WRITE, a_dest, filler,
-    m_dest, m_src, src, target,
+    ALU, ALWAYS, JUMP, MD, N, SETM, SETO, SRC_MD, START_READ, START_WRITE, a_dest, filler, m_dest,
+    m_src, src, target,
 };
 use muir::machine::{Geometry, IntervalTimer, Machine};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 
 mod support;
 
-/// An engine and its own time: `micro`'s is the machine's, `rtl`'s its
-/// clock, which the machine's follows only at bus cycles.
+/// An engine and its own time: the machine's, on `micro` and on the
+/// pipeline, which keeps it at each clock.
 trait Timed: Engine {
     fn now(&self) -> u64;
 }
@@ -35,20 +37,20 @@ impl Timed for Micro {
         self.machine().ns
     }
 }
-impl Timed for Rtl {
+impl Timed for Pipeline {
     fn now(&self) -> u64 {
-        self.ns()
+        self.machine().ns
     }
 }
 
 fn engine(name: &str, m: Machine) -> Box<dyn Timed> {
     match name {
         "micro" => Box::new(Micro::new(m)),
-        _ => Box::new(Rtl::new(m)),
+        _ => Box::new(Pipeline::new(m)),
     }
 }
 
-const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
+const PAGE: u32 = support::PAGE_16;
 const INTERRUPTS: u32 = PAGE + 0o100;
 const RESET_DEVICES: u32 = PAGE + 0o104;
 
@@ -70,12 +72,11 @@ const CLEAR: u32 = 2;
 const ONE_SHOT: u32 = 4;
 const IE: u32 = 1 << 8;
 
-const US: u64 = 1000;
+/// A microsecond in revision 16's units of 0.5 ns.
+const US: u64 = 2000;
 
 fn quux() -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
-    m
+    support::quux_16()
 }
 
 /// Timer `k`'s control word and word 100's bit for it, at `ns`.
@@ -312,14 +313,19 @@ fn m3_a_write_touches_its_timer_alone() {
 /// The state every timer resets to.
 const RESET_STATE: IntervalTimer = IntervalTimer::RESET;
 
-fn every_timer_on(m: &mut Machine) {
+/// Every timer on at the engine's time, with a period of 5 us, and the
+/// engine run on until all three are up.
+fn every_timer_on(e: &mut dyn Timed) {
+    let m = e.machine_mut();
     let at = m.ns;
     for (k, mode) in [(0, 0), (1, ONE_SHOT), (2, 0)] {
         write(m, at, period(k), 5);
         write(m, at, control(k), ON | IE | mode);
     }
-    // Up, all three.
-    m.ns = at + 5 * US;
+    while e.now() < at + 5 * US {
+        e.step().unwrap();
+    }
+    let m = e.machine_mut();
     for k in 0..3 {
         assert_ne!(m.bus_read(control(k)) & u64::from(FLAG), 0);
     }
@@ -339,7 +345,7 @@ fn m4_every_reset_puts_every_timer_in_its_reset_state() {
             for _ in 0..50 {
                 e.step().unwrap();
             }
-            every_timer_on(e.machine_mut());
+            every_timer_on(e.as_mut());
             let ns = e.now();
             match how {
                 "-RESET" => e.spy_write(muir::spy::MODE, muir::spy::MODE_RESET),
@@ -367,27 +373,65 @@ fn m4_every_reset_puts_every_timer_in_its_reset_state() {
     }
 }
 
-/// A QUUX machine for a program: the program in the control store, virtual
-/// page 0 main memory page 0 and virtual page 1 the register page, both
-/// readable and writable, and M memory as `m_words` says.
+/// A QUUX machine for a program: the program in the control store, and M
+/// memory as `m_words` says.
 fn engine_machine(prom: &[Insn], m_words: &[(usize, u64)]) -> Machine {
     let mut m = quux();
     let mut words = vec![filler(); 1024];
     words[..prom.len()].copy_from_slice(prom);
     m.load_prom(&words);
     support::prom_program_in_ram(&mut m);
-    support::quux_map(&mut m, 0, 0);
-    support::quux_map(&mut m, 1, PAGE);
     for &(k, v) in m_words {
         m.mmem[k] = v;
     }
     m
 }
 
-/// The register page's word `w` through virtual page 1, the page being at
-/// word 1400 of its 1024-word frame.
-const fn va(w: u32) -> u64 {
-    (1 << 10 | PAGE & 0o1777 | w) as u64
+/// The register page's word `w` in the device window.
+fn va(w: u32) -> u64 {
+    support::quux_va(PAGE + w).into()
+}
+
+// --- revision 13, for the single-edge `rtl`'s instants -------------------------
+
+/// Revision 13's register page, its microsecond, and a machine for a
+/// program on it: virtual page 0 main memory page 0 and virtual page 1 the
+/// register page, both readable and writable, and M memory as `m_words`
+/// says.
+const PAGE_13: u32 = muir::machine::REGISTER_PAGE_13;
+const US_13: u64 = 1000;
+
+fn engine_machine_13(prom: &[Insn], m_words: &[(usize, u64)]) -> Machine {
+    let mut m = Machine::new();
+    m.geometry = Geometry::QUUX;
+    let mut words = vec![filler(); 1024];
+    words[..prom.len()].copy_from_slice(prom);
+    m.load_prom(&words);
+    support::prom_program_in_ram(&mut m);
+    support::quux_map(&mut m, 0, 0);
+    support::quux_map(&mut m, 1, PAGE_13);
+    for &(k, v) in m_words {
+        m.mmem[k] = v;
+    }
+    m
+}
+
+/// Revision 13's register page word `w` through virtual page 1, the page
+/// being at word 1400 of its 1024-word frame.
+const fn va_13(w: u32) -> u64 {
+    (1 << 10 | PAGE_13 & 0o1777 | w) as u64
+}
+
+/// Timer `k`'s period word on revision 13, written at `at`.
+fn write_period_13(m: &mut Machine, at: u64, k: usize, v: u32) {
+    m.ns = at;
+    m.bus_write(PAGE_13 + 0o111 + 2 * k as u32, v.into());
+}
+
+/// Timer `k`'s control word on revision 13, written at `at`.
+fn write_control_13(m: &mut Machine, at: u64, k: usize, v: u32) {
+    m.ns = at;
+    m.bus_write(PAGE_13 + 0o110 + 2 * k as u32, v.into());
 }
 
 /// `INTERRUPT-CONTROL`'s `INT.ENABLE`, `<35>` on QUUX (contract G2
@@ -410,11 +454,11 @@ const PGF_OR_INT: u64 = (1 << 5) | 5;
 /// condition does; off, nothing.
 #[test]
 fn m6_a_timer_interrupts_under_its_interrupt_enable() {
-    // INT.ENABLE, a read of main memory for VMAOK, then a jump on
-    // condition 5 to 5, which sets M 5.
+    // INT.ENABLE, a read of main memory word 0, in the physical memory
+    // window, for VMAOK, then a jump on condition 5 to 5, which sets M 5.
     let prom = [
         Insn::new(ALU | SETM | m_src(6) | INTERRUPT_CONTROL),
-        Insn::new(ALU | SETZ | START_READ),
+        Insn::new(ALU | SETM | m_src(7) | START_READ),
         Insn::new(JUMP | target(4) | PGF_OR_INT | N),
         Insn::new(JUMP | target(2) | ALWAYS | N),
         Insn::new(ALU | SETO | m_dest(5)),
@@ -423,7 +467,7 @@ fn m6_a_timer_interrupts_under_its_interrupt_enable() {
     for (k, &bit) in BIT.iter().enumerate() {
         for (v, want) in [(ON | IE, true), (ON, false), (IE, false), (ON | ONE_SHOT | IE, true)] {
             for engine_name in ["micro", "rtl"] {
-                let m = engine_machine(&prom, &[(6, INT_ENABLE)]);
+                let m = engine_machine(&prom, &[(6, INT_ENABLE), (7, support::quux_va(0).into())]);
                 let mut e = engine(engine_name, m);
                 e.boot();
                 let m = e.machine_mut();
@@ -454,8 +498,8 @@ fn m6_a_timer_interrupts_under_its_interrupt_enable() {
     }
 }
 
-/// **M6, a rise during a wait for `MD`, each timer**: seen by the jump
-/// after it, on `rtl` under the FPGA's grid and under `sync` --- `SINTR` is
+/// **M6, a rise during a wait for `MD`, each timer**, on revision 13: seen
+/// by the jump after it, on the single-edge `rtl` under `sync` --- `SINTR` is
 /// registered at the edge that ends the waiting microcycle, with the flags
 /// as they stand at that edge. The program: a read of main memory, `MD`
 /// into A 720 (which waits for the word), and a jump on condition 5 that
@@ -486,7 +530,7 @@ fn m6_a_rise_during_a_wait_for_md_is_seen_by_the_jump_after() {
                     prom.push(Insn::new(ALU | SETO | m_dest(5)));
                     prom.push(Insn::new(JUMP | target(jump_at + 4) | ALWAYS | N));
                     // Virtual word 405: level-2 entry 4, physical page 100.
-                    let mut m = engine_machine(&prom, &[(6, INT_ENABLE)]);
+                    let mut m = engine_machine_13(&prom, &[(6, INT_ENABLE)]);
                     m.mmem[7] = support::quux_map(&mut m, 4, (0o100 << 10) | 5).into();
                     m.main[(0o100 << 10) | 5] = 0o777;
                     let mut r = Rtl::new(m);
@@ -494,8 +538,8 @@ fn m6_a_rise_during_a_wait_for_md_is_seen_by_the_jump_after() {
                     r.boot();
                     let m = r.machine_mut();
                     let at = m.ns;
-                    write(m, at, period(k), p);
-                    write(m, at, control(k), ON | IE);
+                    write_period_13(m, at, k, p);
+                    write_control_13(m, at, k, ON | IE);
                     let rise = r.machine().timers.timer[k].deadline_ns;
                     let mut ends = None;
                     for _ in 0..400 {
@@ -523,7 +567,7 @@ fn m6_a_rise_during_a_wait_for_md_is_seen_by_the_jump_after() {
 
 /// **M7, the layout**: word 104 reads 0; words 110-115 as the contract has
 /// them, their reserved bits 0; feature word 16 is 3, the number of
-/// interval timers; MACHINE-ID is revision 13 (contract G2); and on QUUX, on both
+/// interval timers; MACHINE-ID is revision 16's; and on QUUX, on both
 /// engines, destination 4 writes only M and source 17 reads all ones.
 #[test]
 fn m7_the_page_s_layout_and_q1_s_codes_at_revision_10() {
@@ -545,10 +589,10 @@ fn m7_the_page_s_layout_and_q1_s_codes_at_revision_10() {
         assert_eq!(m.bus_read(period(k)), 0o77777777, "timer {k}'s period");
     }
     assert_eq!(m.bus_read(RESET_DEVICES), 0, "word 104 reads 0");
-    assert_eq!(Geometry::QUUX.feature_word(PAGE + 0o16), Some(3), "feature word 16");
+    assert_eq!(Geometry::QUUX_16.feature_word(PAGE + 0o16), Some(3), "feature word 16");
     assert_eq!(m.bus_read(PAGE + 0o16), 3);
-    let id = Geometry::QUUX.machine_id.unwrap();
-    assert_eq!((id >> 16, (id >> 4) & 0o7777, id & 0o17), (0x5155, 13, 4), "MACHINE-ID");
+    let id = Geometry::QUUX_16.machine_id.unwrap();
+    assert_eq!((id >> 16, (id >> 4) & 0o7777, id & 0o17), (0x5155, 16, 4), "MACHINE-ID");
     // Destination 4 with a period, then source 17: M 3 gets destination
     // 4's word through M 37, and A 200 all ones.
     let prom = [
@@ -575,8 +619,11 @@ fn m7_the_page_s_layout_and_q1_s_codes_at_revision_10() {
 /// with a one-shot that has risen and one timer's `<8>` clear, it resumes
 /// to the same rises, on both engines. The program clears timer 0 through
 /// word 110 and polls word 112 in a loop, so that timer 0 rises again and
-/// again; the resumed and the original machines' timers are compared after
-/// every microcycle.
+/// again. On `micro` the resumed and the original machines' timers are
+/// compared after every microcycle. The pipeline's resume sweeps the TLB
+/// before its first access, a clock an entry, so the resumed machine runs
+/// behind the original: its timers are the original's when it is loaded,
+/// and after the run each one's next rise is on the original's grid.
 #[test]
 fn m8_a_checkpoint_resumes_to_the_same_rises() {
     use muir::checkpoint::{Reader, Writer};
@@ -595,6 +642,11 @@ fn m8_a_checkpoint_resumes_to_the_same_rises() {
         let make = || engine(engine_name, engine_machine(&prom, &words));
         let mut e = make();
         e.boot();
+        // Past the pipeline's sweep of the TLB, which its first access waits
+        // for, so that the timers start where the program runs.
+        for _ in 0..20 {
+            e.step().unwrap();
+        }
         let m = e.machine_mut();
         let at = m.ns;
         write(m, at, period(0), 7);
@@ -614,24 +666,41 @@ fn m8_a_checkpoint_resumes_to_the_same_rises() {
             let t = m.timers.timer[k];
             assert!(t.deadline_ns > now && t.deadline_ns < now + t.period_us as u64 * US);
         }
+        // The pipeline drains first, as a checkpoint is taken.
+        e.settle_for_checkpoint().unwrap();
         let mut w = Writer::new();
         e.save(&mut w);
         let body = w.finish();
         let mut resumed = make();
         resumed.load(&mut Reader::for_word_bits(&body, 40)).unwrap();
-        let mut rises = 0;
-        let mut last = e.machine().timers.timer[0].deadline_ns;
+        assert_eq!(resumed.machine().timers, e.machine().timers, "{engine_name}: as saved");
+        let mut rises = [0; 2];
+        let mut last = [e.machine().timers.timer[0].deadline_ns; 2];
         for n in 0..20_000 {
             e.step().unwrap();
             resumed.step().unwrap();
             let (a, b) = (e.machine(), resumed.machine());
-            assert_eq!((a.ns, a.timers), (b.ns, b.timers), "{engine_name}: microcycle {n}");
-            if a.timers.timer[0].deadline_ns != last {
-                last = a.timers.timer[0].deadline_ns;
-                rises += 1;
+            if engine_name == "micro" {
+                assert_eq!((a.ns, a.timers), (b.ns, b.timers), "{engine_name}: microcycle {n}");
+            }
+            for (j, m) in [a, b].into_iter().enumerate() {
+                if m.timers.timer[0].deadline_ns != last[j] {
+                    last[j] = m.timers.timer[0].deadline_ns;
+                    rises[j] += 1;
+                }
             }
         }
-        assert!(rises > 10, "{engine_name}: timer 0 rose and was cleared {rises} times");
+        let (a, b) = (e.machine(), resumed.machine());
+        for k in [0, 2] {
+            let (ta, tb) = (a.timers.timer[k], b.timers.timer[k]);
+            assert_eq!(
+                ta.deadline_ns.abs_diff(tb.deadline_ns) % (ta.period_us as u64 * US),
+                0,
+                "{engine_name}: timer {k} on the original's grid: {ta:?}, {tb:?}"
+            );
+        }
+        assert!(rises[0] > 10, "{engine_name}: timer 0 rose and was cleared {rises:?} times");
+        assert!(rises[1] > 10, "{engine_name}: resumed, timer 0 rose {rises:?} times");
     }
 }
 
@@ -651,7 +720,7 @@ fn run_marking(r: &mut Rtl, marker: Insn, steps: usize) -> u64 {
     at.expect("the marker ran")
 }
 
-/// **M13, the shared edge, writes** (`rtl`): destination 3 written in the
+/// **M13, the shared edge, writes** (the single-edge `rtl`, revision 13): destination 3 written in the
 /// microcycle whose ending edge takes a write of word 110 changes nothing
 /// at that edge either, timer 0 being what the register write alone makes
 /// it. Word 110 written with `401` against destination 3 with 0 turns it
@@ -669,11 +738,11 @@ fn m13_at_a_shared_edge_destination_3_changes_nothing() {
     ];
     for (up, word, dest3) in [(false, 0o401, 0), (false, 0, 1), (true, 0o401, 3)] {
         let mut r =
-            Rtl::new(engine_machine(&prom, &[(1, va(0o110)), (2, word.into()), (3, dest3)]));
+            Rtl::new(engine_machine_13(&prom, &[(1, va_13(0o110)), (2, word.into()), (3, dest3)]));
         r.boot();
         let m = r.machine_mut();
         let at = m.ns;
-        write(m, at, period(0), 100);
+        write_period_13(m, at, 0, 100);
         if up {
             m.timers.timer[0] = IntervalTimer {
                 on: true,
@@ -690,13 +759,13 @@ fn m13_at_a_shared_edge_destination_3_changes_nothing() {
         if up {
             assert!(t.flag(r.ns()), "{what}: the flag still up");
         } else if t.on {
-            assert_eq!(t.deadline_ns, edge + 100 * US, "{what}: the period from the edge");
+            assert_eq!(t.deadline_ns, edge + 100 * US_13, "{what}: the period from the edge");
             assert!(t.interrupt_enable && !t.one_shot, "{what}");
         }
     }
 }
 
-/// **M13, `SINTR` at the shared edge** (`rtl`): with timer 0's flag up
+/// **M13, `SINTR` at the shared edge** (the single-edge `rtl`, revision 13): with timer 0's flag up
 /// under its interrupt enable, destination 3 written with 3, Q1's clear, at
 /// the edge that takes a write of word 110 leaves the flag in that edge's
 /// `SINTR`: the jump after it is taken, as it is with 1.
@@ -715,9 +784,9 @@ fn m13_sintr_at_the_shared_edge_keeps_what_destination_3_does_not_clear() {
         Insn::new(JUMP | target(8) | ALWAYS | N),
     ];
     for dest3 in [3, 1] {
-        let mut r = Rtl::new(engine_machine(
+        let mut r = Rtl::new(engine_machine_13(
             &prom,
-            &[(1, va(0o110)), (2, 0o401), (3, dest3), (6, INT_ENABLE)],
+            &[(1, va_13(0o110)), (2, 0o401), (3, dest3), (6, INT_ENABLE)],
         ));
         r.boot();
         r.machine_mut().timers.timer[0] = IntervalTimer {
@@ -732,7 +801,7 @@ fn m13_sintr_at_the_shared_edge_keeps_what_destination_3_does_not_clear() {
     }
 }
 
-/// **M13, reads at the shared edge** (`rtl`), each for word 100 and word
+/// **M13, reads at the shared edge** (the single-edge `rtl`, revision 13), each for word 100 and word
 /// 110, with timer 0 on under its interrupt enable. A read gives the flags
 /// as they stood at the edge that takes its cycle:
 /// - its flag up, destination 3 written with 3, Q1's clear, or with 1, in
@@ -757,7 +826,7 @@ fn m13_a_read_gives_the_flags_as_they_stood_at_its_edge() {
             deadline_ns,
         };
         let run = |dest3: u32, deadline: u64| {
-            let mut r = Rtl::new(engine_machine(&prom, &[(1, va(word)), (3, dest3.into())]));
+            let mut r = Rtl::new(engine_machine_13(&prom, &[(1, va_13(word)), (3, dest3.into())]));
             r.boot();
             r.machine_mut().timers.timer[0] = timer(deadline);
             let edge = run_marking(&mut r, dest_3, 60);

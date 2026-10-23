@@ -14,6 +14,22 @@ use std::path::{Path, PathBuf};
 
 use support::{Run, Scratch, cadr, cadr_default, executable, quux, scratch, text};
 
+/// `quux` on revision 16, started on a boot PROM of a jump to itself under
+/// `dir`, revision 16 having none built in.
+fn quux_16(dir: &Path) -> std::process::Command {
+    let mut c = support::quux_on_16();
+    c.arg("--prom").arg(support::idle_prom_16(dir));
+    c
+}
+
+/// [`refused_saying`] of `quux` on revision 16.
+fn refused_saying_16(args: &[&str], says: &str) {
+    let out = support::quux_on_16().args(args).run();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "quux {args:?}: not a usage error:\n{err}");
+    assert!(err.contains(says), "quux {args:?}: the refusal says {says:?}:\n{err}");
+}
+
 /// A usage error from `exe`, `cadr` or `quux`: exit status 2, and the
 /// flag named on stderr.
 fn refused(exe: &str, args: &[&str], flag: &str) {
@@ -445,27 +461,27 @@ fn the_display_board_is_named_on_every_engine() {
 #[test]
 fn the_video_controller_is_quux_s() {
     refused_saying("cadr", &["--rtl", "--tv-board", "video"], "video is quux's");
+    let dir = scratch("video-controller");
     for engine in ["--micro", "--rtl"] {
-        let out = quux().args([engine, "--stop-after", "1"]).run();
+        let out = quux_16(&dir).args([engine, "--stop-after", "1"]).run();
         let t = text(&out);
         assert!(out.status.success(), "{engine}:\n{t}");
         assert!(t.contains("tv: model video"), "{engine}: the start says the board:\n{t}");
     }
     for board in ["simple-tv", "lispm-tv", "video"] {
-        refused_saying("quux", &["--rtl", "--tv-board", board], "--tv-board is cadr's, not quux's");
+        refused_saying_16(&["--rtl", "--tv-board", board], "--tv-board is cadr's, not quux's");
     }
     // Its size is a flag of its own, and says so.
-    let out = quux().args(["--rtl", "--video-size", "1920x1080", "--stop-after", "1"]).run();
+    let out = quux_16(&dir).args(["--rtl", "--video-size", "1920x1080", "--stop-after", "1"]).run();
     let t = text(&out);
     assert!(out.status.success(), "{t}");
     assert!(t.contains("tv: model video, 1920x1080"), "the start says the size:\n{t}");
-    refused_saying(
-        "quux",
+    refused_saying_16(
         &["--video-size", "2560x1440"],
         "--video-size: 2560 by 1440 is past 1920 by 1080",
     );
-    refused_saying("quux", &["--video-size", "1921x1080"], "--video-size: a width of 1921");
-    refused_saying("quux", &["--video-size", "wide"], "--video-size wants");
+    refused_saying_16(&["--video-size", "1921x1080"], "--video-size: a width of 1921");
+    refused_saying_16(&["--video-size", "wide"], "--video-size wants");
     refused_saying("cadr", &["--video-size", "1920x1080"], "--video-size is quux's, not cadr's");
     for exe in ["quux", "cadr"] {
         refused_saying(
@@ -523,40 +539,47 @@ fn quux_runs_on_sync_alone() {
 /// smaller than a set of two 8-word lines, 16 words being the least.
 #[test]
 fn the_cache_is_quux_s_and_rtl_s() {
+    let dir = scratch("cache");
     for words in ["4096", "16"] {
-        let out = quux().args(["--rtl", "--cache", words, "--stop-after", "1"]).run();
+        let out = quux_16(&dir).args(["--rtl", "--cache", words, "--stop-after", "1"]).run();
         let t = text(&out);
         assert!(out.status.success(), "{t}");
         let says = format!("cache: {words} words, lines of 8, 2-way");
         assert!(t.contains(&says), "the start says it:\n{t}");
     }
     refused_saying("cadr", &["--rtl", "--cache", "4096"], "--cache is quux's, not cadr's");
-    refused_saying("quux", &["--micro", "--cache", "4096"], "--cache is rtl's");
-    refused_saying("quux", &["--rtl", "--cache", "3000"], "--cache:");
-    refused_saying("quux", &["--rtl", "--cache", "8"], "fewer words than one set's lines");
+    refused_saying_16(&["--micro", "--cache", "4096"], "--cache is rtl's");
+    refused_saying_16(&["--rtl", "--cache", "3000"], "--cache:");
+    refused_saying_16(&["--rtl", "--cache", "8"], "fewer words than one set's lines");
 }
 
-/// **QUUX's main memory is on its own port** (contract Q6): the start
-/// says the port's timing and the cache, fitted without `--cache`;
-/// `--memory-timing` sets other figures there, and is refused on `cadr`,
-/// on `micro`, and with a figure that is not one.
+/// **QUUX's main memory is on its own port** (contract Q6; G3 revision 15,
+/// A15b.5, A15b.6): the start says the port's timing and the cache, fitted
+/// without `--cache`; `--memory-timing` sets other figures there, a board's
+/// by name, and is refused on `cadr`, on `micro`, and with a figure that is
+/// not one.
 #[test]
 fn quux_s_memory_port_and_its_timing() {
-    let out = quux().args(["--rtl", "--stop-after", "1"]).run();
+    let dir = scratch("memory-port");
+    let out = quux_16(&dir).args(["--rtl", "--stop-after", "1"]).run();
     let t = text(&out);
     assert!(out.status.success(), "{t}");
-    assert!(t.contains("memory port: a line fill in 380 ns, a write in 290"), "{t}");
-    assert!(t.contains("cache: 4096 words, lines of 8, 2-way"), "always fitted:\n{t}");
-    let out = quux().args(["--rtl", "--memory-timing", "arty", "--stop-after", "1"]).run();
+    assert!(
+        t.contains("memory port: a line fill in 344 ns, 35 clocks; a write answered in 215 ns"),
+        "{t}"
+    );
+    assert!(t.contains("cache: 65536 words, lines of 8, 2-way"), "always fitted:\n{t}");
+    let out = quux_16(&dir).args(["--rtl", "--memory-timing", "arty", "--stop-after", "1"]).run();
     let t = text(&out);
-    assert!(t.contains("memory port: a line fill in 220 ns, a write in 120"), "{t}");
+    assert!(t.contains("memory port: a line fill in 290 ns"), "{t}");
+    assert!(t.contains("a write answered in 120 ns"), "{t}");
     refused_saying(
         "cadr",
-        &["--rtl", "--memory-timing", "300,200"],
+        &["--rtl", "--memory-timing", "300,200,10"],
         "--memory-timing is quux's, not cadr's",
     );
-    refused_saying("quux", &["--micro", "--memory-timing", "300,200"], "--memory-timing is rtl's");
-    refused_saying("quux", &["--rtl", "--memory-timing", "fast"], "--memory-timing");
+    refused_saying_16(&["--micro", "--memory-timing", "300,200,10"], "--memory-timing is rtl's");
+    refused_saying_16(&["--rtl", "--memory-timing", "fast"], "--memory-timing");
 }
 
 /// **`--rtc` is QUUX's** (contract Q9): the real-time clock is the host's
@@ -566,8 +589,9 @@ fn quux_s_memory_port_and_its_timing() {
 /// is not a second, and the flag on `cadr`, the CADR having no RTC.
 #[test]
 fn the_rtc_is_quux_s() {
+    let dir = scratch("rtc");
     for engine in ["--micro", "--rtl"] {
-        let out = quux().args([engine, "--stop-after", "1"]).run();
+        let out = quux_16(&dir).args([engine, "--stop-after", "1"]).run();
         let t = text(&out);
         assert!(out.status.success(), "{engine}: {t}");
         assert!(t.contains("rtc: the host's clock"), "{engine}: the start says it:\n{t}");
@@ -576,7 +600,7 @@ fn the_rtc_is_quux_s() {
             ("4294967295", "rtc: from 4294967295, counting machine time"),
             ("host", "rtc: the host's clock"),
         ] {
-            let out = quux().args([engine, "--rtc", flag, "--stop-after", "1"]).run();
+            let out = quux_16(&dir).args([engine, "--rtc", flag, "--stop-after", "1"]).run();
             let t = text(&out);
             assert!(out.status.success(), "{engine} --rtc {flag}: {t}");
             assert!(t.contains(said), "{engine} --rtc {flag}: the start says it:\n{t}");
@@ -610,7 +634,6 @@ fn the_file_root_is_quux_s() {
         (
             vec![],
             vec![
-                "a real-time clock, a file device, three interval timers and reset devices".into(),
                 "file device: 20 us a command and 100 us a KiB".into(),
                 "file device: / is empty and read-only: nothing is mounted".into(),
             ],
@@ -638,7 +661,7 @@ fn the_file_root_is_quux_s() {
     ];
     for engine in ["--micro", "--rtl"] {
         for (flags, said) in &cases {
-            let out = quux().args([engine, "--stop-after", "1"]).args(flags).run();
+            let out = quux_16(&dir).args([engine, "--stop-after", "1"]).args(flags).run();
             let t = text(&out);
             assert!(out.status.success(), "{engine} {flags:?}: {t}");
             for line in said {
@@ -680,8 +703,9 @@ fn the_file_root_is_quux_s() {
 /// of it on `cadr`.
 #[test]
 fn quux_s_disk_is_block_disk_only() {
+    let dir = scratch("block-disk-only");
     for engine in ["--micro", "--rtl"] {
-        let out = quux().args([engine, "--stop-after", "1"]).run();
+        let out = quux_16(&dir).args([engine, "--stop-after", "1"]).run();
         let t = text(&out);
         assert!(out.status.success(), "{engine}: {t}");
         assert!(t.contains("disk: block-disk"), "{engine}: the start says it:\n{t}");
@@ -815,7 +839,8 @@ fn quux_s_stops_are_the_microcode_s_and_the_prom_s() {
 /// so, and the cable's flags and the lashup are not flags of `quux`.
 #[test]
 fn quux_has_no_debug_cable() {
-    let out = quux().args(["--rtl", "--stop-after", "1"]).run();
+    let dir = scratch("no-debug-cable");
+    let out = quux_16(&dir).args(["--rtl", "--stop-after", "1"]).run();
     let t = text(&out);
     assert!(out.status.success(), "{t}");
     assert!(t.contains("debug cable: none --- QUUX has no Unibus"), "{t}");
@@ -837,13 +862,14 @@ fn quux_has_no_debug_cable() {
 /// the start says what the footer made each, and its size in blocks.
 #[test]
 fn quux_s_disk_is_raw_or_a_vhd_of_any_size() {
+    let dir = scratch("raw-or-vhd");
     for (file, said) in [
         ("quux-disk.img", "raw, 8192 blocks"),
         ("quux-disk-fixed.vhd", "a fixed VHD, 8192 blocks"),
         ("quux-disk-dynamic.vhd", "a dynamic VHD, 8192 blocks"),
     ] {
         let path = format!("{}/data/{file}", env!("CARGO_MANIFEST_DIR"));
-        let out = quux()
+        let out = quux_16(&dir)
             .args(["--micro", "--disk-pack", &format!("{path},ro")])
             .args(["--stop-after", "1"])
             .run();
@@ -881,15 +907,13 @@ fn the_executable_is_the_machine_and_quux_has_no_netlist() {
         }
     }
     refused_saying("quux", &["--chip"], "--chip is cadr's, not quux's");
+    let dir = scratch("executable-is-the-machine");
     for engine in ["--micro", "--rtl"] {
-        let out = quux().args([engine, "--stop-after", "1"]).run();
+        let out = quux_16(&dir).args([engine, "--stop-after", "1"]).run();
         let t = text(&out);
         assert!(out.status.success(), "{engine}: {t}");
         assert!(t.contains("machine: quux"), "{engine} says which machine:\n{t}");
-        assert!(
-            t.contains("QUUX's data/quux-promh.mcr, version 2001"),
-            "{engine}: QUUX's PROM:\n{t}"
-        );
+        assert!(t.contains("idle-prom-16.mcr"), "{engine}: the PROM given:\n{t}");
         let out = cadr().args([engine, "--stop-after", "1"]).run();
         let t = text(&out);
         assert!(out.status.success(), "{engine}: {t}");
@@ -1276,13 +1300,20 @@ fn the_run_directory_comes_before_the_home_one() {
 fn each_executable_reads_its_own_file() {
     let home = scratch("rc-own-home");
     let here = scratch("rc-own-here");
+    // `quux`'s files name revision 16's boot PROM, which none is built in.
+    let prom = support::idle_prom_16(home.path());
+    let prom = format!("--prom {}", prom.display());
     std::fs::write(home.join(".cadrrc"), "--micro\n--stop-after 11\n").unwrap();
-    std::fs::write(home.join(".quuxrc"), "--micro\n--stop-after 22\n").unwrap();
+    std::fs::write(home.join(".quuxrc"), format!("--micro\n--stop-after 22\n{prom}\n")).unwrap();
     std::fs::write(home.join(".muirrc"), "--micro\n--stop-after 33\n").unwrap();
     // The other's file in the run directory is not this one's.
-    std::fs::write(here.join(".quuxrc"), "--micro\n--stop-after 44\n").unwrap();
+    std::fs::write(here.join(".quuxrc"), format!("--micro\n--stop-after 44\n{prom}\n")).unwrap();
+    let on_16 = |exe: &str| match exe {
+        "quux" => support::quux_on_16(),
+        _ => executable(exe),
+    };
     let run = |exe: &str| {
-        let mut c = executable(exe);
+        let mut c = on_16(exe);
         c.env_remove("MUIR_RC").env("HOME", home.path()).current_dir(here.path());
         let out = c.run();
         let t = text(&out);
@@ -1301,8 +1332,11 @@ fn each_executable_reads_its_own_file() {
     std::fs::remove_file(home.join(".cadrrc")).unwrap();
     std::fs::remove_file(home.join(".quuxrc")).unwrap();
     for exe in ["cadr", "quux"] {
-        let mut c = executable(exe);
+        let mut c = on_16(exe);
         c.env_remove("MUIR_RC").env("HOME", home.path()).current_dir(here.path());
+        if exe == "quux" {
+            c.arg("--prom").arg(support::idle_prom_16(home.path()));
+        }
         let t = text(&c.args(["--micro", "--stop-after", "1"]).run());
         assert!(!t.contains("flags:"), "{exe} reads no .muirrc:\n{t}");
         assert!(!t.contains("after 33"), "{exe} reads no .muirrc:\n{t}");

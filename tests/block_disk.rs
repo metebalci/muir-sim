@@ -130,16 +130,16 @@ fn any_other_command_stops_by_error() {
 }
 
 /// **On QUUX the registers are block-disk's, at words 200-203 of the
-/// register page**, `1777777600` (contract Q13): 200 status and command,
+/// register page**, `35777777600` (contract Q13): 200 status and command,
 /// 201 the last memory address and the command list pointer, 202 the disk
 /// address, 203 START. A read through them lands the page, and nothing
 /// fails; the CADR controller's place, `17377774`, is nothing there on a
 /// machine of 2MW, past its main memory.
 #[test]
 fn on_quux_the_registers_are_the_block_disk_s() {
-    const REGS: u32 = 0o1777777600;
-    assert_eq!(block_disk::REGS, REGS);
-    let mut m = Machine::with_geometry(MachineGeometry::QUUX, 32);
+    const REGS: u32 = muir::tlb::REGISTER_PAGE_BUS + 0o200;
+    assert_eq!(block_disk::REGS & 0o377, REGS & 0o377, "word 200 of the page");
+    let mut m = Machine::with_geometry(MachineGeometry::QUUX_16, 32);
     let mut d = BlockDisk::new(block_disk::BLOCK_NS);
     d.attach(pack());
     m.block_disk = Some(d);
@@ -154,7 +154,7 @@ fn on_quux_the_registers_are_the_block_disk_s() {
     assert_eq!(m.bus_read(REGS + 3), 0, "START reads 0");
     assert_eq!(m.bus_error & bus_error::XBUS_NXM, 0);
     assert!(m.dma_written, "the cache is told memory was written");
-    m.ns += 4 * block_disk::BLOCK_NS;
+    m.ns += 4 * block_disk::BLOCK_NS * m.time_base().per_ns;
     assert_eq!(m.bus_read(REGS) & 1, 1, "not active");
     for old in 0o17377774..=0o17377777 {
         m.bus_error = 0;

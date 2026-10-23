@@ -240,6 +240,11 @@ fn micro(m: &Machine, main: &[(u32, u32)], steps: usize) -> (End, Trace) {
     on_engine(muir::micro::Micro::new, muir::micro::Micro::boot, m, main, steps)
 }
 
+/// `rtl` on revision 16, the pipeline.
+fn pipeline(m: &Machine, main: &[(u32, u32)], steps: usize) -> (End, Trace) {
+    on_engine(muir::pipeline::Pipeline::new, muir::pipeline::Pipeline::boot, m, main, steps)
+}
+
 /// PCs in octal, for a failure message.
 fn octal(pcs: &[u16]) -> String {
     pcs.iter().map(|p| format!("{p:o}")).collect::<Vec<_>>().join(" ")
@@ -402,9 +407,21 @@ fn on_chip_a_popj_that_writes_its_own_dispatch_word_uses_the_new_word() {
     }
 }
 
-/// `m` as QUUX: the same program and memories on `quux`, its virtual page
-/// 0, of 1024 words, mapped onto physical page 0, so that [`VADDR`] is
-/// [`PHYS_13`].
+/// `m` as QUUX revision 16: the same program and memories.
+fn as_quux_16(m: &Machine) -> Machine {
+    let mut q = Machine::with_geometry(muir::machine::Geometry::QUUX_16, m.memory_boards());
+    q.prom = m.prom.clone();
+    q.amem = m.amem;
+    q.mmem = m.mmem;
+    q.dmem.copy_from_slice(&m.dmem[..]);
+    q.main.copy_from_slice(&m.main);
+    support::prom_program_in_ram(&mut q);
+    q
+}
+
+/// `m` as QUUX revision 13: the same program and memories on `quux`, its
+/// virtual page 0, of 1024 words, mapped onto physical page 0, so that
+/// [`VADDR`] is [`PHYS_13`].
 fn as_quux(m: &Machine) -> Machine {
     let mut m = m.clone();
     m.geometry = muir::machine::Geometry::QUUX;
@@ -426,17 +443,17 @@ fn on_the_cadr_rtl_and_micro_take_the_word_chip_does() {
 }
 
 /// **QUUX defines the word a `POPJ` in a dispatch write sees as the old
-/// one**: `R` and `DPC` from the word standing before the write, on `rtl`
-/// and `micro`, as a RAM read in the cycle that writes it gives on the
-/// FPGA. With `R` set in the old word it returns; with it clear it goes to
-/// the old word's `DPC` and pops nothing.
+/// one**: `R` and `DPC` from the word standing before the write, on `rtl`,
+/// the pipeline, and `micro`, as a RAM read in the cycle that writes it
+/// gives on the FPGA. With `R` set in the old word it returns; with it
+/// clear it goes to the old word's `DPC` and pops nothing.
 #[test]
 fn on_quux_rtl_and_micro_take_the_old_word() {
     for (old, new, _) in POPJ_CASES {
         let want = if old & DR != 0 { (RETURNED, 0) } else { (AT_OLD_DPC, 1) };
-        let m = as_quux(&popj_program(old, new));
+        let m = as_quux_16(&popj_program(old, new));
         for (name, (e, _)) in
-            [("rtl", rtl(&m, &[], POPJ_CYCLES)), ("micro", micro(&m, &[], POPJ_CYCLES))]
+            [("rtl", pipeline(&m, &[], POPJ_CYCLES)), ("micro", micro(&m, &[], POPJ_CYCLES))]
         {
             assert_eq!((e.mmem[5], e.spcptr), want, "{name}, old {old:o} new {new:o}");
             assert_eq!(e.dmem[D as usize], new, "{name}: the new word is written");

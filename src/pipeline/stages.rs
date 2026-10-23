@@ -2395,7 +2395,7 @@ mod tests {
     #[test]
     fn a_walk_keeps_the_address_it_began_with() {
         let entry = |frame: u32| 0b11 << 28 | 0o1460 << 18 | frame;
-        let mut p = Pipeline::new(Machine::with_geometry(Geometry::QUUX_15, 1));
+        let mut p = Pipeline::new(Machine::with_geometry(Geometry::QUUX_16, 1));
         let (x, y): (u32, u32) = (0o4000, 1 << 20 | 5 << 10);
         let page = |va: u32| (va >> 10 & 0o1777) as usize;
         p.m.memory_words.directory = 8;

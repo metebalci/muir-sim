@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Mete Balci
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! **QUUX revision 13's datapath** (contract G2 §2, with its appendix A1),
-//! on hand-written microcode, on `micro` and `rtl`: the fields, the ALU,
-//! the rotator and the masker, LC byte mode, the jump conditions, the
-//! dispatch memory and the map, as [`Geometry::QUUX`] has them. Every
-//! program runs on both engines, and each engine's M memory must be what
-//! the program's comments say.
+//! **QUUX's 40-bit datapath** (contract G2 §2, with its appendix A1), on
+//! hand-written microcode, on `micro` and `rtl`: the fields, the ALU, the
+//! rotator and the masker, LC byte mode, the jump conditions and the
+//! dispatch memory, on revision 16, where `rtl` is the pipeline; and
+//! revision 13's own map, physical space and cache, on its single-edge
+//! `rtl`. Every program runs on both engines, and each engine's M memory
+//! must be what the program's comments say.
 //!
 //! The words are 40 bits, G1's: the cdr code `<39:38>`, the data type
 //! `<37:32>` and the field `<31:0>`. A byte's rotate for an LDB is (40 −
@@ -23,13 +24,16 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, Machine, Word, macro_dispatch};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 use muir::tv::Board;
 
 mod support;
 
-/// Revision 13.
+/// Revision 13, for its own map, physical space and cache.
 const REV13: Geometry = Geometry::QUUX;
+/// Revision 16, which keeps revision 13's 40-bit datapath.
+const REV16: Geometry = Geometry::QUUX_16;
 
 /// A memory's constants: 0, 1, 2, and words the programs take as A.
 const ZERO: u64 = 0o40;
@@ -142,16 +146,27 @@ impl Prog {
     }
 }
 
-/// The machine for `p`, revision 13, with page 0 of 1024 words mapped to
-/// physical page 0, readable and writable, `setup` last.
+/// The machine for `p`, revision 16, `setup` last.
 fn machine(p: &Prog, setup: &dyn Fn(&mut Machine)) -> Machine {
+    machine_on(REV16, p, setup)
+}
+
+/// The machine for `p` on `geometry`: on revision 13 with page 0 of 1024
+/// words mapped to physical page 0, readable and writable; `setup` last.
+fn machine_on(geometry: Geometry, p: &Prog, setup: &dyn Fn(&mut Machine)) -> Machine {
     let mut prom: Vec<Insn> = p.words.iter().map(|&w| Insn::new(w)).collect();
     assert!(prom.len() <= STOP as usize, "the program runs into its stop");
     prom.resize(STOP as usize, filler());
     prom.push(Insn::new(JUMP | target(STOP) | ALWAYS | N));
     prom.resize(1024, filler());
-    let mut m = Machine::new();
-    m.geometry = REV13;
+    let mut m = if geometry == REV13 {
+        let mut m = Machine::new();
+        m.geometry = REV13;
+        m.l2_map[0] = (1 << 27) | (1 << 26);
+        m
+    } else {
+        Machine::with_geometry(geometry, 32)
+    };
     m.load_prom(&prom);
     support::prom_program_in_ram(&mut m);
     m.amem[ZERO as usize] = 0;
@@ -171,16 +186,16 @@ fn machine(p: &Prog, setup: &dyn Fn(&mut Machine)) -> Machine {
     for &(k, v) in &p.dmem {
         m.dmem[k] = v;
     }
-    m.l2_map[0] = (1 << 27) | (1 << 26);
     setup(&mut m);
     m
 }
 
-/// Runs to the stop, and eight microcycles on.
+/// Runs to the stop, and eight microcycles on, the pipeline drained.
 fn finish<E: Engine>(e: &mut E, name: &str) {
     for _ in 0..4000 {
         if e.machine().opc == STOP as u16 {
             e.run(8);
+            e.settle_for_checkpoint().unwrap();
             return;
         }
         e.step().unwrap();
@@ -189,7 +204,7 @@ fn finish<E: Engine>(e: &mut E, name: &str) {
 }
 
 /// Both engines' machines after `p`, `setup` applied before the boot and
-/// `after_boot` after it.
+/// `after_boot` after it: `micro` and `rtl`, the pipeline, on revision 16.
 fn run_with(
     p: &Prog,
     setup: &dyn Fn(&mut Machine),
@@ -199,7 +214,24 @@ fn run_with(
     u.boot();
     after_boot(u.machine_mut());
     finish(&mut u, "micro");
-    let mut r = Rtl::new(machine(p, setup));
+    let mut r = Pipeline::new(machine(p, setup));
+    r.boot();
+    after_boot(r.machine_mut());
+    finish(&mut r, "rtl");
+    [("micro", u.machine().clone()), ("rtl", r.machine().clone())]
+}
+
+/// [`run_with`] on revision 13, `micro` and the single-edge `rtl`.
+fn run_with_13(
+    p: &Prog,
+    setup: &dyn Fn(&mut Machine),
+    after_boot: &dyn Fn(&mut Machine),
+) -> [(&'static str, Machine); 2] {
+    let mut u = Micro::new(machine_on(REV13, p, setup));
+    u.boot();
+    after_boot(u.machine_mut());
+    finish(&mut u, "micro");
+    let mut r = Rtl::new(machine_on(REV13, p, setup));
     r.boot();
     after_boot(r.machine_mut());
     finish(&mut r, "rtl");
@@ -654,6 +686,11 @@ fn landed(p: &Prog, setup: &dyn Fn(&mut Machine), what: &str) {
     expect(&run_with(p, setup, &|_| {}), &[(0o10, 1, what)]);
 }
 
+/// [`landed`] on revision 13.
+fn landed_13(p: &Prog, setup: &dyn Fn(&mut Machine), what: &str) {
+    expect(&run_with_13(p, setup, &|_| {}), &[(0o10, 1, what)]);
+}
+
 /// **A DISPATCH on the 6-bit type into entries above 2,047** (G2 §2.4):
 /// the address `IR<23:12>`, the type the byte at 32, rotate 8, length 6.
 #[test]
@@ -683,8 +720,8 @@ fn a_dispatch_on_the_type_reaches_entries_above_2047() {
     landed(&p, &|_| {}, "the cdr code's entry at 7776");
 }
 
-/// **A 7-bit (type, map bit) dispatch reaching an entry above 2,047**
-/// (G2 §2.4, A1.7): the transporter's field, the type and the bit below
+/// **A 7-bit (type, map bit) dispatch reaching an entry above 2,047** on
+/// revision 13, through its map (G2 §2.4, A1.7): the transporter's field, the type and the bit below
 /// it, the byte at 31, rotate 9, length 7, with the map bit of `MD`'s
 /// page in place of its bit 0: `IR<9>` takes the level-2 entry's `<23>`,
 /// `IR<8>` its `<22>`.
@@ -701,11 +738,11 @@ fn a_type_and_map_bit_dispatch_reaches_entries_above_2047() {
     let p = dispatch_program(0o7400 + (0o25 << 1 | 1), &|p| {
         p.op(disp(0o7400, 7, 9) | MAP_23 | SRC_MD);
     });
-    landed(&p, &setup, "(type, <23>) at 7453");
+    landed_13(&p, &setup, "(type, <23>) at 7453");
     let p = dispatch_program(0o7400 + (0o25 << 1), &|p| {
         p.op(disp(0o7400, 7, 9) | MAP_22 | SRC_MD);
     });
-    landed(&p, &setup, "(type, <22>) at 7452");
+    landed_13(&p, &setup, "(type, <22>) at 7452");
 }
 
 /// **A DISPATCH in LC byte mode on both halfwords** (A1.2): the field at
@@ -743,8 +780,8 @@ fn the_dispatch_memory_is_4096_entries() {
         assert_eq!(m.dmem[0o7777], 1 << 16 | 1 << 15, "{engine}: entry 7777 written");
         assert_eq!(m.dmem[0o3777], 0, "{engine}: entry 3777 not written");
     }
-    let word_6 = muir::machine::REGISTER_PAGE_13 | 6;
-    assert_eq!(REV13.feature_word(word_6), Some(4096), "feature word 6");
+    let word_6 = muir::tlb::REGISTER_PAGE_BUS | 6;
+    assert_eq!(REV16.feature_word(word_6), Some(4096), "feature word 6");
 }
 
 // --- sources and constants ---------------------------------------------------
@@ -775,7 +812,7 @@ fn numeric_sources_and_constants_are_zero_extended() {
         &[
             (2, 0o1777, "the dispatch constant"),
             (3, 0o37777, "the PDL pointer"),
-            (4, (0x5155 << 16) | (13 << 4) | 4, "MACHINE-ID"),
+            (4, REV16.machine_id.unwrap().into(), "MACHINE-ID"),
             (5, (1 << 40) - 1, "source 17"),
             (6, 0xf, "-1 zero-extended as M: tag 000"),
             (0o10, w(0o377, 0xf), "SETO's ones as M: tag 377"),
@@ -824,7 +861,7 @@ fn the_map_translates_28_bits_at_1024_word_pages() {
     p.taken(jcond(4), 5);
     p.stop();
     expect(
-        &run_with(&p, &map_va, &|_| {}),
+        &run_with_13(&p, &map_va, &|_| {}),
         &[
             (2, w(0o005, 0x600d), "VA"),
             (3, w(0o005, 0x600d), "VA with <39:32> set"),
@@ -872,7 +909,7 @@ fn map_md_and_the_map_write_round_trip() {
     p.op(ALU | SETA | a_src(0o56) | WRITE_MAP);
     p.op(filler().raw()).op(filler().raw());
     p.stop();
-    let ms = run_with(&p, &|_| {}, &|_| {});
+    let ms = run_with_13(&p, &|_| {}, &|_| {});
     // The last memory cycle was the PROM's jump's none: the fault bits
     // are the latch's, the same on both engines, and not the point here.
     for (engine, m) in &ms {
@@ -922,7 +959,7 @@ fn the_fused_return_takes_the_halfword_in_the_ring_of_40() {
     let mut p = Prog::default();
     p.a(0o60, macro_dispatch::word(QMLP as u16, LOCALP_AT as u16, 0o21) as Word);
     p.a(0o61, index).a(0o62, (macro_dispatch::OPERAND as u64) | HANDLER);
-    p.a(0o63, LOCALP).a(0o64, 4 * CODE).a(0o65, main);
+    p.a(0o63, LOCALP).a(0o64, 4 * (muir::tlb::PHYSICAL_WINDOW as u64 | CODE)).a(0o65, main);
     p.op(ALU | SETA | a_src(ZERO) | INTCTL);
     p.op(ALU | SETA | a_src(0o60) | fd(5));
     p.op(ALU | SETA | a_src(0o61) | fd(6));
@@ -953,6 +990,10 @@ fn the_fused_return_takes_the_halfword_in_the_ring_of_40() {
         assert_eq!(m.macro_dispatch.fused, 1, "{engine}: one fused return");
     }
 }
+
+/// The physical memory window, main memory at `VA<27:0>` on revision 16
+/// (contract G3 revision 14, A14.1).
+const PHYSICAL: Word = muir::tlb::PHYSICAL_WINDOW as Word;
 
 // --- the physical space at 28 bits (G1 §3.2, G2 §3-§4) --------------------------
 
@@ -994,7 +1035,7 @@ impl Prog {
     }
 }
 
-/// **The physical space is 28 bits** (G1 §3.2, G2 §4.1, A1.10): the
+/// **Revision 13's physical space is 28 bits** (G1 §3.2, G2 §4.1, A1.10): the
 /// register page at `1777777400`, whose feature words say revision 13 and
 /// its sizes, the video controller's buffer at `1760000000`; main memory,
 /// not a register, at the CADR's last page, `17777400`, when there is that
@@ -1038,7 +1079,7 @@ fn the_physical_space_is_28_bits() {
         m.main[SPY as usize + 5] = w(0o031, 0xab_cdef);
         m.main[OLD_REGISTER_PAGE as usize] = w(0o031, 0o400);
     };
-    let ms = run_with(&p, &setup, &|_| {});
+    let ms = run_with_13(&p, &setup, &|_| {});
     expect(
         &ms,
         &[
@@ -1061,23 +1102,18 @@ fn the_physical_space_is_28_bits() {
     }
 }
 
-/// **The frame buffer window, 4 bytes a word** (G1 §4.2): from `1760000000`,
-/// a write stores the field and drops the tag, and a read returns the field
-/// with the unboxed tag `005`; past the buffer's end, nothing.
+/// **The frame buffer, 4 bytes a word** (G1 §4.2): from the device
+/// window's base, `34000000000`, a write stores the field and drops the
+/// tag, and a read returns the field with the unboxed tag `005`.
 #[test]
 fn the_frame_buffer_window_holds_the_field() {
-    let va = |m: &mut Machine| [through(m, 3, WINDOW), through(m, 7, WINDOW + 0o2000)];
+    let window = Word::from(muir::tlb::DEVICE_WINDOW);
     let mut p = Prog::default();
-    let mut probe = Machine::new();
-    let [window, _] = va(&mut probe);
     p.a(0o60, window + 7).a(0o61, w(0o025, 0x1234_5678)).a(0o62, window + 0o1777);
     p.write_from(0o61, 0o60).read_to(0o60, 0o10);
     p.write_from(0o61, 0o62).read_to(0o62, 0o11);
     p.stop();
-    let setup = |m: &mut Machine| {
-        va(m);
-    };
-    let ms = run_with(&p, &setup, &|_| {});
+    let ms = run_with(&p, &|_| {}, &|_| {});
     expect(
         &ms,
         &[
@@ -1106,7 +1142,7 @@ fn a_store_to_a_word_spanning_two_beats_is_whole() {
     ];
     let mut p = Prog::default();
     for (k, (&x, off)) in words.iter().zip([1u64, 3, 4, 6]).enumerate() {
-        p.a(0o60 + k as u64, x).a(0o70 + k as u64, 0o400 + off);
+        p.a(0o60 + k as u64, x).a(0o70 + k as u64, PHYSICAL | (0o400 + off));
         p.write_from(0o60 + k as u64, 0o70 + k as u64);
     }
     p.stop();
@@ -1128,8 +1164,8 @@ fn a_store_to_a_word_spanning_two_beats_is_whole() {
     }
 }
 
-/// **On `rtl` main memory above 22 bits and the frame buffer window go
-/// through the cache** (G2 §3; G1 §3.2): a second read of either word
+/// **On revision 13's `rtl` main memory above 22 bits and the frame buffer
+/// window go through the cache** (G2 §3; G1 §3.2): a second read of either word
 /// hits, where an address the port does not decode as memory would not be
 /// cached at all.
 #[test]
@@ -1150,7 +1186,7 @@ fn on_rtl_high_memory_and_the_window_are_cached() {
         m.main = vec![0; MAIN_13];
         va(m);
     };
-    let mut r = Rtl::new(machine(&p, &setup));
+    let mut r = Rtl::new(machine_on(REV13, &p, &setup));
     r.boot();
     let before = r.cache().unwrap().hits;
     finish(&mut r, "rtl");
@@ -1162,7 +1198,7 @@ fn on_rtl_high_memory_and_the_window_are_cached() {
 // --- full HD and the board name ---------------------------------------------
 
 /// The video controller at full HD, 1920 by 1080: 60 words a line, 64,800
-/// words, `1760000000`-`1760176437`.
+/// words, `34000000000`-`34000176437` in the device window.
 const FULL_HD: (usize, usize) = (1920, 1080);
 const FULL_HD_WORDS: u32 = 64_800;
 
@@ -1172,21 +1208,20 @@ fn video_at(m: &mut Machine, (w, h): (usize, usize)) {
     m.tv.set_video_size(w, h);
 }
 
-/// **At 1920 by 1080 the window ends at its 64,800th word** (G2 §4.3, the
-/// full-HD contract §1.2): the last word, `1760176437`, is written and read
-/// back with the unboxed tag; the next, `1760176440`, is nothing, and sets
-/// word 101 `<0>`, which the reads before it have left clear; feature words
-/// 11-13 say 1920 by 1080, one bit a pixel and 60 words a line, and the
-/// window's address.
+/// **At 1920 by 1080 the frame buffer ends at its 64,800th word** (G2
+/// §4.3, the full-HD contract §1.2): the last word, `34000176437`, is
+/// written and read back with the unboxed tag; the next, `34000176440`, is
+/// nothing, and sets word 101 `<0>`, which the reads before it have left
+/// clear; feature words 11-13 say 1920 by 1080, one bit a pixel and 60
+/// words a line, and the buffer's address.
 #[test]
 fn full_hd_s_window_ends_at_64800_words() {
     assert_eq!(FULL_HD_WORDS, 0o176440);
-    let last = WINDOW + FULL_HD_WORDS - 1;
-    let va = |m: &mut Machine| [through(m, 1, REGISTER_PAGE), through(m, 3, last & !0o1777)];
+    let window = muir::tlb::DEVICE_WINDOW;
+    let last = window + FULL_HD_WORDS - 1;
+    let reg = Word::from(muir::tlb::REGISTER_PAGE);
     let mut p = Prog::default();
-    let mut probe = Machine::new();
-    let [reg, page] = va(&mut probe);
-    let off = |phys: u32| page + (phys & 0o1777) as Word;
+    let off = |va: u32| Word::from(va);
     for (k, word) in [0o11u64, 0o12, 0o13].into_iter().enumerate() {
         p.a(0o60 + k as u64, reg + word);
         p.read_to(0o60 + k as u64, 0o10 + k as u64);
@@ -1196,20 +1231,17 @@ fn full_hd_s_window_ends_at_64800_words() {
     p.write_from(0o64, 0o63).read_to(0o63, 0o13).read_to(0o66, 0o14);
     p.read_to(0o65, 0o15).read_to(0o66, 0o16);
     p.stop();
-    let setup = |m: &mut Machine| {
-        va(m);
-        video_at(m, FULL_HD);
-    };
+    let setup = |m: &mut Machine| video_at(m, FULL_HD);
     let ms = run_with(&p, &setup, &|_| {});
     expect(
         &ms,
         &[
             (0o10, 1920 << 16 | 1080, "word 11: 1920 by 1080"),
             (0o11, 1 << 16 | 60, "word 12: one bit, 60 words a line"),
-            (0o12, WINDOW as Word, "word 13: the window"),
-            (0o13, w(0o005, 0x1234_5678), "1760176437: the field, tag 005"),
+            (0o12, window as Word, "word 13: the buffer"),
+            (0o13, w(0o005, 0x1234_5678), "34000176437: the field, tag 005"),
             (0o14, 0, "word 101: no NXM yet"),
-            (0o15, 0, "1760176440: nothing"),
+            (0o15, 0, "34000176440: nothing"),
             (0o16, 1, "word 101: NXM"),
         ],
     );
@@ -1233,39 +1265,33 @@ fn name_words(name: &str) -> [Word; 6] {
 /// Feature words 20-25 on both engines, read by a program after `setup`,
 /// into M 10-15.
 fn board_name_words(setup: &dyn Fn(&mut Machine)) -> [(&'static str, Machine); 2] {
-    let va = |m: &mut Machine| through(m, 1, REGISTER_PAGE);
     let mut p = Prog::default();
-    let reg = va(&mut Machine::new());
+    let reg = Word::from(muir::tlb::REGISTER_PAGE);
     for k in 0..6u64 {
         p.a(0o60 + k, reg + 0o20 + k);
         p.read_to(0o60 + k, 0o10 + k);
     }
     p.stop();
-    run_with(
-        &p,
-        &|m| {
-            va(m);
-            setup(m);
-        },
-        &|_| {},
-    )
+    run_with(&p, setup, &|_| {})
 }
 
-/// The board name the engines' M 10-15 hold, as `expect` checks it.
+/// The board name the engines' M 10-14 hold, as `expect` checks it, and
+/// M 15 word 25, no part of it: the microcycle in units of 0.5 ns, 20 at
+/// the default 10 ns (A15b.1).
 fn expect_name(ms: &[(&str, Machine)], name: &str) {
     let words = name_words(name);
-    let rows: Vec<(u64, Word, String)> = (0..6)
+    let mut rows: Vec<(u64, Word, String)> = (0..5)
         .map(|k| (0o10 + k as u64, words[k], format!("word {:o} of {name:?}", 0o20 + k)))
         .collect();
+    rows.push((0o15, muir::clock::PERIOD_15 as Word, "word 25, the period".into()));
     let rows: Vec<(u64, Word, &str)> = rows.iter().map(|(s, v, t)| (*s, *v, t.as_str())).collect();
     expect(ms, &rows);
 }
 
 /// **The board name, feature words 20-24** (the full-HD contract §6.4,
 /// Q-HD7): on both engines muir-sim names itself "muir-sim", 4 characters
-/// a word in `<31:0>`, the low byte first, ended by a zero byte, and word
-/// 25 reads 0. Below revision 13 the words read 0
-/// (`tests/quux_registers.rs`).
+/// a word in `<31:0>`, the low byte first, ended by a zero byte; word 25
+/// is the period's.
 #[test]
 fn the_board_name_is_muir_sim_on_both_engines() {
     let ms = board_name_words(&|_| {});
@@ -1290,7 +1316,7 @@ fn set_board_name_fills_words_20_to_24() {
         let bytes: Vec<u8> = (0o10..0o15).flat_map(|k| (m.mmem[k] as u32).to_le_bytes()).collect();
         assert_eq!(bytes, twenty.as_bytes(), "{engine}: the 20 characters, no zero byte");
         assert_eq!(m.mmem[0o14], Word::from(u32::from_le_bytes(*b"oard")), "{engine}: 17-20");
-        assert_eq!(m.mmem[0o15], 0, "{engine}: word 25");
+        assert_eq!(m.mmem[0o15], muir::clock::PERIOD_15 as Word, "{engine}: word 25, the period");
     }
 
     let ms = board_name_words(&|m| m.set_board_name("DE25-Nano").unwrap());
@@ -1307,10 +1333,9 @@ fn set_board_name_fills_words_20_to_24() {
 /// stays as it was; `040` and `176` themselves are taken.
 #[test]
 fn set_board_name_refuses_what_does_not_fit() {
-    let mut m = Machine::new();
-    m.geometry = REV13;
+    let mut m = Machine::with_geometry(REV16, 32);
     let page = |m: &mut Machine| -> Vec<u32> {
-        (0o20..=0o25).map(|k| m.bus_read(REGISTER_PAGE + k) as u32).collect()
+        (0o20..=0o25).map(|k| m.bus_read(muir::tlb::REGISTER_PAGE_BUS + k) as u32).collect()
     };
     let default = page(&mut m);
     for bad in ["QUUX on a test board!", "tab\there", "nul\0", "del\x7f", "newline\n", "caf\u{e9}"]

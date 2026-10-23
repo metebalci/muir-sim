@@ -17,6 +17,7 @@ use muir::isa::Insn;
 use muir::isa::asm::{ALU, ALWAYS, JUMP, N, SETM, bit, filler, m_dest, m_src, src, target};
 use muir::machine::{Geometry, Machine};
 use muir::micro::Micro;
+use muir::pipeline::Pipeline;
 use muir::rtl::Rtl;
 
 mod support;
@@ -48,11 +49,13 @@ fn wait_and_clear(flag: u64) -> Vec<Insn> {
 }
 
 fn machine(geometry: Geometry, prom: &[Insn], period_us: u32, control: [u32; 2]) -> Machine {
-    let mut m = Machine::new();
+    let mut m = match geometry.machine_id {
+        Some(_) => support::quux_16(),
+        None => Machine::new(),
+    };
     let mut words = vec![filler(); 512];
     words[..prom.len()].copy_from_slice(prom);
     m.load_prom(&words);
-    m.geometry = geometry;
     support::prom_program_in_ram(&mut m);
     m.mmem[1] = u64::from(period_us);
     m.mmem[2] = u64::from(control[0]);
@@ -83,16 +86,23 @@ fn micro_ns(e: &Micro) -> u64 {
     e.machine().ns
 }
 
-/// Both engines, the time each reached `pc` in, and their M memories.
+/// Both engines, the time each reached `pc` in, and their M memories:
+/// `rtl` the single-edge machine on the CADR and the pipeline on QUUX.
 fn both(m: impl Fn() -> Machine, pc: u16, limit: u64) -> [(Option<u64>, Vec<u32>); 2] {
     let mut e = Micro::new(m());
     e.boot();
     let te = until(&mut e, pc, limit, micro_ns);
-    let mut r = Rtl::new(m());
-    r.boot();
-    let tr = until(&mut r, pc, limit, Rtl::ns);
     let low = |m: &Machine| m.mmem.iter().map(|&w| support::low(w)).collect::<Vec<u32>>();
-    [(te, low(e.machine())), (tr, low(r.machine()))]
+    let (tr, rm) = if m().geometry.machine_id.is_some() {
+        let mut r = Pipeline::new(m());
+        r.boot();
+        (until(&mut r, pc, limit, |e: &Pipeline| e.machine().ns), low(r.machine()))
+    } else {
+        let mut r = Rtl::new(m());
+        r.boot();
+        (until(&mut r, pc, limit, Rtl::ns), low(r.machine()))
+    };
+    [(te, low(e.machine())), (tr, rm)]
 }
 
 /// A JUMP's test of bit `n` on QUUX: M rotated by (40 - n) mod 40 in the
@@ -102,10 +112,10 @@ fn bit_40(n: u64) -> u64 {
     (r >> 5) << 47 | (r & 0o37)
 }
 
-/// Timer 0's control and period words on the register page, through
-/// virtual page 1, the page at word 1400 of its 1024-word frame.
-const TIMER_0_CONTROL: u32 = (1 << 10) | 0o1400 | 0o110;
-const TIMER_0_PERIOD: u32 = (1 << 10) | 0o1400 | 0o111;
+/// Timer 0's control and period words on the register page, in the device
+/// window.
+const TIMER_0_CONTROL: u32 = muir::tlb::REGISTER_PAGE | 0o110;
+const TIMER_0_PERIOD: u32 = muir::tlb::REGISTER_PAGE | 0o111;
 
 /// **The tick is timer 0 on the page, and destination 3 does not reach
 /// it**: with timer 0's period written as the boot PROM writes it, 16,667
@@ -150,11 +160,8 @@ fn the_tick_is_timer_0_on_the_page_and_not_destination_3() {
         Insn::new(JUMP | target(25) | ALWAYS | N),
     ];
     let m = || {
-        let mut m = machine(Geometry::QUUX, &prom, 16_667, [TICK_ON, TICK_CLEAR]);
-        assert_eq!(
-            support::quux_map(&mut m, 1, muir::machine::REGISTER_PAGE_13 | 0o110),
-            TIMER_0_CONTROL
-        );
+        let mut m = machine(Geometry::QUUX_16, &prom, 16_667, [TICK_ON, TICK_CLEAR]);
+        assert_eq!(support::quux_va(support::PAGE_16 | 0o110), TIMER_0_CONTROL);
         m.mmem[7] = u64::from(TIMER_0_PERIOD);
         m.mmem[8] = u64::from(TIMER_0_CONTROL);
         m.mmem[10] = 0o401;
@@ -163,71 +170,85 @@ fn the_tick_is_timer_0_on_the_page_and_not_destination_3() {
     };
     // `pc()` is the address being fetched, one ahead of the instruction
     // executing: 12 is the turn-on's write executing, 19 the clear's MD,
-    // 26 the end.
-    let t = both(m, 19, 200_000_000);
-    let quick = both(m, 12, 1_000);
-    let done = both(m, 26, 200_000_000);
+    // 25 the end's jump to itself, and 20 microcycles after it every write
+    // has landed. One run of each engine gives the instants.
+    fn instants<E: Engine>(mut e: E, ns: fn(&E) -> u64) -> ([u64; 3], Vec<u32>) {
+        e.boot();
+        let mut at = [None; 3];
+        for _ in 0..200_000_000u64 {
+            for (k, pc) in [12, 19, 25].into_iter().enumerate() {
+                if e.pc() == pc && at[k].is_none() {
+                    at[k] = Some(ns(&e));
+                }
+            }
+            if at[2].is_some() {
+                break;
+            }
+            e.step().unwrap();
+        }
+        for _ in 0..20 {
+            e.step().unwrap();
+        }
+        let mmem = e.machine().mmem.iter().map(|&w| support::low(w)).collect();
+        (at.map(|t| t.expect("reached")), mmem)
+    }
+    let runs = [
+        instants(Micro::new(m()), micro_ns),
+        instants(Pipeline::new(m()), |e: &Pipeline| e.machine().ns),
+    ];
     for (k, name) in ["micro", "rtl"].into_iter().enumerate() {
-        let on = quick[k].0.expect(name);
-        let seen = t[k].0.expect(name) - on;
-        // The poll loop is six microcycles with a page read.
-        assert!(seen.abs_diff(16_667_000) <= 30 * 60, "{name}: the first tick after {seen} ns");
-        assert_eq!(done[k].1[9], 0, "{name}: word 110 after destination 3's turn-on");
-        assert_eq!(
-            (done[k].1[3], done[k].1[5]),
-            (0o403, 0o401),
-            "{name}: word 110 up, then cleared"
+        let ([on, cleared, _], ref mmem) = runs[k];
+        let seen = cleared - on;
+        // The poll loop is six microcycles with a page read; the time is in
+        // units of 0.5 ns.
+        assert!(
+            seen.abs_diff(2 * 16_667_000) <= 2 * 30 * 60,
+            "{name}: the first tick after {seen} units"
         );
+        assert_eq!(mmem[9], 0, "{name}: word 110 after destination 3's turn-on");
+        assert_eq!((mmem[3], mmem[5]), (0o403, 0o401), "{name}: word 110 up, then cleared");
     }
 }
 
-/// **Source 15 is the microseconds since power-on**, on both engines, and
-/// under `sync` on `rtl`: read in a loop, it is the engine's own time over
-/// a thousand, within a microsecond; and it wraps at 32 bits.
+/// **Source 15 is the microseconds since power-on**, on both engines: read
+/// in a loop, it is the engine's own time over a microsecond's units,
+/// within a microsecond; and it wraps at 32 bits. The pipeline starts at a
+/// time by a checkpoint's round trip.
 #[test]
 fn source_15_counts_microseconds() {
-    use muir::clock::TimingModel;
     let prom = vec![
         Insn::new(ALU | SETM | src(0o15) | m_dest(1)),
         Insn::new(JUMP | target(0) | ALWAYS | N),
     ];
-    let quux = |start_ns: u64| {
-        let mut m = machine(Geometry::QUUX, &prom, 0, [0, 0]);
-        m.ns = start_ns;
+    let quux = |start: u64| {
+        let mut m = machine(Geometry::QUUX_16, &prom, 0, [0, 0]);
+        m.ns = start;
         m
     };
-    let wrap = (1u64 << 32) * 1000 - 3_000;
+    let us = quux(0).time_base().per_us();
+    let wrap = (1u64 << 32) * us - 3 * us;
     for start in [0, wrap] {
         let mut e = Micro::new(quux(start));
         e.boot();
         for _ in 0..40_000 {
             e.step().unwrap();
         }
-        let want = (e.machine().ns / 1000) as u32;
+        let want = (e.machine().ns / us) as u32;
         assert!(
             want.wrapping_sub(support::low(e.machine().mmem[1])) <= 1,
             "micro from {start}: {} against {want}",
             e.machine().mmem[1]
         );
-        for model in [
-            TimingModel::Sync { cycle_ticks: 4, ilong_ticks: 0 },
-            TimingModel::Sync { cycle_ticks: 3, ilong_ticks: 0 },
-        ] {
-            let mut r = Rtl::new(quux(start));
-            r.set_timing_model(model);
-            r.boot();
-            for _ in 0..40_000 {
-                r.step().unwrap();
-            }
-            let want = (r.ns() / 1000) as u32;
-            let got = support::low(r.machine().mmem[1]);
-            assert!(
-                want.wrapping_sub(got) <= 1,
-                "rtl {model:?} from {start}: {got} against {want}"
-            );
-            if start == wrap {
-                assert!(got < 100_000, "rtl {model:?}: wrapped, {got}");
-            }
+        let mut r = support::pipeline_at(quux(start), start);
+        r.boot();
+        for _ in 0..40_000 {
+            r.step().unwrap();
+        }
+        let want = (r.machine().ns / us) as u32;
+        let got = support::low(r.machine().mmem[1]);
+        assert!(want.wrapping_sub(got) <= 1, "rtl from {start}: {got} against {want}");
+        if start == wrap {
+            assert!(got < 100_000, "rtl: wrapped, {got}");
         }
     }
 }

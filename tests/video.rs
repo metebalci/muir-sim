@@ -3,9 +3,10 @@
 
 //! The video controller, QUUX's display: a monochrome 1280 by 1024 frame
 //! buffer by default, one bit a pixel, 40 words a line, 40,960 words from
-//! `1760000000`, the frame buffer window (contract G2 §4.1), which reads a
-//! word as a fixnum, tag `005`, and drops the tag of a word written. Its
-//! mode is word 210 of the register page (`1777777610`, contract Q13),
+//! the device window's base, `34000000000`, bus address `2000000000`
+//! (contract G3 revision 14, A14.1), which reads a word as a fixnum, tag
+//! `005`, and drops the tag of a word written. Its mode is word 210 of the
+//! register page (`35777777610`, contract Q13),
 //! which keeps black-on-white, bit 2, and nothing else; words 211-217 are
 //! reserved; and it raises no interrupt, the clock being the processor's
 //! tick. The CADR's control registers at `17377760` are nothing there on
@@ -14,36 +15,38 @@
 use muir::engine::Engine;
 use muir::isa::Insn;
 use muir::isa::asm::{ALU, MD, SETM, SRC_MD, START_READ, START_WRITE, a_dest, filler, m_src};
-use muir::machine::{Geometry, Machine, UNBOXED_TAG, WINDOW_13, bus_error};
+use muir::machine::{Geometry, Machine, UNBOXED_TAG, bus_error};
 use muir::micro::Micro;
-use muir::rtl::Rtl;
+use muir::pipeline::Pipeline;
 use muir::terminal::Frame;
 use muir::tv::{self, Board};
 
 mod support;
 
 /// The register page, and the video controller's mode on it.
-const PAGE: u32 = muir::machine::REGISTER_PAGE_13;
+const PAGE: u32 = support::PAGE_16;
 const MODE: u32 = PAGE + 0o210;
 
+/// The frame buffer's first word's bus address: slice 0 of the device
+/// window.
+const WINDOW: u32 = muir::tlb::DEVICE;
+
 fn quux_with_video() -> Machine {
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
+    let mut m = support::quux_16();
     m.tv.set_board(Board::Video);
     m
 }
 
-/// **The buffer is 40,960 words from `1760000000`**: its first and last
+/// **The buffer is 40,960 words from the device window's base**: its first and last
 /// words keep what is written, read back as fixnums, and the word after
 /// the last is nobody's, a read of it failing with the Xbus NXM bit, on
 /// both engines.
 #[test]
 fn the_buffer_is_40960_words() {
-    // (physical address, value): written through MD, read back into A.
-    let last = WINDOW_13 + tv::VIDEO_WORDS - 1;
-    // Page 1 onto the buffer's first word's frame, 2 onto its last word's,
-    // 3 onto the word after it's.
-    let cases = [(WINDOW_13, 0o1234567u32), (last, 0o7654321), (last + 1, 0)];
+    // (bus address, value): written through MD, read back into A, each
+    // through the device window.
+    let last = WINDOW + tv::VIDEO_WORDS - 1;
+    let cases = [(WINDOW, 0o1234567u32), (last, 0o7654321), (last + 1, 0)];
     let mut prom = Vec::new();
     for (k, &(va, _)) in cases.iter().enumerate() {
         let k = k as u64;
@@ -62,7 +65,7 @@ fn the_buffer_is_40960_words() {
         m.load_prom(&words);
         support::prom_program_in_ram(&mut m);
         for (k, &(phys, v)) in cases.iter().enumerate() {
-            m.mmem[1 + k] = support::quux_map(&mut m, 1 + k as u32, phys).into();
+            m.mmem[1 + k] = support::quux_va(phys).into();
             m.mmem[10 + k] = u64::from(v);
         }
         m
@@ -71,7 +74,7 @@ fn the_buffer_is_40960_words() {
     for (cases_run, nxm) in [(2, false), (3, true)] {
         let mut e = Micro::new(make(&prom[..28 * cases_run]));
         e.boot();
-        let mut r = Rtl::new(make(&prom[..28 * cases_run]));
+        let mut r = Pipeline::new(make(&prom[..28 * cases_run]));
         r.boot();
         for _ in 0..2000 {
             e.step().unwrap();
@@ -94,7 +97,7 @@ fn the_buffer_is_40960_words() {
 fn a_pixel_is_where_the_cadr_would_put_it_at_40_words_a_line() {
     let mut m = quux_with_video();
     let (x, y) = (1279usize, 1023usize);
-    m.bus_write(WINDOW_13 + (y * 40 + x / 32) as u32, 1 << (x % 32));
+    m.bus_write(WINDOW + (y * 40 + x / 32) as u32, 1 << (x % 32));
     assert!(m.tv.pixel(x, y));
     assert!(!m.tv.pixel(x - 1, y));
     let f = Frame::of(&m.tv);
@@ -133,7 +136,7 @@ fn it_keeps_black_on_white_and_never_interrupts() {
     assert_eq!(m.bus_read(MODE), tv::mode::BOW.into(), "the old address wrote nothing");
     m.bus_write(MODE, (tv::mode::INTERRUPT_ENABLE | tv::mode::BOW).into());
     for ms in 0..1000u64 {
-        m.ns = ms * 1_000_000;
+        m.ns = ms * 2_000_000;
         assert!(!m.xbus_interrupt(), "an interrupt at {ms} ms");
         assert_eq!(m.interrupt_sources(), 0, "word 100 at {ms} ms");
     }
@@ -141,9 +144,9 @@ fn it_keeps_black_on_white_and_never_interrupts() {
 
 /// **The feature page describes the main screen** in three words: 11 is
 /// the width in 31:16 and the height in 15:0, 12 the bits a pixel in 31:16
-/// and the words a line in 15:0, and 13 the buffer's first physical address,
-/// the window's, for the video controller or the CADR's TV when QUUX has
-/// that board.
+/// and the words a line in 15:0, and 13 the buffer's first address, the
+/// device window's base, for the video controller or the CADR's TV when
+/// QUUX has that board.
 /// Word 14 is the clocks' (`tests/quux.rs`), 15 the optional devices
 /// (`tests/quux_rtc.rs`), and 16 the number of interval timers, 3.
 #[test]
@@ -151,52 +154,52 @@ fn the_feature_page_describes_the_main_screen() {
     let words =
         |m: &mut Machine| [0o11, 0o12, 0o13, 0o16].map(|w| support::low(m.bus_read(PAGE + w)));
     let packed = |hi: u32, lo: u32| hi << 16 | lo;
-    assert_eq!(words(&mut quux_with_video()), [packed(1280, 1024), packed(1, 40), WINDOW_13, 3]);
-    let mut m = Machine::new();
-    m.geometry = Geometry::QUUX;
-    assert_eq!(words(&mut m), [packed(768, 963), packed(1, 24), WINDOW_13, 3]);
+    let base = muir::tlb::DEVICE_WINDOW;
+    assert_eq!(words(&mut quux_with_video()), [packed(1280, 1024), packed(1, 40), base, 3]);
+    let mut m = support::quux_16();
+    assert_eq!(words(&mut m), [packed(768, 963), packed(1, 24), base, 3]);
 }
 
 /// **QUUX's decode takes the whole buffer as memory, and the mode as the
-/// page's**: `rtl` takes a cycle to the buffer's last word as main
-/// memory's, one past it as nothing there, word 210 as a register, and the
+/// page's**: a cycle to the buffer's last word goes on the memory bus as
+/// main memory's does, one past it as nothing there, word 210 as a register, and the
 /// CADR's control registers as nothing there. What the word is and whether
 /// NXM is set are `Machine::bus_read`'s, which the tests above hold; this is
 /// the decode that makes the cycle's timing.
 #[test]
 fn the_decode_answers_the_whole_buffer() {
-    use muir::busint::{Responder, decode_quux_13};
-    let last = WINDOW_13 + tv::VIDEO_WORDS - 1;
+    use muir::busint::{Responder, decode_quux_14 as decode};
+    let last = WINDOW + tv::VIDEO_WORDS - 1;
     let m = quux_with_video();
     let words = m.tv.buffer_words();
     assert_eq!(words, tv::VIDEO_WORDS);
     assert_eq!(m.tv.control_registers(), 0, "none of the CADR's");
     let main = 1 << 20;
-    assert_eq!(decode_quux_13(last, main, words), Responder::Memory(0));
-    assert_eq!(decode_quux_13(last + 1, main, words), Responder::NoXbus);
-    assert_eq!(decode_quux_13(last, main, tv::BUFFER_WORDS), Responder::NoXbus);
-    assert_eq!(decode_quux_13(MODE, main, words), Responder::Device);
+    assert_eq!(decode(last, main, words), Responder::Memory(0));
+    assert_eq!(decode(last + 1, main, words), Responder::NoXbus);
+    assert_eq!(decode(last, main, tv::BUFFER_WORDS), Responder::NoXbus);
+    assert_eq!(decode(MODE, main, words), Responder::Device);
     for r in 0..8 {
-        assert_eq!(decode_quux_13(tv::CONTROL + r, main, words), Responder::NoXbus, "register {r}");
+        assert_eq!(decode(tv::CONTROL + r, main, words), Responder::NoXbus, "register {r}");
     }
 }
 
-/// **The frame buffer may fill its window**: at most 4,193,280 words,
-/// `1760000000`-`1777775777`. With a buffer that long QUUX's decode takes
-/// `1777775777` as the buffer's, `1777776000` below the register page as
-/// nothing and `1777777400` as the page's; the words bound refuses one word
-/// more. A buffer of 261,888 words, set past the size QUUX supports, ends
-/// where the machine reads and writes its last word.
+/// **The frame buffer may be 4,193,280 words**, [`tv::VIDEO_MAX_WORDS`]:
+/// with a buffer that long the decode takes its last word, `17775777` into
+/// the device window, as the buffer's, the next as nothing, and the
+/// register page as the page's; the words bound refuses one word more. A
+/// buffer of 261,888 words, set past the size QUUX supports, ends where the
+/// machine reads and writes its last word.
 #[test]
 fn the_buffer_may_fill_its_window() {
-    use muir::busint::{Responder, decode_quux_13};
+    use muir::busint::{Responder, decode_quux_14 as decode};
     assert_eq!(tv::VIDEO_MAX_WORDS, 4_193_280);
     let main = 1 << 20;
     let words = tv::VIDEO_MAX_WORDS;
-    assert_eq!(decode_quux_13(0o1777775777, main, words), Responder::Memory(0));
-    assert_eq!(decode_quux_13(0o1777776000, main, words), Responder::NoXbus);
-    assert_eq!(decode_quux_13(PAGE, main, words), Responder::Device);
-    assert_eq!(decode_quux_13(PAGE | 0o377, main, words), Responder::Device);
+    assert_eq!(decode(WINDOW + 0o17775777, main, words), Responder::Memory(0));
+    assert_eq!(decode(WINDOW + 0o17776000, main, words), Responder::NoXbus);
+    assert_eq!(decode(PAGE, main, words), Responder::Device);
+    assert_eq!(decode(PAGE | 0o377, main, words), Responder::Device);
     assert!(tv::check_video_words(4_193_280).is_ok());
     let e = tv::check_video_words(4_193_281).unwrap_err();
     assert!(e.contains("4193280"), "{e}");
@@ -205,11 +208,11 @@ fn the_buffer_may_fill_its_window() {
     let mut m = quux_with_video();
     m.tv.set_video_size(8192, 1023);
     assert_eq!(m.tv.buffer_words(), 261_888);
-    let last = WINDOW_13 + 261_887;
+    let last = WINDOW + 261_887;
     m.bus_write(last, 0o707070);
     assert_eq!(m.bus_read(last), UNBOXED_TAG | 0o707070, "the buffer's last word");
     assert_eq!(m.tv.read_buffer(261_887), 0o707070);
-    assert_eq!(m.bus_read(PAGE), Geometry::QUUX.machine_id.unwrap().into(), "the page's first");
+    assert_eq!(m.bus_read(PAGE), Geometry::QUUX_16.machine_id.unwrap().into(), "the page's first");
     assert_eq!(m.bus_error, 0);
 }
 
@@ -226,7 +229,7 @@ fn another_size_is_followed_everywhere() {
     assert_eq!(m.bus_read(PAGE + 0o12), 1 << 16 | 60);
     let f = Frame::of(&m.tv);
     assert_eq!((f.width, f.height, f.words_per_line), (1920, 1080, 60));
-    let last = WINDOW_13 + 64_800 - 1;
+    let last = WINDOW + 64_800 - 1;
     m.bus_write(last, 5);
     assert_eq!(m.bus_read(last), UNBOXED_TAG | 5);
     assert_eq!(m.bus_error & bus_error::XBUS_NXM, 0);
