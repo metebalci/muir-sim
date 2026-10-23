@@ -783,7 +783,12 @@ impl Pipeline {
                         crate::machine::macro_dispatch::localp_address(md.register) as u16,
                         crate::machine::macro_dispatch::ap_address(md.register) as u8,
                     );
-                    (!self.base_in_flight(Some(a), Some(m)))
+                    // The popping microinstruction's own write of a base
+                    // lands at its WB, after the copies are read here: EX
+                    // forms the address then, with that write forwarded.
+                    let own = (a_dest(ir) == Some(a) || m_dest(ir) == Some(m))
+                        && self.mutation != Mutation::OwnBaseWriteNotInFlight;
+                    (!own && !self.base_in_flight(Some(a), Some(m)))
                         .then(|| md.operand_address(o) as u16 & self.m.geometry.pdl_mask())
                 });
                 if f.operand.is_some() {

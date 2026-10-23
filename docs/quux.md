@@ -1955,7 +1955,13 @@ revision 15 runs as revision 14, microcycle for microcycle
 `m31_and_the_operand_address_after_d_are_a_fused_return_s`). A fused
 return's operand address over a base the word before it writes clears RD's
 mark on its index copy as the address loads
-(`an_operand_address_over_a_base_the_word_before_writes`).
+(`an_operand_address_over_a_base_the_word_before_writes`). Over a base the
+popping microinstruction itself writes, the address is formed from the new
+base, as on `micro`: RD counts that write as a base still being written,
+so that RD's words wait for the index, and EX forms the address with the
+write, then in WB, forwarded, as the PDL address field takes a base
+(`a_handler_reads_its_operand_over_the_return_s_own_base_write`,
+`the_pipeline_s_operand_address_needs_both_halves_of_the_forward`).
 
 **CMD_PROD** is taken once every write before it is answered (A15b.5).
 `micro` posts no writes: a write goes out by the end of the microcycle

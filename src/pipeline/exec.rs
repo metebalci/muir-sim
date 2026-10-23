@@ -763,11 +763,10 @@ impl Pipeline {
         Ok(ir)
     }
 
-    /// `micro`'s `pdl_field_index`.
-    fn pdl_field_index(&self, (base, displacement): (u8, i8)) -> u16 {
-        // `M-AP` and `A-LOCALP` as the word finds them: the copies, with a
-        // write of either by the word in WB, which lands at this clock's
-        // edge (d1, as the word's own operands take it).
+    /// `M-AP` and `A-LOCALP` as the word in EX finds them: the copies, with
+    /// a write of either by the word in WB, which lands at this clock's
+    /// edge (d1, as the word's own operands take it).
+    fn bases(&self) -> (u32, u32) {
         let d = &self.m.macro_dispatch;
         let (ap_at, localp_at) = (
             crate::machine::macro_dispatch::ap_address(d.register),
@@ -783,9 +782,15 @@ impl Pipeline {
                 at.then_some(w.word as u32 & crate::machine::macro_dispatch::BASE_BITS)
             })
         };
+        (landing(true).unwrap_or(d.ap), landing(false).unwrap_or(d.localp))
+    }
+
+    /// `micro`'s `pdl_field_index`.
+    fn pdl_field_index(&self, (base, displacement): (u8, i8)) -> u16 {
+        let (ap, localp) = self.bases();
         let b = match base {
-            0 => landing(true).unwrap_or(d.ap),
-            1 => landing(false).unwrap_or(d.localp),
+            0 => ap,
+            1 => localp,
             2 => u32::from(self.m.pdl_pointer),
             _ => u32::from(self.m.pdl_index),
         };
@@ -910,7 +915,14 @@ impl Pipeline {
     /// map store's write moves to the next microcycle.
     fn end_of_microcycle(&mut self, executed: bool, loads_md: bool) {
         if let Some(o) = self.m.macro_dispatch.operand.take() {
-            let adr = self.m.macro_dispatch.operand_address(o);
+            // Over the bases as this word finds them: the return's own
+            // write of `M-AP` or `A-LOCALP`, in WB now, is the new base.
+            let (ap, localp) = if self.mutation == super::Mutation::NoOperandBaseForward {
+                (self.m.macro_dispatch.ap, self.m.macro_dispatch.localp)
+            } else {
+                self.bases()
+            };
+            let adr = crate::machine::MacroDispatch::operand_address_over(o, ap, localp);
             self.m.pdl_index = adr as u16 & self.m.geometry.pdl_mask();
         }
         self.m.macro_dispatch.operand = self.x.operand.take();

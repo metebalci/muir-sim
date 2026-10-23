@@ -828,7 +828,13 @@ impl MacroDispatch {
     /// The operand address `o` makes from the base copies, before PDL-INDEX's
     /// mask: `A-LOCALP` + delta, or `M-AP` + 1 + delta.
     pub fn operand_address(&self, o: Operand) -> u32 {
-        (if o.arg { self.ap + 1 } else { self.localp }) + o.delta as u32
+        Self::operand_address_over(o, self.ap, self.localp)
+    }
+
+    /// The operand address `o` makes from the bases `ap` (`M-AP`) and
+    /// `localp` (`A-LOCALP`), before PDL-INDEX's mask.
+    pub fn operand_address_over(o: Operand, ap: u32, localp: u32) -> u32 {
+        (if o.arg { ap + 1 } else { localp }) + o.delta as u32
     }
 
     /// The fused return ([`macro_dispatch`]) for a pop of `popped`, with

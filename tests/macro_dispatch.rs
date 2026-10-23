@@ -40,7 +40,7 @@ use muir::isa::asm::{
 };
 use muir::machine::{Geometry, Machine, Operand, macro_dispatch};
 use muir::micro::Micro;
-use muir::pipeline::Pipeline;
+use muir::pipeline::{Mutation, Pipeline};
 use muir::rtl::Rtl;
 
 mod support;
@@ -137,22 +137,22 @@ const OPERANDS: [u32; 14] = [
 ];
 
 /// What [`RECORD`] pushes over [`OPERANDS`] with the operand bit in its
-/// entries, on `engine`: in pairs, PDL-INDEX at the handler's first
-/// microcycle and in the microcycle after its return. The second halfwords
-/// with LOCAL or ARG find the operand's address, masked to fourteen bits;
-/// on `rtl` so do the second word's first halfword, ARG with delta 0, and
-/// the fifth's, LOCAL with delta 77, whose returns fuse on the prefetched
-/// word (each word's fetch left the next, in the first word's line of
-/// eight, in the buffer). Every other push finds [`SENTINEL`], the
-/// microcycle after a return included.
-fn operand_records(engine: &str) -> Vec<u32> {
+/// entries: in pairs, PDL-INDEX at the handler's first microcycle and in
+/// the microcycle after its return. The second halfwords with LOCAL or ARG
+/// find the operand's address, masked to fourteen bits; with `prefetch`,
+/// revision 13's single-edge `rtl`, so do the second word's first
+/// halfword, ARG with delta 0, and the fifth's, LOCAL with delta 77, whose
+/// returns fuse on the prefetched word (each word's fetch left the next,
+/// in the first word's line of eight, in the buffer). Every other push
+/// finds [`SENTINEL`], the microcycle after a return included.
+fn operand_records(prefetch: bool) -> Vec<u32> {
     let s = SENTINEL;
     vec![
         s,
         s,
         (LOCALP + 7) & 0o37777,
         s,
-        if engine == "rtl" { AP + 1 } else { s },
+        if prefetch { AP + 1 } else { s },
         s,
         AP + 1 + 5,
         s,
@@ -163,7 +163,7 @@ fn operand_records(engine: &str) -> Vec<u32> {
         s,
         s,
         s,
-        if engine == "rtl" { (LOCALP + 0o77) & 0o37777 } else { s },
+        if prefetch { (LOCALP + 0o77) & 0o37777 } else { s },
         s,
         (LOCALP + 0o77) & 0o37777,
         s,
@@ -900,17 +900,6 @@ fn records(m: &Machine) -> Vec<u32> {
 /// second halfwords, each into [`RECORD`].
 const RECORD_RETURNS: (u64, u64) = (4, 4);
 
-/// **The operand addresses the pipeline forms from a base as it stood
-/// before the popping microinstruction's own write of it**, over
-/// [`OPERANDS`] with the operand bit: the returns by [`SETAP`] and
-/// [`SETLOCALP`], which write `M-AP` and `A-LOCALP` in the POPJ itself,
-/// into an ARG and a LOCAL halfword. `micro` takes the new base, as
-/// contract H8a §3.4 has it, and the checker counts the pipeline's two as
-/// wrong operands ([`a_fused_return_loads_the_operand_address`]).
-fn stale_base_loads(engine: &str, operand: bool) -> u64 {
-    if engine == "rtl" && operand { 2 } else { 0 }
-}
-
 /// **The operand address** (contract H8a §3.4, §6 item 4), on both engines:
 /// a fused return whose entry has the operand bit loads PDL-INDEX with
 /// `A-LOCALP` + delta for LOCAL and `M-AP` + 1 + delta for ARG, masked to
@@ -918,24 +907,86 @@ fn stale_base_loads(engine: &str, operand: bool) -> u64 {
 /// handler's first microinstruction finds it there, and the microcycle
 /// after does not. The bases are the copies the register's write loaded
 /// from A and M memory, and `M-AP` or `A-LOCALP` written by the popping
-/// microinstruction itself is the new one. A register other than LOCAL and ARG, and a
-/// return that is not fused, load nothing; and the run takes the same
-/// microcycles as without the operand bit. On `rtl` the returns into the
-/// first halfwords of the second to the seventh words fuse too, on the
-/// prefetched word (all seven are in one line of eight), and two of them,
-/// ARG and LOCAL, load: `micro` on revision 16 and the single-edge `rtl` on
-/// revision 13. (Revision 16's pipeline takes the bases from before a
-/// popping microinstruction's own write of them.)
+/// microinstruction itself is the new one: [`SETAP`]'s and [`SETLOCALP`]'s
+/// returns, on the pipeline too, which counts the write in RD and forwards
+/// it from WB into the address in EX. A register other than LOCAL and ARG,
+/// and a return that is not fused, load nothing; and the run takes the
+/// same microcycles as without the operand bit.
 #[test]
 fn a_fused_return_loads_the_operand_address() {
+    let plain = both(Setup { operand: false, ..Setup::operands() });
+    for ((name, n, m), (_, n_plain, _)) in both(Setup::operands()).iter().zip(plain.iter()) {
+        assert_eq!(records(m), operand_records(false), "{name}");
+        assert_eq!(m.macro_dispatch.fused, 6, "{name}: the six second halfwords");
+        assert_eq!(n, n_plain, "{name}: no microcycle more or less");
+    }
+}
+
+/// **The operand address on the prefetched word**, on revision 13's
+/// single-edge `rtl`: the returns into the first halfwords of the second
+/// to the seventh words fuse too, on the prefetched word (all seven are in
+/// one line of eight), and two of them, ARG and LOCAL, load; the rest is
+/// [`a_fused_return_loads_the_operand_address`].
+#[test]
+fn a_fused_return_loads_the_operand_address_on_the_prefetched_word() {
     let plain = micro_and_rtl_13(Setup { operand: false, ..Setup::operands() });
     for ((name, n, m), (_, n_plain, _)) in
         micro_and_rtl_13(Setup::operands()).iter().zip(plain.iter())
     {
-        assert_eq!(records(m), operand_records(name), "{name}");
-        let fused = if *name == "rtl" { 6 + 6 } else { 6 };
+        let prefetch = *name == "rtl";
+        assert_eq!(records(m), operand_records(prefetch), "{name}");
+        let fused = if prefetch { 6 + 6 } else { 6 };
         assert_eq!(m.macro_dispatch.fused, fused, "{name}: the six second halfwords");
         assert_eq!(n, n_plain, "{name}: no microcycle more or less");
+    }
+}
+
+/// [`OPERANDS`] with [`RECORD`]'s handler pushing, first, the PDL buffer's
+/// word at PDL-INDEX (functional source 5), as a handler takes its operand,
+/// over a buffer holding at each address a word that names it.
+fn operand_reads() -> Setup {
+    fn named(m: &mut Machine) {
+        for (k, w) in m.pdl.iter_mut().enumerate() {
+            *w = 0o1000000 | k as u64;
+        }
+    }
+    Setup { first: Some(ALU | SETM | src(5) | fd(0o11)), patch: Some(named), ..Setup::operands() }
+}
+
+/// **A handler reads its operand where the return's own write of the base
+/// puts it** (contract H8a §3.4), on both engines: after [`SETAP`]'s and
+/// [`SETLOCALP`]'s returns, which write `M-AP` and `A-LOCALP` in the POPJ
+/// itself, the handler's first microinstruction reads the PDL buffer at the
+/// operand address over the new base, on the pipeline as on `micro`.
+#[test]
+fn a_handler_reads_its_operand_over_the_return_s_own_base_write() {
+    let [(_, _, micro), (_, _, rtl)] = both(operand_reads());
+    let at = |base: u32| u64::from(0o1000000 | base);
+    // After SETAP the ARG halfword with delta 2, after SETLOCALP the LOCAL
+    // one with delta 1.
+    assert_eq!(micro.pdl[9], at(AP + 1 + 1 + 2), "micro");
+    assert_eq!(micro.pdl[19], at(LOCALP_2 + 1), "micro");
+    assert!(micro.pdl == rtl.pdl, "the pipeline reads as micro does");
+}
+
+/// **Both halves of the pipeline's own-write forward are needed**: with
+/// EX loading the operand address without the write in WB, PDL-INDEX
+/// after [`SETAP`] and [`SETLOCALP`] is not `micro`'s; with RD forming it
+/// over the copies while the popping microinstruction writes a base, the
+/// handler's first PDL read, which RD addresses, is not.
+#[test]
+fn the_pipeline_s_operand_address_needs_both_halves_of_the_forward() {
+    for (mutation, s) in [
+        (Mutation::NoOperandBaseForward, Setup::operands()),
+        (Mutation::OwnBaseWriteNotInFlight, operand_reads()),
+    ] {
+        let (_, micro) = run(Micro::new(machine(s)));
+        let (_, fixed) = run(Pipeline::new(machine(s)));
+        assert!(fixed.pdl == micro.pdl, "{mutation:?}'s program, no fault planted");
+        let mut p = Pipeline::new(machine(s));
+        p.mutation = mutation;
+        let (_, m) = run(p);
+        assert_ne!(records(&m), records(&micro), "{mutation:?} planted");
     }
 }
 
@@ -944,7 +995,7 @@ fn a_fused_return_loads_the_operand_address() {
 /// with the MACRO DISPATCH MEMORY disabled.
 #[test]
 fn without_the_operand_bit_pdl_index_is_unchanged() {
-    let sentinels = vec![SENTINEL; operand_records("micro").len()];
+    let sentinels = vec![SENTINEL; operand_records(false).len()];
     for setup in
         [Setup { operand: false, ..Setup::operands() }, Setup { register: 0, ..Setup::operands() }]
     {
@@ -969,17 +1020,9 @@ fn checked(s: Setup) -> [(&'static str, Counts); 2] {
 }
 
 /// What the checker counts on the pipeline equals what it counts on
-/// `micro`, but for the operand addresses of [`stale_base_loads`].
-fn same_counts(c: &[(&'static str, Counts); 2], operand: bool) {
-    let (micro, rtl) = (&c[0].1, &c[1].1);
-    let stale = stale_base_loads("rtl", operand);
-    assert_eq!(rtl.wrong_operand, micro.wrong_operand + stale, "the pipeline's stale bases");
-    let mut rtl = rtl.clone();
-    rtl.wrong_operand = micro.wrong_operand;
-    if stale > 0 {
-        rtl.first = micro.first.clone();
-    }
-    assert_eq!(&rtl, micro, "the checker sees the pipeline as it sees micro");
+/// `micro`.
+fn same_counts(c: &[(&'static str, Counts); 2]) {
+    assert_eq!(&c[1].1, &c[0].1, "the checker sees the pipeline as it sees micro");
 }
 
 fn run_checked<E: Executes>(mut e: Checked<E>) -> (u64, Counts) {
@@ -998,8 +1041,7 @@ fn run_checked<E: Executes>(mut e: Checked<E>) -> (u64, Counts) {
 /// would have dispatched to runs next, the micro stack is where the return
 /// left it, PDL-INDEX is the operand address where one is armed, and the
 /// base copies equal `A-LOCALP` and `M-AP` after every microcycle, `M-AP`
-/// stepping under them; on the pipeline but for the operand addresses of
-/// [`stale_base_loads`].
+/// stepping under them.
 #[test]
 fn the_checkers_find_the_programs_clean() {
     for (s, fused, loads) in [
@@ -1009,14 +1051,13 @@ fn the_checkers_find_the_programs_clean() {
     ] {
         let both = checked(s);
         for (name, c) in &both {
-            let stale = stale_base_loads(name, s.operand);
-            assert_eq!(c.wrong_operand, stale, "{name}");
-            assert_eq!(c.problems(), stale, "{name}: {}", c.report(|_| String::new()));
+            assert_eq!(c.wrong_operand, 0, "{name}");
+            assert_eq!(c.problems(), 0, "{name}: {}", c.report(|_| String::new()));
             assert_eq!(c.fused, fused, "{name}");
             assert_eq!(c.operand_loads, loads, "{name}");
             assert!(c.unarmed.is_empty(), "{name}");
         }
-        same_counts(&both, s.operand);
+        same_counts(&both);
     }
 }
 
@@ -1104,11 +1145,10 @@ fn the_rule_checker_finds_each_forbidden_write() {
                     at(allowed),
                     "{what}"
                 );
-                let stale = stale_base_loads(name, operand);
-                assert_eq!(c.wrong_operand, stale, "{what}");
-                assert_eq!(c.problems() - c.violations.values().sum::<u64>(), stale, "{what}");
+                assert_eq!(c.wrong_operand, 0, "{what}");
+                assert_eq!(c.problems(), c.violations.values().sum::<u64>(), "{what}");
             }
-            same_counts(&both, operand);
+            same_counts(&both);
         }
     }
 }
@@ -1121,35 +1161,55 @@ fn the_rule_checker_finds_each_forbidden_write() {
 /// bit, as `QSTLOC` and `QSTARG` (`uc-macrocode.lisp:327-334`) do it: the
 /// store to a local would go to the next instruction's operand instead.
 /// Without the operand bit it lands where it was aimed, on `micro` and the
-/// pipeline alike. On revision 13's
-/// single-edge `rtl` the return into the second word's first halfword, ARG
-/// with delta 0, fuses too, on the prefetched word: its handler finds
-/// PDL-INDEX at `M-AP` + 1 and pushes it, and the write lands there. The
-/// engines differ in those two words, and only there, the handler
-/// observing PDL-INDEX and breaking the rule.
+/// pipeline alike, and the two leave the same PDL buffer.
 #[test]
 fn a_pdl_write_by_index_after_a_fused_return_lands_at_the_operand_address() {
+    let mark = 0o525252;
+    let slot = ALU | SETA | a_src(0o55) | fd(0o12);
+    let loaded = [(LOCALP + 7) & 0o37777, AP + 1 + 5, (LOCALP + 0o77) & 0o37777];
+    for operand in [true, false] {
+        let s = Setup { slot: Some(slot), operand, ..Setup::operands() };
+        let (_, micro) = run(Micro::new(with_mark(machine(s), mark)));
+        let (_, pipeline) = run(Pipeline::new(with_mark(machine(s), mark)));
+        let want = if operand { mark } else { 0 };
+        for (name, m) in [("micro", &micro), ("the pipeline", &pipeline)] {
+            for at in loaded {
+                assert_eq!(m.pdl[at as usize], want, "operand bit {operand}, {name}: PDL {at:o}");
+            }
+            assert_eq!(m.pdl[SENTINEL as usize], mark, "operand bit {operand}, {name}");
+        }
+        assert!(micro.pdl == pipeline.pdl, "operand bit {operand}: the engines agree");
+    }
+}
+
+/// The mark [`a_pdl_write_by_index_after_a_fused_return_lands_at_the_operand_address`]
+/// writes, in A memory 55, which `machine` leaves zero.
+fn with_mark(mut m: Machine, mark: u64) -> Machine {
+    m.amem[0o55] = mark;
+    m
+}
+
+/// **The PDL buffer write after a return fused on the prefetched word**,
+/// on revision 13's single-edge `rtl`: the return into the second word's
+/// first halfword, ARG with delta 0, fuses too, on the prefetched word: its
+/// handler finds PDL-INDEX at `M-AP` + 1 and pushes it, and the write lands
+/// there. The engines differ in those two words, and only there, the
+/// handler observing PDL-INDEX and breaking the rule.
+#[test]
+fn a_pdl_write_by_index_after_a_return_fused_on_the_prefetched_word() {
     let mark = 0o525252;
     let slot = ALU | SETA | a_src(0o55) | fd(0o12);
     let loaded = [(LOCALP + 7) & 0o37777, AP + 1 + 5, (LOCALP + 0o77) & 0o37777];
     let prefetched = AP + 1;
     for operand in [true, false] {
         let s = Setup { slot: Some(slot), operand, ..Setup::operands() };
-        // The mark in A memory 55, which `machine` leaves zero.
-        let with_mark = |mut m: Machine| {
-            m.amem[0o55] = mark;
-            m
-        };
-        let (_, micro) = run(Micro::new(with_mark(machine(s))));
-        let (_, pipeline) = run(Pipeline::new(with_mark(machine(s))));
-        let (_, rtl) = run(Rtl::new(with_mark(machine(on_13(s)))));
+        let (_, micro) = run(Micro::new(with_mark(machine(s), mark)));
+        let (_, rtl) = run(Rtl::new(with_mark(machine(on_13(s)), mark)));
         let want = if operand { mark } else { 0 };
-        for (name, m) in [("micro", &micro), ("the pipeline", &pipeline), ("rtl", &rtl)] {
-            for at in loaded {
-                assert_eq!(m.pdl[at as usize], want, "operand bit {operand}, {name}: PDL {at:o}");
-            }
-            assert_eq!(m.pdl[SENTINEL as usize], mark, "operand bit {operand}, {name}");
+        for at in loaded {
+            assert_eq!(rtl.pdl[at as usize], want, "operand bit {operand}: PDL {at:o}");
         }
+        assert_eq!(rtl.pdl[SENTINEL as usize], mark, "operand bit {operand}");
         assert_eq!(micro.pdl[prefetched as usize], 0, "operand bit {operand}");
         assert_eq!(rtl.pdl[prefetched as usize], want, "operand bit {operand}");
         // The third push, the second word's first halfword's, and the
@@ -1269,16 +1329,15 @@ fn the_checker_finds_a_pdl_read_of_the_write_after_a_return() {
                 }
                 let violations = c.violations.values().sum::<u64>();
                 let reads = c.pdl_reads_of_writes.values().sum::<u64>();
-                let stale = stale_base_loads(name, operand);
-                assert_eq!(c.wrong_operand, stale, "{what}");
+                assert_eq!(c.wrong_operand, 0, "{what}");
                 assert_eq!(
                     c.problems(),
-                    violations + reads + stale,
+                    violations + reads,
                     "{what}: {}",
                     c.report(|_| String::new())
                 );
             }
-            same_counts(&both, operand);
+            same_counts(&both);
         }
     }
 }
@@ -1817,5 +1876,5 @@ fn a_call_after_a_fused_return_returns_to_the_handler() {
     for (name, c) in &both {
         assert!(c.stack_moved >= 1 && c.wrong_handler == c.stack_moved, "{name}: {c:?}");
     }
-    same_counts(&both, false);
+    same_counts(&both);
 }

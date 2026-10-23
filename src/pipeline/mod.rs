@@ -561,6 +561,13 @@ pub enum Mutation {
     /// D's return redirects to the main loop and restores RD's copies, in
     /// place of squashing the words behind its slot (R5 undone).
     DRedirects,
+    /// The operand address loaded in EX over the base copies alone, a
+    /// write of `M-AP` or `A-LOCALP` in WB left out.
+    NoOperandBaseForward,
+    /// RD forms a fused return's operand address over the base copies
+    /// while the popping microinstruction itself writes `M-AP` or
+    /// `A-LOCALP`.
+    OwnBaseWriteNotInFlight,
 }
 
 impl Pipeline {
