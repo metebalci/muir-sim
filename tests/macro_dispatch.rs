@@ -949,6 +949,47 @@ fn the_pipeline_s_operand_address_needs_both_halves_of_the_forward() {
     }
 }
 
+/// [`run`] on the pipeline halted once, after microcycle `k`, as the
+/// time-neutral harness's action point halts it
+/// (`Engine::stop_after_microcycle`): the halt drains, and the run goes on
+/// at the next clock.
+fn run_halted_after(mut p: Pipeline, k: u64) -> (u64, Machine) {
+    p.boot();
+    p.stop_after_microcycle(k);
+    for n in 0..20_000 {
+        if p.machine().opc == STOP {
+            p.run(8);
+            return (n, p.machine().clone());
+        }
+        p.step().unwrap();
+    }
+    panic!("the program never reached its end");
+}
+
+/// **A halt right after a return that writes its own base keeps the
+/// operand address**: halted once after any one microcycle, the pipeline
+/// reads each handler's operand where `micro` does, after [`SETAP`]'s and
+/// [`SETLOCALP`]'s returns too. Halted after one of those, the return's
+/// write of `M-AP` or `A-LOCALP` is still in WB when the halt's first
+/// restore of RD's copies forms the operand address over the bases before
+/// it; the drain ends with WB empty, and its last restore forms the address
+/// again over the new base, before the microcycle after the return and the
+/// handler are fetched again. Every other restore comes after the
+/// microcycle after the return has loaded PDL-INDEX, or is the return's own
+/// redirect, which a return that writes a base does not make: RD resolves
+/// it.
+#[test]
+fn a_halt_after_a_return_that_writes_its_base_keeps_the_operand_address() {
+    for s in [operand_reads(), Setup::operands()] {
+        let (n, micro) = run(Micro::new(machine(s)));
+        for k in 1..n + 8 {
+            let (_, halted) = run_halted_after(Pipeline::new(machine(s)), k);
+            assert_eq!(records(&halted), records(&micro), "halted after microcycle {k}");
+            assert!(halted.pdl == micro.pdl, "halted after microcycle {k}: the operand reads");
+        }
+    }
+}
+
 /// **Without the operand bit PDL-INDEX is left alone**, on both engines:
 /// with the same fused returns, every push finds the sentinel, as it does
 /// with the MACRO DISPATCH MEMORY disabled.
