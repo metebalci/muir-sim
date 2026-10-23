@@ -25,7 +25,7 @@
 //! H8a §3.5, G2 §9): a return that needs the next word in sequence fuses
 //! when the fetch before left it in the buffer, so that engine fuses more
 //! returns than `micro`, and leaves the same state wherever the handlers
-//! keep §3.3's rule; its tests run on revision 13 ([`fused_on_13`]).
+//! keep §3.3's rule; its tests run on revision 13 ([`fusing_prefetched`]).
 //!
 //! The main loop here is made as microcode 2001's `QMLP` is
 //! (`uc-macrocode.lisp:9-13`): the condition-6 call, `M-INST-BUFFER <- MD`,
@@ -554,13 +554,6 @@ fn saved_on(_engine: &str, returns_fuse: impl Fn(u32) -> bool + Copy) -> u64 {
     2 * fusing(returns_fuse)
 }
 
-/// How many returns in [`PROGRAM`] fuse on revision 13's `engine`: those
-/// that need no fetch, and on `rtl` those its prefetch holds the word for.
-fn fused_on_13(engine: &str, returns_fuse: impl Fn(u32) -> bool + Copy) -> u64 {
-    let prefetched = if engine == "rtl" { fusing_prefetched(returns_fuse).len() } else { 0 };
-    fusing(returns_fuse) + prefetched as u64
-}
-
 /// **Destinations 5 to 7 write the register, the index and the entry**
 /// on QUUX, each as well as M, as every functional destination does: the
 /// register keeps `<31>`, `<30>`, D's enable, and `<28:0>`, the index its
@@ -902,14 +895,20 @@ fn records(m: &Machine) -> Vec<u32> {
     m.pdl[1..=m.pdl_pointer as usize].iter().map(|&w| support::low(w)).collect()
 }
 
-/// [`RECORD`]'s returns over [`OPERANDS`] that fuse on `engine`, and of
-/// them those into [`RECORD`] again. On `micro` the four into second
-/// halfwords, each into [`RECORD`]. On `rtl` six more on the fetch path,
-/// its prefetch holding the second to the seventh words, all in the first
-/// word's line of eight: of those, the second's, the fourth's and the
-/// fifth's first halfwords are [`RECORD`].
-fn record_returns(engine: &str) -> (u64, u64) {
-    if engine == "rtl" { (4 + 6, 4 + 3) } else { (4, 4) }
+/// [`RECORD`]'s returns over [`OPERANDS`] that fuse on revision 16, on
+/// either engine, and of them those into [`RECORD`] again: the four into
+/// second halfwords, each into [`RECORD`].
+const RECORD_RETURNS: (u64, u64) = (4, 4);
+
+/// **The operand addresses the pipeline forms from a base as it stood
+/// before the popping microinstruction's own write of it**, over
+/// [`OPERANDS`] with the operand bit: the returns by [`SETAP`] and
+/// [`SETLOCALP`], which write `M-AP` and `A-LOCALP` in the POPJ itself,
+/// into an ARG and a LOCAL halfword. `micro` takes the new base, as
+/// contract H8a §3.4 has it, and the checker counts the pipeline's two as
+/// wrong operands ([`a_fused_return_loads_the_operand_address`]).
+fn stale_base_loads(engine: &str, operand: bool) -> u64 {
+    if engine == "rtl" && operand { 2 } else { 0 }
 }
 
 /// **The operand address** (contract H8a §3.4, §6 item 4), on both engines:
@@ -955,16 +954,32 @@ fn without_the_operand_bit_pdl_index_is_unchanged() {
     }
 }
 
-/// Runs `s` under the checker, to opcode 7, on `micro` and on revision
-/// 13's single-edge `rtl`. The checker takes a fused return as counted in
-/// the microcycle the return runs, as `micro` and that `rtl` count it; the
-/// pipeline counts it a microcycle sooner, when the return is in RD.
+/// Runs `s` under the checker, to opcode 7, on `micro` and on the
+/// pipeline. The pipeline writes a word's functional registers, the fused
+/// return's count among them, in its EX, a microcycle before it counts the
+/// word at WB; the checker sees each of its microcycles with the registers
+/// as the word's own EX left them ([`Checked`]), as `micro` has them after
+/// the microcycle.
 fn checked(s: Setup) -> [(&'static str, Counts); 2] {
     fn go<E: Executes>(e: E) -> Counts {
         let (_, counts) = run_checked(Checked::new(e));
         counts
     }
-    [("micro", go(Micro::new(machine(s)))), ("rtl", go(Rtl::new(machine(on_13(s)))))]
+    [("micro", go(Micro::new(machine(s)))), ("rtl", go(Pipeline::new(machine(s))))]
+}
+
+/// What the checker counts on the pipeline equals what it counts on
+/// `micro`, but for the operand addresses of [`stale_base_loads`].
+fn same_counts(c: &[(&'static str, Counts); 2], operand: bool) {
+    let (micro, rtl) = (&c[0].1, &c[1].1);
+    let stale = stale_base_loads("rtl", operand);
+    assert_eq!(rtl.wrong_operand, micro.wrong_operand + stale, "the pipeline's stale bases");
+    let mut rtl = rtl.clone();
+    rtl.wrong_operand = micro.wrong_operand;
+    if stale > 0 {
+        rtl.first = micro.first.clone();
+    }
+    assert_eq!(&rtl, micro, "the checker sees the pipeline as it sees micro");
 }
 
 fn run_checked<E: Executes>(mut e: Checked<E>) -> (u64, Counts) {
@@ -983,21 +998,25 @@ fn run_checked<E: Executes>(mut e: Checked<E>) -> (u64, Counts) {
 /// would have dispatched to runs next, the micro stack is where the return
 /// left it, PDL-INDEX is the operand address where one is armed, and the
 /// base copies equal `A-LOCALP` and `M-AP` after every microcycle, `M-AP`
-/// stepping under them. `rtl` fuses more, on the prefetched word
-/// ([`a_fused_return_loads_the_operand_address`] for the operands).
+/// stepping under them; on the pipeline but for the operand addresses of
+/// [`stale_base_loads`].
 #[test]
 fn the_checkers_find_the_programs_clean() {
     for (s, fused, loads) in [
-        (Setup::on(), [fused_on("micro", fuses), fused_on_13("rtl", fuses)], [0, 0]),
-        (Setup::operands(), [6, 6 + 6], [5, 7]),
-        (Setup::off(), [0, 0], [0, 0]),
+        (Setup::on(), fused_on("micro", fuses), 0),
+        (Setup::operands(), 6, 5),
+        (Setup::off(), 0, 0),
     ] {
-        for (k, (name, c)) in checked(s).into_iter().enumerate() {
-            assert_eq!(c.problems(), 0, "{name}: {}", c.report(|_| String::new()));
-            assert_eq!(c.fused, fused[k], "{name}");
-            assert_eq!(c.operand_loads, loads[k], "{name}");
+        let both = checked(s);
+        for (name, c) in &both {
+            let stale = stale_base_loads(name, s.operand);
+            assert_eq!(c.wrong_operand, stale, "{name}");
+            assert_eq!(c.problems(), stale, "{name}: {}", c.report(|_| String::new()));
+            assert_eq!(c.fused, fused, "{name}");
+            assert_eq!(c.operand_loads, loads, "{name}");
             assert!(c.unarmed.is_empty(), "{name}");
         }
+        same_counts(&both, s.operand);
     }
 }
 
@@ -1046,10 +1065,9 @@ fn the_rule_checker_decodes_each_forbidden_write() {
 /// register, PDL-INDEX, the PDL buffer at PDL-INDEX, `A-LOCALP` or `M-AP`
 /// --- each with what it held, or the sentinel, so
 /// that the program runs on --- every one of the fused returns from that
-/// handler is a violation of that kind, four on `micro` and nine on `rtl`
-/// ([`record_returns`]); the last three are allowed, and counted apart,
-/// where the entry has no operand bit: without it, and on `rtl` in the
-/// returns into the handlers that are not [`RECORD`].
+/// handler is a violation of that kind, four ([`RECORD_RETURNS`]); the
+/// last three are allowed, and counted apart, where the entry has no
+/// operand bit.
 #[test]
 fn the_rule_checker_finds_each_forbidden_write() {
     let cases = [
@@ -1063,8 +1081,9 @@ fn the_rule_checker_finds_each_forbidden_write() {
     for (slot, kind) in cases {
         for operand in [true, false] {
             let s = Setup { slot: Some(slot), operand, ..Setup::operands() };
-            for (name, c) in checked(s) {
-                let (returns, into_record) = record_returns(name);
+            let both = checked(s);
+            for (name, c) in &both {
+                let (returns, into_record) = RECORD_RETURNS;
                 let (forbidden, allowed) = if !kind.operand_only() {
                     (returns, 0)
                 } else if operand {
@@ -1085,8 +1104,11 @@ fn the_rule_checker_finds_each_forbidden_write() {
                     at(allowed),
                     "{what}"
                 );
-                assert_eq!(c.problems() - c.violations.values().sum::<u64>(), 0, "{name}");
+                let stale = stale_base_loads(name, operand);
+                assert_eq!(c.wrong_operand, stale, "{what}");
+                assert_eq!(c.problems() - c.violations.values().sum::<u64>(), stale, "{what}");
             }
+            same_counts(&both, operand);
         }
     }
 }
@@ -1212,9 +1234,9 @@ fn destination_5_does_not_load_the_base_copies() {
 /// [`RECORD`]'s handler reading the PDL buffer first, by the pointer or
 /// by the index, and the microcycle after its return pushing, writing at
 /// the pointer, or writing by PDL-INDEX, each fused return from that
-/// handler into it is counted where the addresses meet (four on `micro`,
-/// six on `rtl`, [`record_returns`]), with the operand bit and without; a
-/// read at the other address is not.
+/// handler into it is counted where the addresses meet (four,
+/// [`RECORD_RETURNS`]), with the operand bit and without; a read at the
+/// other address is not.
 #[test]
 fn the_checker_finds_a_pdl_read_of_the_write_after_a_return() {
     let read_pointer = ALU | SETM | src(0o25) | m_dest(0o36);
@@ -1232,9 +1254,10 @@ fn the_checker_finds_a_pdl_read_of_the_write_after_a_return() {
     for (slot, first, found) in cases {
         for operand in [true, false] {
             let s = Setup { slot: Some(slot), first: Some(first), operand, ..Setup::operands() };
-            for (name, c) in checked(s) {
+            let both = checked(s);
+            for (name, c) in &both {
                 let what = format!("{found:?}, operand bit {operand}, {name}");
-                let (returns, into_record) = record_returns(name);
+                let (returns, into_record) = RECORD_RETURNS;
                 assert_eq!(c.pdl_writes_after, returns, "{what}: every write seen");
                 let sites: Vec<_> = c.pdl_reads_of_writes.iter().collect();
                 match found {
@@ -1246,13 +1269,16 @@ fn the_checker_finds_a_pdl_read_of_the_write_after_a_return() {
                 }
                 let violations = c.violations.values().sum::<u64>();
                 let reads = c.pdl_reads_of_writes.values().sum::<u64>();
+                let stale = stale_base_loads(name, operand);
+                assert_eq!(c.wrong_operand, stale, "{what}");
                 assert_eq!(
                     c.problems(),
-                    violations + reads,
+                    violations + reads + stale,
                     "{what}: {}",
                     c.report(|_| String::new())
                 );
             }
+            same_counts(&both, operand);
         }
     }
 }
@@ -1787,7 +1813,9 @@ fn a_call_after_a_fused_return_returns_to_the_handler() {
         assert_eq!(m_on.macro_dispatch.fused, fused_on(name, fuses), "{name}");
         assert_eq!(n_off - n_on, saved_on(name, fuses), "{name}");
     }
-    for (name, c) in checked(Setup { patch: Some(call_after_opcode_1), ..Setup::on() }) {
+    let both = checked(Setup { patch: Some(call_after_opcode_1), ..Setup::on() });
+    for (name, c) in &both {
         assert!(c.stack_moved >= 1 && c.wrong_handler == c.stack_moved, "{name}: {c:?}");
     }
+    same_counts(&both, false);
 }

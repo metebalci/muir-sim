@@ -62,6 +62,31 @@ pub trait Executes: Engine {
     fn fetch_started(&self) -> Option<bool> {
         None
     }
+    /// **Whether a word's functional registers are written a microcycle
+    /// before the word is counted**: on the pipeline a word's EX writes
+    /// them (the micro stack's pointer, PDL-INDEX and the PDL pointer, LC,
+    /// destinations 5 to 7, the fused return's count) and the word is
+    /// counted at WB, in the clock in which the next word's EX runs, while
+    /// A and M memory, and the base copies with them, take the word's
+    /// writes at that WB. [`Checked`] then runs such an engine a clock at a
+    /// time and shows the checker each counted microcycle with the
+    /// registers as its own EX left them ([`Registers`]).
+    fn counts_at_wb(&self) -> bool {
+        false
+    }
+    /// One clock, on an engine that [`Executes::counts_at_wb`].
+    fn clock(&mut self) -> Result<(), Halt> {
+        self.step()
+    }
+    /// The word WB holds, on such an engine: its address, `None` within
+    /// `Some` for a nopped microcycle.
+    fn in_wb(&self) -> Option<Option<u16>> {
+        None
+    }
+    /// Whether such an engine is halted, so that no clock counts.
+    fn halted(&self) -> bool {
+        false
+    }
 }
 
 impl Executes for Micro {
@@ -73,6 +98,18 @@ impl Executes for Micro {
 impl Executes for muir::pipeline::Pipeline {
     fn executed(&self) -> Option<u16> {
         muir::pipeline::Pipeline::executed(self)
+    }
+    fn counts_at_wb(&self) -> bool {
+        true
+    }
+    fn clock(&mut self) -> Result<(), Halt> {
+        self.tick()
+    }
+    fn in_wb(&self) -> Option<Option<u16>> {
+        self.stages()[3]
+    }
+    fn halted(&self) -> bool {
+        self.is_halted()
     }
 }
 
@@ -391,6 +428,80 @@ pub fn reads_m31(i: Insn) -> bool {
     (!i.m_src_functional() && i.m_src() == 0o31) || (i.op() != Op::Dispatch && i.a_src() == 0o31)
 }
 
+/// **The registers a word's EX writes**, as they stood after it: what the
+/// checker reads of them, for an engine that writes them a microcycle
+/// before it counts the word ([`Executes::counts_at_wb`]).
+#[derive(Clone)]
+pub struct Registers {
+    lc: u32,
+    spcptr: u8,
+    pdl_pointer: u16,
+    pdl_index: u16,
+    register: u32,
+    entries: Vec<u32>,
+    fused: u64,
+}
+
+impl Registers {
+    /// As `e` holds them now.
+    fn of<E: Executes>(e: &E) -> Registers {
+        let m = e.machine();
+        Registers {
+            lc: e.lc(),
+            spcptr: m.spcptr,
+            pdl_pointer: m.pdl_pointer,
+            pdl_index: m.pdl_index,
+            register: m.macro_dispatch.register,
+            entries: m.macro_dispatch.entries.clone(),
+            fused: m.macro_dispatch.fused,
+        }
+    }
+}
+
+/// **A microcycle as the checker sees it**: the machine after it, with its
+/// A and M memory and the base copies, and the registers its EX left.
+pub struct Seen<'a> {
+    m: &'a Machine,
+    executed: Option<u16>,
+    fetch_started: Option<bool>,
+    lc: u32,
+    spcptr: u8,
+    pdl_pointer: u16,
+    pdl_index: u16,
+    register: u32,
+    entries: &'a [u32],
+    fused: u64,
+}
+
+impl<'a> Seen<'a> {
+    /// The microcycle `e` has just counted, its registers as `e` holds them
+    /// now, or as `registers` took them where they are given.
+    fn of<E: Executes>(e: &'a E, registers: Option<&'a Registers>) -> Seen<'a> {
+        let m = e.machine();
+        let d = &m.macro_dispatch;
+        let (lc, spcptr, pdl_pointer, pdl_index, register, entries, fused) = match registers {
+            Some(r) => {
+                (r.lc, r.spcptr, r.pdl_pointer, r.pdl_index, r.register, &r.entries[..], r.fused)
+            }
+            None => {
+                (e.lc(), m.spcptr, m.pdl_pointer, m.pdl_index, d.register, &d.entries[..], d.fused)
+            }
+        };
+        Seen {
+            m,
+            executed: e.executed(),
+            fetch_started: e.fetch_started(),
+            lc,
+            spcptr,
+            pdl_pointer,
+            pdl_index,
+            register,
+            entries,
+            fused,
+        }
+    }
+}
+
 /// The checker's state between two microcycles.
 #[derive(Clone, Default)]
 pub struct Checker {
@@ -444,7 +555,12 @@ impl Checker {
 
     /// After a step of `e`: nothing unless it completed a microcycle.
     pub fn after_step<E: Executes>(&mut self, e: &E) {
-        let m = e.machine();
+        self.after(&Seen::of(e, None));
+    }
+
+    /// After the microcycle `s`, if it is one.
+    pub fn after(&mut self, s: &Seen) {
+        let m = s.m;
         if m.cycles == self.cycles {
             return;
         }
@@ -454,8 +570,8 @@ impl Checker {
         }
         let d = &m.macro_dispatch;
         let base = macro_dispatch::BASE_BITS;
-        let localp_at = macro_dispatch::localp_address(d.register);
-        let ap_at = macro_dispatch::ap_address(d.register);
+        let localp_at = macro_dispatch::localp_address(s.register);
+        let ap_at = macro_dispatch::ap_address(s.register);
         let (localp, ap) = (m.amem[localp_at] & u64::from(base), m.mmem[ap_at] & u64::from(base));
         if self.bases.is_some_and(|b| b != (localp_at, ap_at)) {
             // The register names other words: its write loaded nothing.
@@ -467,8 +583,8 @@ impl Checker {
         // write pulse.
         self.localp_held |= self.localp_due.is_some_and(|c| m.cycles >= c);
         self.ap_held |= self.ap_due.is_some_and(|c| m.cycles >= c);
-        if let Some(pc) = e.executed() {
-            for w in writes(m.imem[pc as usize], d.register) {
+        if let Some(pc) = s.executed {
+            for w in writes(m.imem[pc as usize], s.register) {
                 match w {
                     Write::Localp if self.localp_due.is_none() => {
                         self.localp_due = Some(m.cycles + 1)
@@ -491,7 +607,7 @@ impl Checker {
             });
         }
         if let Some(p) = self.pending.take()
-            && let Some(pc) = e.executed()
+            && let Some(pc) = s.executed
             && let Some(read) = pdl_read(m.imem[pc as usize])
             && p.adr == if read == PdlAt::Pointer { p.pointer } else { p.index }
         {
@@ -503,16 +619,16 @@ impl Checker {
                 )
             });
         }
-        let main = macro_dispatch::main(d.register) as u16;
-        if e.executed().is_some_and(|pc| pc == main || pc == main + 2) {
+        let main = macro_dispatch::main(s.register) as u16;
+        if s.executed.is_some_and(|pc| pc == main || pc == main + 2) {
             self.in_handler = None;
         }
         if let Some(h) = self.handler.take() {
-            if e.executed() == Some(h) {
+            if s.executed == Some(h) {
                 self.in_handler = Some(h);
             } else {
                 self.counts.wrong_handler += 1;
-                let ran = e.executed().map_or("nothing".into(), |pc| format!("{pc:o}"));
+                let ran = s.executed.map_or("nothing".into(), |pc| format!("{pc:o}"));
                 let cycles = m.cycles;
                 self.problem(|| format!("handler {h:o} expected, {ran} ran, microcycle {cycles}"));
             }
@@ -523,9 +639,9 @@ impl Checker {
             // set for the word's `<15:0>` (the profile's decode, held by its
             // `decode agrees` count).
             let word = m.mmem[0o31];
-            let half = if e.lc() & 2 != 0 { word & 0xffff } else { word >> 16 };
+            let half = if s.lc & 2 != 0 { word & 0xffff } else { word >> 16 };
             let index = (half >> 6) as usize & (macro_dispatch::ENTRIES - 1);
-            let entry = d.entries[index];
+            let entry = s.entries[index];
             let register = half >> 6 & 7;
             let armed = entry & macro_dispatch::OPERAND != 0
                 && (register == macro_dispatch::LOCAL.into()
@@ -539,7 +655,7 @@ impl Checker {
             // On the fetch path the word came from the prefetch, and the
             // stream's fetch of it has just started: M 31 is to be main
             // memory's word there, through the map as it stands.
-            if e.fetch_started() == Some(false) {
+            if s.fetch_started == Some(false) {
                 self.counts.prefetched += 1;
                 let phys = m.translate(m.vma as u32).physical as usize;
                 let held = m.main.get(phys).copied();
@@ -553,21 +669,21 @@ impl Checker {
                         )
                     });
                 }
-                if e.executed().is_some_and(|pc| reads_m31(m.imem[pc as usize])) {
+                if s.executed.is_some_and(|pc| reads_m31(m.imem[pc as usize])) {
                     self.counts.m31_reads_after += 1;
                 }
             }
-            match e.executed() {
+            match s.executed {
                 None => self.counts.nopped_after += 1,
                 Some(pc) => {
                     if let Some(at) = pdl_write(m.imem[pc as usize]) {
                         self.counts.pdl_writes_after += 1;
-                        let (pointer, index) = (m.pdl_pointer, m.pdl_index);
+                        let (pointer, index) = (s.pdl_pointer, s.pdl_index);
                         let adr = if at == PdlAt::Pointer { pointer } else { index };
                         self.pending =
                             Some(Pending { at, ret: a.at, after: pc, adr, pointer, index });
                     }
-                    for w in writes(m.imem[pc as usize], d.register) {
+                    for w in writes(m.imem[pc as usize], s.register) {
                         let site = (w, a.at, pc);
                         if w.operand_only() && entry & macro_dispatch::OPERAND == 0 {
                             *self.counts.unarmed.entry(site).or_default() += 1;
@@ -583,10 +699,10 @@ impl Checker {
                     }
                 }
             }
-            if m.spcptr != a.spcptr {
+            if s.spcptr != a.spcptr {
                 self.counts.stack_moved += 1;
-                let now = m.spcptr;
-                let after = e.executed().map_or("nothing".into(), |pc| format!("{pc:o}"));
+                let now = s.spcptr;
+                let after = s.executed.map_or("nothing".into(), |pc| format!("{pc:o}"));
                 self.problem(|| {
                     format!(
                         "stack pointer {:o} after the return at {:o}, {now:o} after {after}",
@@ -600,25 +716,25 @@ impl Checker {
                 let want =
                     if register == macro_dispatch::ARG.into() { ap + 1 } else { localp } + delta;
                 let want = want as u16 & m.geometry.pdl_mask();
-                if m.pdl_index != want {
+                if s.pdl_index != want {
                     self.counts.wrong_operand += 1;
-                    let got = m.pdl_index;
+                    let got = s.pdl_index;
                     self.problem(|| {
                         format!("PDL-INDEX {got:o} for halfword {half:o}, {want:o} expected")
                     });
                 }
             }
         }
-        if d.fused != self.fused {
-            assert_eq!(d.fused, self.fused + 1, "one fused return a microcycle");
-            self.fused = d.fused;
+        if s.fused != self.fused {
+            assert_eq!(s.fused, self.fused + 1, "one fused return a microcycle");
+            self.fused = s.fused;
             self.counts.fused += 1;
             if let Some(h) = self.in_handler.take() {
                 *self.counts.handler_returns.entry(h).or_default() += 1;
-                let at = e.executed().unwrap_or(u16::MAX);
+                let at = s.executed.unwrap_or(u16::MAX);
                 *self.counts.handler_return_sites.entry(at).or_default() += 1;
             }
-            self.after = Some(After { at: e.executed().unwrap_or(u16::MAX), spcptr: m.spcptr });
+            self.after = Some(After { at: s.executed.unwrap_or(u16::MAX), spcptr: s.spcptr });
         }
     }
 }
@@ -689,27 +805,72 @@ pub fn fill_generic(m: &mut Machine, qmlp: u16, opdtb: u16, localp: u16, ap: u8,
 }
 
 /// **An engine with the checker run after its every step.** Everything
-/// else is the engine's own.
+/// else is the engine's own. An engine that [`Executes::counts_at_wb`] is
+/// run a clock at a time: when a word enters WB its EX has run and the
+/// registers are taken, and when it is counted the checker sees them with
+/// the machine as its WB left A and M memory. The word WB holds when the
+/// checker is attached, which no clock here saw enter, is seen with the
+/// registers as they stand at its count; every other word counted was seen
+/// to enter.
 pub struct Checked<E> {
     pub engine: E,
     pub checker: Checker,
+    /// The registers of the word WB holds, taken as it entered.
+    in_wb: Option<Registers>,
+    /// WB holds a word no clock here saw enter.
+    unseen: bool,
 }
+
+/// Clocks a step may take on an engine run a clock at a time, as many as
+/// the pipeline's own step allows, with room for -RESET's TLB sweep.
+const CLOCK_BOUND: u32 = 1 << 20;
 
 impl<E: Executes> Checked<E> {
     pub fn new(engine: E) -> Checked<E> {
         let checker = Checker::new(engine.machine());
-        Checked { engine, checker }
+        let unseen = engine.in_wb().is_some();
+        Checked { engine, checker, in_wb: None, unseen }
+    }
+
+    /// A step a clock at a time ([`Checked`]).
+    fn step_by_clocks(&mut self) -> Result<(), Halt> {
+        let cycles = self.engine.machine().cycles;
+        for _ in 0..CLOCK_BOUND {
+            let held = self.engine.in_wb().is_some();
+            let r = self.engine.clock();
+            let counted = self.engine.machine().cycles != cycles;
+            let seen = if counted { self.in_wb.take() } else { None };
+            if counted {
+                assert!(seen.is_some() || self.unseen, "a word counted that no clock saw enter WB");
+                self.unseen = false;
+                self.checker.after(&Seen::of(&self.engine, seen.as_ref()));
+            }
+            // A word in WB that was not there, or not this word, before
+            // the clock: WB was empty, or its word was counted and left.
+            if self.engine.in_wb().is_some() && (counted || !held) {
+                self.in_wb = Some(Registers::of(&self.engine));
+            }
+            if counted || r.is_err() || self.engine.halted() {
+                return r;
+            }
+        }
+        panic!("no microcycle counted in {CLOCK_BOUND} clocks");
     }
 }
 
 impl<E: Executes> Engine for Checked<E> {
     fn boot(&mut self) {
         self.engine.boot();
+        self.in_wb = None;
+        self.unseen = self.engine.in_wb().is_some();
     }
     fn keyboard_boot(&mut self) -> bool {
         self.engine.keyboard_boot()
     }
     fn step(&mut self) -> Result<(), Halt> {
+        if self.engine.counts_at_wb() {
+            return self.step_by_clocks();
+        }
         let r = self.engine.step();
         self.checker.after_step(&self.engine);
         r
