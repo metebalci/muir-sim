@@ -60,13 +60,14 @@ pack, and days on one that reads a band. See the note on `report` in
 `MUIR_BAND` names, the file device serving its files, or the CADR's muir-sys
 release on the CADR, the test harness's Chaosnet server serving the CADR's;
 QUUX has no Chaosnet interface, and its run has no Chaosnet server. It logs
-in and types thirteen workloads at
+in and types fourteen workloads at
 the listener --- the empty form, compiling, two kinds of recursion, consing,
 fixnum multiply and remainder, flonum arithmetic, `aset` and `aref`, sorting,
-bignums, `intern`, printing, and compiling again --- each ending by writing a
-marker file to the file host: the file device on QUUX, the FILE service on
-the CADR. For each it prints the microcycles and
-macroinstructions; the time; where the microinstructions went by the
+bignums, `intern`, printing, compiling again, and `bitblt` --- each ending by
+writing a marker file to the file host: the file device on QUUX, the FILE
+service on the CADR. Two more, `switch-shallow` and `switch-deep`, which time
+switching stack groups, run only when named. For each it prints the
+microcycles and macroinstructions; the time; where the microinstructions went by the
 category and source file of the nearest microcode label, the hottest labels,
 and the microcode's own meters; and on `rtl` the memory cycles. The
 workloads' time together closes the output. `MUIR_UCODE` runs it on another
