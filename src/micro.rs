@@ -2801,23 +2801,20 @@ impl Engine for Micro {
         let nopa = (self.inhibit && !self.trap) || self.m.clock_control.nop11;
         let ilong = !nopa && self.p1.raw() >> 45 & 1 != 0;
         self.trap = false;
-        // QUUX's divider holds the microcycle off for `DIV_CYCLES`
-        // generator cycles after its operands are ready, as `rtl` does; not
-        // a nopped one, and not a single step, which `-WAIT` does not stop
-        // either. This engine has no MD interlock --- the word is in `MD`
-        // two instructions after the read's start, whatever the memory is
-        // doing --- so the operands are ready as the `DIV` enters `IR`, and
-        // the count starts there, what `rtl` does for a `DIV` whose read
-        // has landed.
+        // QUUX's divider and multiplier hold the microcycle off after their
+        // operands are ready, counted in the clocks its pipeline holds them
+        // (MP2b ruling Q3), in periods of its own time, and nothing under
+        // neutral time; not for a nopped instruction, and not in a single
+        // step, which `-WAIT` does not stop either. This engine has no MD
+        // interlock --- the word is in `MD` two instructions after the
+        // read's start, whatever the memory is doing --- so the operands
+        // are ready as the instruction enters `IR`, and the count starts
+        // there.
         let stepping = self.sstep && !self.ssdone;
-        // Revision 15 counts the divider's and the multiplier's clocks as
-        // its pipeline holds them (MP2b ruling Q3), in periods of its own
-        // time, and nothing under neutral time.
         let held = match muldiv::decode(self.p1.raw()) {
             _ if !self.m.geometry.muldiv || nopa || stepping => 0,
             Some(muldiv::Op::Div) if self.m.geometry.quux() => muldiv::DIV_CLOCKS_15 - 1,
             Some(muldiv::Op::Mul) if self.m.geometry.quux() => muldiv::MUL_CLOCKS_15 - 1,
-            Some(muldiv::Op::Div) => muldiv::DIV_CYCLES,
             _ => 0,
         };
         if held > 0 && !neutral {

@@ -1,7 +1,7 @@
 # `tools/`
 
 Scripts that make the committed fixtures in `data/`, from MIT's files in
-`mit/` or, for QUUX's disks, with standard tools, five that fetch what is not committed, one that checks the
+`mit/` or, for QUUX's disks, with standard tools, four that fetch what is not committed, one that checks the
 first lot still make what is committed, one that checks QUUX's Ethernet
 checksum vectors, `quux-taps`, which installs the
 taps QUUX's Ethernet link runs over, and `ethernet-frame-mover`, which

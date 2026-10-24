@@ -24,7 +24,9 @@
 //! 23 at the machine's default address and sends the herald, System 2002
 //! on microcode 2002 on QUUX, and "Telnet server here". The pre-release's
 //! PROM has its published digest and is the sources' `sys/ubin/promh.mcr`
-//! and `data/quux-promh.mcr`, byte for byte.
+//! and `data/quux-promh.mcr`, byte for byte. PROM 2002 writes nothing to
+//! the disk on its way to microcode 2002, and the band, booted at other
+//! screen sizes than the default, draws its listener at each.
 
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -360,4 +362,114 @@ fn prom_2002_is_the_hand_over_s() {
     assert!(std::fs::read(&data).unwrap() == std::fs::read(&prom).unwrap(), "data/quux-promh.mcr");
     muir::prom::parse_quux_mcr(&std::fs::read(&prom).unwrap(), muir::machine::Geometry::QUUX)
         .expect("PROM 2002 reads on QUUX");
+}
+
+// --- PROM 2002 on the hand-over's disk ---
+
+/// **PROM 2002 writes no block of the hand-over's disk, and main memory
+/// only in page 3 and word 2377**, on both engines, up to microcode 2002's
+/// location 6, page 3 then holding the symbol area of the hand-over's
+/// `ucadr.mcr`, the microcode in the disk's current `MCR1`; the disk file
+/// is unchanged byte for byte (`support::prom_2002::saves_nothing`).
+/// **Fails** a PROM that saves a page to the disk, as MIT's `SAVE-A-PAGE`
+/// does, or a disk layer that writes the file back.
+#[test]
+fn prom_2002_writes_nothing_to_the_hand_over_s_disk() {
+    let Some(disk) = handover(&format!("{TAG}-disk.vhd")) else { return };
+    let Some(ucadr) = handover("ucadr.mcr") else { return };
+    let dir = support::scratch("system-2002-prom-saves-nothing");
+    support::prom_2002::saves_nothing(&disk, "vhd", &std::fs::read(&ucadr).unwrap(), dir.path());
+}
+
+// --- the screen's size ---
+
+/// QUUX at 32MW, `quux`'s default, with its built-in PROM, `pack` on
+/// block-disk, the video controller at `w` by `h`, and the file device
+/// serving `root`, as `quux --disk-pack <pack> --file-root <root>
+/// --video-size <w>x<h>` makes it.
+fn quux_sized(pack: &Path, root: &Path, (w, h): (usize, usize)) -> muir::machine::Machine {
+    use muir::machine::{Geometry, Machine};
+    let mut m = Machine::with_geometry(Geometry::QUUX, 32 << 4);
+    m.load_prom(&muir::prom::quux_boot_prom());
+    let mut d = muir::block_disk::BlockDisk::new(muir::block_disk::BLOCK_NS);
+    d.attach(muir::disk_image::Disk::open_rw(pack).expect("the pack"));
+    m.block_disk = Some(d);
+    m.tv.set_board(muir::tv::Board::Video);
+    m.tv.set_video_size(w, h);
+    m.file_device.mounts.add(&root.display().to_string()).unwrap();
+    m
+}
+
+/// Whether the listener is framed at the screen's own size, and not at any
+/// other width: its border lights the first and the last pixel of every
+/// row through the middle half of the screen, read at the screen's words a
+/// line, and read at any other it does not.
+fn drawn_at_its_words_a_line(e: &impl muir::engine::Engine) -> bool {
+    let (_, h, own) = e.machine().tv.screen();
+    framed(e, own, h)
+        && [24, 32, 40, 60].into_iter().filter(|&w| w != own).all(|w| !framed(e, w, h))
+}
+
+fn framed(e: &impl muir::engine::Engine, words_per_line: usize, h: usize) -> bool {
+    let buf = e.machine().tv.buffer();
+    let lit = |bit: usize| buf.get(bit / 32).is_some_and(|w| w >> (bit % 32) & 1 != 0);
+    let width = words_per_line * 32;
+    (h / 4..3 * h / 4).all(|y| lit(y * width) && lit(y * width + width - 1))
+}
+
+/// The screen as a GIF in the temporary directory, for a failure message.
+fn shot(e: &impl muir::engine::Engine, name: &str) -> String {
+    let path = std::env::temp_dir().join(format!("muir-{name}.gif"));
+    let mut rec = muir::capture::Recorder::new(false);
+    rec.sample(&e.machine().tv, 0, 0);
+    std::fs::write(&path, rec.gif()).unwrap();
+    path.display().to_string()
+}
+
+/// Boots `e` to the listener and holds it drawn at `size`'s words a line,
+/// the feature page's words 11 and 12 saying the size.
+fn sized_at_boot(mut e: impl muir::engine::Engine, size: (usize, usize), name: &str) {
+    e.boot();
+    let ran = support::wait_for_the_prompt_within(&mut e, 1_000_000_000);
+    eprintln!("{name}: listener after {ran} microcycles");
+    assert_eq!(e.machine().tv.screen(), (size.0, size.1, size.0 / 32), "{name}: the screen");
+    assert!(
+        drawn_at_its_words_a_line(&e),
+        "{name}: drawn at the screen's words a line; the screen is {}",
+        shot(&e, name)
+    );
+    let page = muir::tlb::REGISTER_PAGE_BUS;
+    let m = e.machine_mut();
+    let word = |m: &mut muir::machine::Machine, k: u32| m.bus_read(page + k) & 0xffff_ffff;
+    assert_eq!(word(m, 0o11), (size.0 as u64) << 16 | size.1 as u64, "{name}: word 11");
+    assert_eq!(word(m, 0o12), 1 << 16 | (size.0 / 32) as u64, "{name}: word 12");
+}
+
+/// **System 2002 sizes its screen at boot**: the band, booted at sizes
+/// other than the default 1280 by 1024, draws its listener at each size's
+/// own words a line, reading the size from the feature page's words 11 to
+/// 13 (`video-width`, `video-height` and `video-words-per-line` in
+/// `sys/sys/ltop.lisp`). 1920 by 1080, the largest screen QUUX supports and
+/// the Kria KR260's, on both engines, at 60 words a line; 1024 by 768 on
+/// `micro`, at 32; and the default on `micro`, the control. **Fails** a
+/// band that draws at a size of its own, or a feature page that says
+/// another.
+#[test]
+fn system_2002_sizes_its_screen_at_boot() {
+    for (engine, size) in [
+        ("micro", (1280, 1024)),
+        ("micro", (1024, 768)),
+        ("micro", (1920, 1080)),
+        ("rtl", (1920, 1080)),
+    ] {
+        let name = format!("system-2002-{engine}-{}x{}", size.0, size.1);
+        let Some((_dir, pack, root)) = band("disk", &name) else { return };
+        let m = quux_sized(&pack, &root, size);
+        let t = Instant::now();
+        match engine {
+            "micro" => sized_at_boot(muir::micro::Micro::new(m), size, &name),
+            _ => sized_at_boot(muir::pipeline::Pipeline::new(m), size, &name),
+        }
+        eprintln!("{name}: {:.1} s", t.elapsed().as_secs_f64());
+    }
 }

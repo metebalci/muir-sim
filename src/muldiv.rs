@@ -49,36 +49,13 @@ const MUS: u64 = 0o40 << 3;
 const DVS: u64 = 0o41 << 3;
 const DVS1: u64 = 0o51 << 3;
 
-/// The divider's hold, in microcycles: a `DIV` is held this many
-/// microcycles after its operands are ready and then runs in its own, ten
-/// in all, 400 ns from `IR` to its closing edge at four ticks for a
-/// register, as muir-fpga's fabric closes it (`cadr_microcycle.sv` line
-/// 2192; its trace `quux_muldiv.quux.k4.golden`, row `c4`). An
-/// operand from `MD` is ready when the MD interlock lets go, the wait any
-/// instruction reading `MD` has for a read in progress; a register is ready
-/// at once. It does not depend on the operands. The rule was set
-/// after muir-fpga's `quux_divmd` found `rtl` dividing a
-/// word that landed in the microcycle before the `DIV`'s at once, where the
-/// fabric's divider, which needs its operand 17 ticks before the `DIV`
-/// ends, divided the old `MD`.
-///
-/// The count is QUUX's definition, not a measurement, and it is in
-/// microcycles, not nanoseconds: the nine held are 360 ns at four ticks,
-/// which cover the divider's 330 (a quotient bit each 10 ns tick for 32
-/// steps and a tick to load the result), and muir-fpga's fit meets it with
-/// 15 ticks to spare. At another `--sync-cycle-ticks` it is still nine
-/// held, ten in all: whether nine covers the divider then is for the
-/// contract that changes the microcycle to recount.
-pub const DIV_CYCLES: u64 = 9;
-
 /// **Revision 15's divider and multiplier, in clocks** (contract G3
 /// revision 15, A15b.3's row DIV, MUL; its MP2b ruling Q3): a `DIV` stays in
 /// EX 18 clocks from the clock its operands are ready, 17 of them held, and
 /// a `MUL` 5, 4 held, at every period. The counts are the stage fit's core
 /// (M8e), whose divider is the fabric's: two quotient steps a clock, the
 /// words there 17 clocks after the load. A register operand is ready at
-/// once; an operand from `MD` when the wait for `MD` ends. Revisions 13 and
-/// 14 keep [`DIV_CYCLES`].
+/// once; an operand from `MD` when the wait for `MD` ends.
 pub const DIV_CLOCKS_15: u64 = 18;
 pub const MUL_CLOCKS_15: u64 = 5;
 

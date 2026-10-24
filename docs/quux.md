@@ -626,8 +626,10 @@ first dimension (`BITBLT-DECODE-ARRAY` in `sys/ucadr/uc-tv.lisp`).
 
 System 2002 reads the main screen's size from the feature page's words 11 to
 13 (`video-width`, `video-height` and `video-words-per-line` in
-`sys/sys/ltop.lisp`). **Unverified**: that it draws at any size but the
-default, which no test boots.
+`sys/sys/ltop.lisp`), and draws its listener at each size's own words a
+line: booted at 1024 by 768 on `micro`, and at 1920 by 1080 on both engines,
+as at the default (`system_2002_sizes_its_screen_at_boot` in
+`tests/system_2002.rs`, where the hand-over is fetched).
 
 `tests/video.rs` holds the buffer's first and last words and the NXM past
 it on both engines, QUUX's decode of the whole buffer and of the largest
@@ -687,8 +689,13 @@ storage width that is not a multiple of 32 or is below it,
 that is not zero, `ERROR-BAD-ADDRESS` at 36024 on an item past its memory,
 `ERROR-MICROCODE-TOO-BIG` at 36036 on a control store at or past 36000, and
 `ERROR-BUFFER-NOT-LOADED` at 36042 on no symbol area or one other than
-6000-7777 (`promh.text`). **Unverified**: these halts, which no test here
-reaches; the tests below boot a disk to the microcode's location 6.
+6000-7777 (`promh.text`). `tests/quux_prom_halts.rs` reaches each of these
+halts on both engines, from a fault planted in a disk made here, and
+`ERROR-NOT-REVISION-15` on a machine of revision 0, 13 and 14, with no block
+of the disk written; the halts' addresses are held to the hand-over's
+`promh.sym` where it is fetched. Every halt after the PROM sets error stop
+stops the machine; `ERROR-NOT-REVISION-15` comes before it, so `ERR` goes up
+and the clock runs on, the PC held at the halt by its jump to itself.
 
 **It saves nothing and writes no block of the disk** (contract Q8). MIT's
 PROM saves main memory's page 0 to block 1 before it loads anything
@@ -696,9 +703,13 @@ PROM saves main memory's page 0 to block 1 before it loads anything
 the partition table's entry array. QUUX's reads every page into its buffer
 at physical page 3 of 1024 words, words 6000-7777, and loads the microcode's
 symbol area, which lies there, last, over the buffer (`promh.text`: "the
-prom writes nothing to the disk"). **Unverified**: that it writes no block,
-which no test counts; a boot of a disk file compared byte for byte with its
-copy would settle it.
+prom writes nothing to the disk"). `tests/quux_prom_saves_nothing.rs` holds
+it on both engines, from the boot to the microcode's location 6, on a disk
+made here: no block written, the disk file unchanged byte for byte, main
+memory stored only in page 3 and word 2377, the command list word of its
+transfers, and page 3 then holding the microcode's symbol area;
+`tests/system_2002.rs` holds the same of the hand-over's disk and microcode
+2002, where it is fetched.
 
 **Its file is QUUX's own `.mcr`**, as muir-sys's builder writes it for the
 PROM and the microcode alike: the format word `51550001`, section 6 first

@@ -1035,8 +1035,10 @@ enum Whose {
     /// A flag of both, meaning the same thing on each.
     Both,
     /// The CADR's alone: `chip` and its boards, the debug cable, the
-    /// CADR's timing, display boards, disk controller and color TV, and
-    /// the Unibus's serial port.
+    /// CADR's timing, display boards, disk controller and color TV, the
+    /// Unibus's serial port, and the Chaosnet's flags --- which `quux`
+    /// refuses as QUUX having no Chaosnet interface, not as `cadr`'s, so
+    /// they are in no `OWN_FLAGS` row.
     Cadr,
     /// QUUX's alone: its cache, main memory's port, clock, display size,
     /// real-time clock and file device.
@@ -1112,10 +1114,7 @@ const USAGE_CADR: &str = "usage: cadr [--micro|--rtl|--chip] [--chaos-address <a
             [-V|--version]";
 
 /// `quux`'s usage: its flags, in the order `--help` lists them.
-const USAGE_QUUX: &str = "usage: quux [--micro|--rtl] [--cache <words>] [--chaos-address <address>]
-            [--chaos-trace] [--chaos-udp [<endpoint>]]
-            [--chaos-udp-default-peer <host>[:<port>]]
-            [--chaos-udp-peer <address>@<host>:<port>] [--checkpoint <file>]
+const USAGE_QUUX: &str = "usage: quux [--micro|--rtl] [--cache <words>] [--checkpoint <file>]
             [-c|--config <file>] [--continue] [--disk-pack <image>[,ro]]
             [--ethernet-mac XX:XX:XX:XX:XX:XX]
             [--ethernet-socket <path>[,clocked]] [--ethernet-trace]
@@ -1149,7 +1148,7 @@ const HELP: &[(Whose, &str)] = &[
                                transfer. [default: --rtl]",
     ),
     (
-        Whose::Both,
+        Whose::Cadr,
         "  --chaos-address <address>    this machine's Chaosnet address: the sixteen
                                address switches on the I/O board, the bits
                                in octal, 3050, or subnet:host with each in
@@ -1165,12 +1164,12 @@ const HELP: &[(Whose, &str)] = &[
                                band's]",
     ),
     (
-        Whose::Both,
+        Whose::Cadr,
         "  --chaos-trace                every Chaosnet packet and frame on the cable,
                                to stderr. [default: off]",
     ),
     (
-        Whose::Both,
+        Whose::Cadr,
         "  --chaos-udp [<endpoint>]     the Chaosnet cable, plugged in: Chaosnet over
                                UDP, which cbridge, usim, klh10 and ozd
                                speak. **Without this muir sends nothing**,
@@ -1187,7 +1186,7 @@ const HELP: &[(Whose, &str)] = &[
                                own port, when the flag is given bare]",
     ),
     (
-        Whose::Both,
+        Whose::Cadr,
         "  --chaos-udp-default-peer <host>[:<port>]
                                where a frame goes whose destination no
                                --chaos-udp-peer named: the route of last
@@ -1207,7 +1206,7 @@ const HELP: &[(Whose, &str)] = &[
                                frame no peer entry names is dropped]",
     ),
     (
-        Whose::Both,
+        Whose::Cadr,
         "  --chaos-udp-peer <address>@<host>:<port>
                                a Chaosnet host reached over UDP and where it
                                lives: 3060@127.0.0.1:42043, the address in
@@ -1700,17 +1699,16 @@ const HELP: &[(Whose, &str)] = &[
     ),
     (
         Whose::Quux,
-        "  --prom <file>                the boot PROM to run, an MCR microcode file as
-                               QUUX's own data/quux-promh.mcr is: in partition
-                               order, MIT's with the two 16-bit halves of
-                               every 32-bit word swapped, and assembled at
-                               36000, where QUUX's PROM sits, with the
-                               statistics bit IR<46> nowhere set. A file in
-                               MIT's order is refused saying so, and so is one
-                               assembled at 0. The start says how the file
-                               stands to QUUX's own. [default: QUUX's own,
-                               built in --- data/quux-promh.mcr, version
-                               2001]",
+        "  --prom <file>                the boot PROM to run, an MCR microcode file in
+                               QUUX's own format, as data/quux-promh.mcr is:
+                               format word 51550001, section 6 first and
+                               saying 15, and the control store section from
+                               36000, where QUUX's PROM sits, for at most 1K
+                               words, with the statistics bit IR<46> nowhere
+                               set. MIT's .mcr is refused, naming its format
+                               word. The start says how the file stands to
+                               QUUX's own. [default: QUUX's own, built in ---
+                               data/quux-promh.mcr, PROM 2002]",
     ),
     (
         Whose::Quux,

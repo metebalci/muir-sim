@@ -57,13 +57,15 @@ pack, and days on one that reads a band. See the note on `report` in
 `benchmark.rs`.
 
 `profile` is where a band's microcycles go. It boots the QUUX band that
-`MUIR_BAND` names, its files on the file device, or the CADR's muir-sys
-release on the CADR, with the test harness's Chaosnet server, logs in, and
-types thirteen workloads at
+`MUIR_BAND` names, the file device serving its files, or the CADR's muir-sys
+release on the CADR, the test harness's Chaosnet server serving the CADR's;
+QUUX has no Chaosnet interface, and its run has no Chaosnet server. It logs
+in and types thirteen workloads at
 the listener --- the empty form, compiling, two kinds of recursion, consing,
 fixnum multiply and remainder, flonum arithmetic, `aset` and `aref`, sorting,
 bignums, `intern`, printing, and compiling again --- each ending by writing a
-marker file through the FILE service. For each it prints the microcycles and
+marker file to the file host: the file device on QUUX, the FILE service on
+the CADR. For each it prints the microcycles and
 macroinstructions; the time; where the microinstructions went by the
 category and source file of the nearest microcode label, the hottest labels,
 and the microcode's own meters; and on `rtl` the memory cycles. The

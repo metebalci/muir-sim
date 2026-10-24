@@ -724,6 +724,37 @@ fn quux_s_prom_is_assembled_at_36000() {
     assert!(t.contains("MIT's own word for word"), "{t}");
 }
 
+/// **Each `--help` describes the `--prom` its executable takes**: `quux`'s
+/// QUUX's own `.mcr` --- format word 51550001, section 6 saying 15, the
+/// control store from 36000 --- with PROM 2002 built in, and nothing of
+/// PROM 2001's partition order; `cadr`'s MIT's own, version 9. **Fails**
+/// a `quux --help` that still describes PROM 2001.
+#[test]
+fn each_help_describes_its_own_prom() {
+    let entry = |exe: &str| {
+        let out = executable(exe).arg("--help").run();
+        assert!(out.status.success(), "{exe} --help:\n{}", text(&out));
+        let t = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut lines = t.lines().skip_while(|l| !l.starts_with("  --prom "));
+        let first = lines.next().unwrap_or_else(|| panic!("{exe} --help has no --prom:\n{t}"));
+        let rest = lines.take_while(|l| !l.trim_start().starts_with('-'));
+        let words: Vec<&str> = std::iter::once(first).chain(rest).collect();
+        words.join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let q = entry("quux");
+    for said in ["51550001", "section 6", "saying 15", "36000", "data/quux-promh.mcr", "PROM 2002"]
+    {
+        assert!(q.contains(said), "quux's --prom says {said:?}: {q}");
+    }
+    for unsaid in ["2001", "partition", "swapped", "MIT's order", "assembled at 0"] {
+        assert!(!q.contains(unsaid), "quux's --prom says {unsaid:?}: {q}");
+    }
+    let c = entry("cadr");
+    for said in ["sys/ubin/promh.mcr", "assembled at address 0", "version 9"] {
+        assert!(c.contains(said), "cadr's --prom says {said:?}: {c}");
+    }
+}
+
 /// A disk QUUX's PROM boots: `data/quux-disk.img`, the GPT disk sgdisk
 /// made, with [`support::idle_microcode_15`] at its current `MCR1`'s first
 /// block, as `dd` writes it. The PROM finds the microcode through the GPT
@@ -918,11 +949,6 @@ fn the_executable_is_the_machine_and_quux_has_no_netlist() {
 const SHARED: &[&str] = &[
     "--micro",
     "--rtl",
-    "--chaos-address",
-    "--chaos-trace",
-    "--chaos-udp",
-    "--chaos-udp-default-peer",
-    "--chaos-udp-peer",
     "--checkpoint",
     "--config",
     "--continue",
@@ -945,6 +971,17 @@ const SHARED: &[&str] = &[
     "--tv-capture-no-time",
     "--help",
     "--version",
+];
+/// The Chaosnet's flags: `cadr`'s, which has the interface, and listed in
+/// its help alone. `quux` refuses them by name, saying QUUX has no
+/// Chaosnet interface (tests/ethernet_socket.rs holds that), rather than
+/// as another executable's, so they are in neither list above or below.
+const CHAOS: &[&str] = &[
+    "--chaos-address",
+    "--chaos-trace",
+    "--chaos-udp",
+    "--chaos-udp-default-peer",
+    "--chaos-udp-peer",
 ];
 const CADR_ONLY: &[&str] = &[
     "--chip",
@@ -1010,10 +1047,16 @@ fn a_flag_of_the_other_executable_says_whose_it_is() {
 /// **`--help` lists the executable's own flags and no other's**: every
 /// flag it takes has an entry, and no word of it that looks like a flag is
 /// a flag the executable refuses. The usage line starts with the
-/// executable's name.
+/// executable's name. The Chaosnet's flags are `cadr`'s to list, `quux`
+/// refusing them. **Fails** a `quux --help` that names any of them, or a
+/// `cadr --help` without an entry for each.
 #[test]
 fn the_help_lists_only_the_executable_s_own_flags() {
-    for (exe, own, theirs) in [("cadr", CADR_ONLY, QUUX_ONLY), ("quux", QUUX_ONLY, CADR_ONLY)] {
+    let cadr_s = [CADR_ONLY, CHAOS].concat();
+    let quux_s_not = [CADR_ONLY, CHAOS].concat();
+    for (exe, own, theirs) in
+        [("cadr", &cadr_s[..], QUUX_ONLY), ("quux", QUUX_ONLY, &quux_s_not[..])]
+    {
         let out = executable(exe).arg("--help").run();
         let t = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(out.status.success(), "{exe} --help:\n{}", text(&out));
