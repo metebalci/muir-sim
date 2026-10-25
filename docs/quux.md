@@ -1237,7 +1237,13 @@ handler's first microinstruction finds its operand at
 `C-PDL-BUFFER-INDEX`. The bases are copies the machine keeps, fourteen
 bits each: an A write at the register's `<23:14>` writes the copy of
 `A-LOCALP`, and an M write at its `<28:24>` the copy of `M-AP`, with their
-write pulse, and nothing else writes them. The register's write does not
+write pulse, and nothing else writes them. The address is matched against
+the register as the writing microinstruction finds it: a word that writes
+destination 5 and A or M matches the register before its own write of it.
+On the pipeline, whose WB lands a word's A and M writes after the next
+word's EX may have written the register, EX makes the match; WB, the
+forward into the next word's EX and RD's check for a base still being
+written all use it. The register's write does not
 load them from A and M memory, so the microcode writes `A-LOCALP` and
 `M-AP` after destination 5. -RESET leaves the copies and drops an armed
 operand address; a checkpoint keeps both copies and an armed operand
@@ -1303,7 +1309,10 @@ address for LOCAL and ARG at the handler's first microinstruction and not
 before, masked, from bases written by the popping microinstruction itself,
 and nothing loaded without the operand bit or for another register; the
 base copies not loaded by destination 5 and written by the writes of
-`A-LOCALP` and `M-AP` alone; a PDL buffer write by PDL-INDEX in the
+`A-LOCALP` and `M-AP` alone, matched against the register as the writing
+microinstruction finds it, where that microinstruction writes destination
+5 itself, where the next one does, and where the microcycle after a fused
+return does, which the rule forbids; a PDL buffer write by PDL-INDEX in the
 microcycle after landing at the operand address; the rule checker's
 decode, each forbidden write found in a run, and a handler's first PDL
 read at the address the microcycle after the return writes found; the

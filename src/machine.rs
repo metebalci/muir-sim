@@ -509,10 +509,11 @@ impl Geometry {
 /// bases are the machine's own copies, [`MacroDispatch::localp`] and
 /// [`MacroDispatch::ap`], fourteen bits each, written only with an A write
 /// at the address the register's `<23:14>` names and an M write at its
-/// `<28:24>`, with their write pulse. The register's write does not load
-/// them, so the microcode writes `A-LOCALP` and `M-AP` after destination
-/// 5 (contract H8a §3.4, §4); -RESET leaves them, and a checkpoint keeps
-/// them.
+/// `<28:24>`, with their write pulse, the register as the writing
+/// microinstruction finds it ([`MacroDispatch::base_hits`]). The
+/// register's write does not load them, so the microcode writes `A-LOCALP`
+/// and `M-AP` after destination 5 (contract H8a §3.4, §4); -RESET leaves
+/// them, and a checkpoint keeps them.
 ///
 /// The microcycle after a fused return must not write the location
 /// counter, M 31, INTERRUPT-CONTROL or destinations 5 to 7, and, when the
@@ -775,6 +776,31 @@ impl MacroDispatch {
     /// register names that address.
     pub fn m_written(&mut self, adr: usize, v: Word) {
         if adr == macro_dispatch::ap_address(self.register) {
+            self.ap = v as u32 & macro_dispatch::BASE_BITS;
+        }
+    }
+
+    /// Whether a write of A memory at `a` and of M memory at `m` loads the
+    /// copy of `A-LOCALP` and that of `M-AP`, matched against the register
+    /// as it stands: the register as the writing microinstruction finds it,
+    /// before its own destination-5 write lands at its end. An engine that
+    /// lands the write later, past a later word's write of the register,
+    /// matches here, when the word executes, and loads the copies with
+    /// [`MacroDispatch::bases_written`].
+    pub fn base_hits(&self, a: Option<usize>, m: Option<usize>) -> (bool, bool) {
+        (
+            a == Some(macro_dispatch::localp_address(self.register)),
+            m == Some(macro_dispatch::ap_address(self.register)),
+        )
+    }
+
+    /// A write of `v` that [`MacroDispatch::base_hits`] matched: the copy
+    /// of `A-LOCALP` takes it if `localp`, that of `M-AP` if `ap`.
+    pub fn bases_written(&mut self, (localp, ap): (bool, bool), v: Word) {
+        if localp {
+            self.localp = v as u32 & macro_dispatch::BASE_BITS;
+        }
+        if ap {
             self.ap = v as u32 & macro_dispatch::BASE_BITS;
         }
     }

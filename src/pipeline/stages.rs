@@ -706,12 +706,24 @@ impl Pipeline {
         Some((b.wrapping_add(displacement as i32 as u32) & 0o37777) as u16)
     }
 
-    /// Whether a word in EX or WB writes A at `a` or M at `m`: a base copy
-    /// still being written.
+    /// Whether a word in EX or WB writes A at `a` or M at `m`, the bases'
+    /// addresses as the register names them now, or writes the copy of
+    /// `A-LOCALP` (with `a`) or `M-AP` (with `m`) as its EX matched it
+    /// against the register then ([`AmWrite::bases`]): a base copy still
+    /// being written.
     fn base_in_flight(&self, a: Option<u16>, m: Option<u8>) -> bool {
+        let base = |w: &AmWrite| a.is_some() && w.bases.0 || m.is_some() && w.bases.1;
         [&self.ex, &self.wb].into_iter().flatten().any(|s| {
-            !s.nop && (a.is_some() && a_dest(s.ir) == a || m.is_some() && m_dest(s.ir) == m)
-        }) || self.b.landing.am.iter().any(|w| a.is_some() && w.a == a || m.is_some() && w.m == m)
+            !s.nop
+                && (a.is_some() && a_dest(s.ir) == a
+                    || m.is_some() && m_dest(s.ir) == m
+                    || s.am.iter().any(base))
+        }) || self
+            .b
+            .landing
+            .am
+            .iter()
+            .any(|w| a.is_some() && w.a == a || m.is_some() && w.m == m || base(w))
     }
 
     /// **RD's return** (`micro`'s `main_loop_return` on RD's copies): the
@@ -1993,13 +2005,13 @@ impl Pipeline {
         for w in &landing.am {
             if let Some(a) = w.a {
                 self.m.amem[a as usize] = w.word;
-                self.m.macro_dispatch.a_written(a as usize, w.word);
                 self.m.a_written_14(a as usize, w.word);
             }
             if let Some(m) = w.m {
                 self.m.mmem[m as usize] = w.word;
-                self.m.macro_dispatch.m_written(m as usize, w.word);
             }
+            // The copies, as the writer's EX matched the write.
+            self.m.macro_dispatch.bases_written(w.bases, w.word);
         }
         if let Some((adr, word, seq)) = landing.pdl {
             self.b.last_pdl = Some((adr, self.m.pdl[adr as usize], word, seq));

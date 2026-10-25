@@ -36,7 +36,7 @@ use muir::engine::Engine;
 use muir::isa::Insn;
 use muir::isa::asm::{
     ALU, ALWAYS, CARRY_IN, DISPATCH, JUMP, M_PLUS_C, N, P, POPJ, R, SETA, SETM, SRC_MD, a_dest,
-    a_src, d_addr, d_len, filler, m_dest, m_src, rot, src, target,
+    a_src, d_addr, d_len, filler, m_dest, m_src, pdl_field, rot, src, target,
 };
 use muir::machine::{Geometry, Machine, Operand, macro_dispatch};
 use muir::micro::Micro;
@@ -1382,4 +1382,227 @@ fn a_call_after_a_fused_return_returns_to_the_handler() {
         assert!(c.stack_moved >= 1 && c.wrong_handler == c.stack_moved, "{name}: {c:?}");
     }
     same_counts(&both);
+}
+
+/// Where [`a_slot_writing_the_register_after_a_base_write_runs_as_on_micro`]
+/// keeps the register's second word, and the A word it names as
+/// `A-LOCALP`.
+const OTHER_REGISTER_AT: u64 = 0o57;
+const OTHER_LOCALP_AT: u64 = LOCALP_AT + 1;
+
+/// [`SETLOCALP`]'s return, which writes `A-LOCALP` itself, with the
+/// microcycle after it writing the MACRO-DISPATCH register (destination 5)
+/// with a word that names `A-LOCALP` at [`OTHER_LOCALP_AT`], the main loop
+/// and `M-AP` as before.
+fn register_after_setlocalp(m: &mut Machine) {
+    let other = macro_dispatch::word(QMLP as u16, OTHER_LOCALP_AT as u16, AP_AT as u8);
+    m.amem[OTHER_REGISTER_AT as usize] = u64::from(other);
+    m.amem[OTHER_LOCALP_AT as usize] = 0o2000;
+    m.imem[SETLOCALP_AT as usize + 1] = Insn::new(ALU | SETA | a_src(OTHER_REGISTER_AT) | fd(5));
+}
+
+/// **A fused return that writes `A-LOCALP`, whose microcycle after writes
+/// the MACRO-DISPATCH register** (contract H8a §3.3, §3.4): the rule of
+/// §3.3 forbids the write, and the checker finds it, once, at
+/// [`SETLOCALP`]'s slot. The engines are still held to one result: the
+/// PDL-INDEX the next handler's first microinstruction finds (pushed by
+/// [`RECORD`]), the PDL buffer's word it reads there into M 27 (A 27 too,
+/// M shadowing it), and the copy of `A-LOCALP`. The return's A write is
+/// matched against the register as the return finds it, on the pipeline
+/// as on `micro`, though the slot's EX writes the register before the
+/// return's write lands at WB.
+#[test]
+fn a_slot_writing_the_register_after_a_base_write_runs_as_on_micro() {
+    let index = Setup { patch: Some(register_after_setlocalp), ..Setup::operands() };
+    // The handler's first microinstruction reads the PDL buffer at
+    // PDL-INDEX into M 27, over a buffer whose words name their address.
+    fn named_and_register(m: &mut Machine) {
+        for (k, w) in m.pdl.iter_mut().enumerate() {
+            *w = 0o1000000 | k as u64;
+        }
+        register_after_setlocalp(m);
+    }
+    let read = Setup {
+        first: Some(ALU | SETM | src(5) | m_dest(0o27)),
+        patch: Some(named_and_register),
+        ..Setup::operands()
+    };
+    for (name, c) in checked(index) {
+        let want = (Write::MacroDispatch, SETLOCALP_AT as u16, SETLOCALP_AT as u16 + 1);
+        assert_eq!(c.violations.into_iter().collect::<Vec<_>>(), [(want, 1)], "{name}");
+    }
+    let [(_, _, mi), (_, _, ri)] = both(index);
+    let [(_, _, mr), (_, _, rr)] = both(read);
+    // The record after SETLOCALP's return: the last pair's first.
+    let after = |m: &Machine| records(m)[records(m).len() - 2];
+    assert_eq!(after(&mi), LOCALP_2 + 1, "micro: the operand over the return's own write");
+    assert_eq!(mi.macro_dispatch.localp, LOCALP_2, "micro: the copy the return's write loaded");
+    let mut differ = Vec::new();
+    for (what, micro, rtl) in [
+        ("PDL-INDEX at the handler's first microinstruction", after(&mi), after(&ri)),
+        ("M 27, the PDL word read there", support::low(mr.mmem[0o27]), support::low(rr.mmem[0o27])),
+        ("A 27", support::low(mr.amem[0o27]), support::low(rr.amem[0o27])),
+        ("the copy of A-LOCALP", mi.macro_dispatch.localp, ri.macro_dispatch.localp),
+        ("the copy of M-AP", mi.macro_dispatch.ap, ri.macro_dispatch.ap),
+    ] {
+        if micro != rtl {
+            differ.push(format!("{what}: micro {micro:o}, rtl {rtl:o}"));
+        }
+    }
+    if mr.amem != rr.amem || mr.mmem != rr.mmem {
+        differ.push("A and M memory".into());
+    }
+    assert!(differ.is_empty(), "the engines part:\n  {}", differ.join("\n  "));
+}
+
+/// The register's first word, which names `A-LOCALP` at [`LOCALP_AT`] and
+/// `M-AP` at [`AP_AT`], in A memory 51 for [`straight`]; its second in A
+/// memory 52.
+const FIRST_REGISTER_AT: u64 = 0o51;
+const SECOND_REGISTER_AT: u64 = 0o52;
+/// The copies [`straight`] starts with, which no write in it makes.
+const STALE: u32 = 0o1111;
+
+/// A program of `words` from the PROM's word 0 on revision 16, after its
+/// first word writes the register from [`FIRST_REGISTER_AT`], with A
+/// memory as `a` gives it, the copies [`STALE`] and the PDL buffer's words
+/// naming their address; run twelve microcycles on `micro` and on the
+/// pipeline, drained. Each engine's machine and halt.
+fn straight(words: &[u64], a: &[(u64, u64)]) -> [(&'static str, Machine, Option<String>); 2] {
+    let mk = || {
+        let mut prom = vec![Insn::new(ALU | SETA | a_src(FIRST_REGISTER_AT) | fd(5))];
+        prom.extend(words.iter().map(|&w| Insn::extended(w)));
+        prom.extend([filler(); 8]);
+        let mut m = Machine::with_geometry(REV16, 32);
+        m.load_prom(&prom);
+        support::prom_program_in_ram(&mut m);
+        m.amem[FIRST_REGISTER_AT as usize] = u64::from(enabled());
+        for &(at, w) in a {
+            m.amem[at as usize] = w;
+        }
+        for (k, w) in m.pdl.iter_mut().enumerate() {
+            *w = 0o1000000 | k as u64;
+        }
+        m.macro_dispatch.localp = STALE;
+        m.macro_dispatch.ap = STALE;
+        m
+    };
+    let mut e = Micro::new(mk());
+    e.boot();
+    let (_, micro_halt) = e.run(12);
+    let mut r = Pipeline::new(mk());
+    r.boot();
+    let (_, mut rtl_halt) = r.run(12);
+    if rtl_halt.is_none() {
+        rtl_halt = r.settle_for_checkpoint().err();
+    }
+    [
+        ("micro", e.machine().clone(), micro_halt.map(|h| format!("{h:?}"))),
+        ("rtl", r.machine().clone(), rtl_halt.map(|h| format!("{h:?}"))),
+    ]
+}
+
+/// What [`straight`]'s engines must agree on: the halt, PDL-INDEX, the two
+/// copies, M 27 (where the programs read the PDL buffer at PDL-INDEX), and
+/// A and M memory whole.
+fn agree(runs: &[(&'static str, Machine, Option<String>); 2]) {
+    let [(_, mi, hi), (_, ri, hr)] = runs;
+    let mut differ = Vec::new();
+    if hi != hr {
+        differ.push(format!("the halt: micro {hi:?}, rtl {hr:?}"));
+    }
+    for (what, micro, rtl) in [
+        ("PDL-INDEX", u64::from(mi.pdl_index), u64::from(ri.pdl_index)),
+        ("the copy of A-LOCALP", mi.macro_dispatch.localp.into(), ri.macro_dispatch.localp.into()),
+        ("the copy of M-AP", mi.macro_dispatch.ap.into(), ri.macro_dispatch.ap.into()),
+        ("M 27", support::low(mi.mmem[0o27]).into(), support::low(ri.mmem[0o27]).into()),
+    ] {
+        if micro != rtl {
+            differ.push(format!("{what}: micro {micro:o}, rtl {rtl:o}"));
+        }
+    }
+    if mi.amem != ri.amem {
+        differ.push("A memory".into());
+    }
+    if mi.mmem != ri.mmem {
+        differ.push("M memory".into());
+    }
+    assert!(differ.is_empty(), "the engines part:\n  {}", differ.join("\n  "));
+}
+
+/// **A base write directly followed by a destination-5 write** (contract
+/// H8a §3.4): the write of `A-LOCALP` at the register's `<23:14>` loads its
+/// copy, matched against the register as that microinstruction finds it,
+/// though the next one's EX names `A-LOCALP` elsewhere before the write
+/// lands at WB. A word with the PDL address field over `A-LOCALP` then
+/// forms PDL-INDEX over that copy, and the word after it reads the PDL
+/// buffer there, on the pipeline as on `micro`; with a microcycle between
+/// the two writes as well.
+#[test]
+fn a_base_write_followed_by_destination_5_loads_the_copy() {
+    let (new_localp, delta) = (0o1234, 3);
+    let second = macro_dispatch::word(QMLP as u16, LOCALP_AT as u16 + 1, AP_AT as u8);
+    for gap in 0..3 {
+        let mut words = vec![filler().raw(), ALU | SETA | a_src(0o53) | a_dest(LOCALP_AT)];
+        words.extend(std::iter::repeat_n(filler().raw(), gap));
+        words.extend([
+            ALU | SETA | a_src(SECOND_REGISTER_AT) | fd(5),
+            ALU | SETA | a_src(0o55) | fd(0o13) | pdl_field(1, delta),
+            ALU | SETM | src(5) | m_dest(0o27),
+        ]);
+        let runs = straight(
+            &words,
+            &[
+                (SECOND_REGISTER_AT, second.into()),
+                (0o53, new_localp),
+                (0o55, new_localp + delta as u64),
+                (LOCALP_AT, u64::from(STALE)),
+            ],
+        );
+        let micro = &runs[0].1;
+        assert_eq!(runs[0].2, None, "gap {gap}: micro runs on");
+        assert_eq!(micro.macro_dispatch.localp, new_localp as u32, "gap {gap}: micro's copy");
+        assert_eq!(u64::from(micro.pdl_index), new_localp + delta as u64, "gap {gap}");
+        agree(&runs);
+    }
+}
+
+/// **A destination-5 word whose M address is `M-AP`'s** (contract H8a
+/// §3.4): its M write loads the copy of `M-AP`, matched against the
+/// register as the word finds it, not as its own destination-5 write
+/// leaves it; the copy takes the word's `<13:0>`, the main loop's address.
+/// A word with the PDL address field over `M-AP` right after it forms
+/// PDL-INDEX over that copy, and the next reads the PDL buffer there, on
+/// the pipeline as on `micro`.
+#[test]
+fn a_destination_5_word_writing_m_ap_loads_the_copy() {
+    let delta = 2;
+    let second = macro_dispatch::word(QMLP as u16, LOCALP_AT as u16, AP_AT as u8 + 1);
+    let index = QMLP + delta as u64;
+    for gap in 0..3 {
+        let mut words = vec![
+            filler().raw(),
+            filler().raw(),
+            ALU | SETA | a_src(SECOND_REGISTER_AT) | 5 << 19 | AP_AT << 14,
+        ];
+        words.extend(std::iter::repeat_n(filler().raw(), gap));
+        words.extend([
+            ALU | SETA | a_src(0o55) | fd(0o13) | pdl_field(0, delta),
+            ALU | SETM | src(5) | m_dest(0o27),
+        ]);
+        let runs = straight(&words, &[(SECOND_REGISTER_AT, second.into()), (0o55, index)]);
+        let micro = &runs[0].1;
+        assert_eq!(runs[0].2, None, "gap {gap}: micro runs on");
+        assert_eq!(
+            micro.macro_dispatch.ap, QMLP as u32,
+            "gap {gap}: micro's copy, the word's <13:0>"
+        );
+        assert_eq!(u64::from(micro.pdl_index), index, "gap {gap}");
+        assert_eq!(
+            support::low(micro.mmem[0o27]),
+            0o1000000 | index as u32,
+            "gap {gap}: micro's PDL read"
+        );
+        agree(&runs);
+    }
 }

@@ -80,6 +80,12 @@ pub(crate) struct AmWrite {
     pub word: Word,
     /// The writer, for the macro-dispatch copies' snoop.
     pub seq: u64,
+    /// Whether the write loads the copy of `A-LOCALP` and that of `M-AP`:
+    /// matched in EX against the MACRO-DISPATCH register as the writer
+    /// finds it, before its own destination-5 write, as `micro` matches
+    /// (contract H8a §3.4). The write lands at WB, after the next word's EX
+    /// may have written the register again.
+    pub bases: (bool, bool),
 }
 
 /// A PDL buffer write: the address, as committed at WB, and the word.

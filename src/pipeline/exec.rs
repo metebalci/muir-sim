@@ -447,19 +447,17 @@ impl Pipeline {
     /// copies of `A-LOCALP`, `M-AP` and the redirect's two with them.
     fn write_dest(&mut self, dest: u16) {
         let out = self.x.out;
-        if dest & 0o4000 != 0 {
-            let adr = dest & 0o1777;
-            self.x.am.push(AmWrite { a: Some(adr), m: None, word: out, seq: self.x.seq });
+        let (a, m) = if dest & 0o4000 != 0 {
+            (dest & 0o1777, None)
         } else {
             self.write_functional(dest, out);
-            let adr = dest & 0o37;
-            self.x.am.push(AmWrite {
-                a: Some(adr),
-                m: Some(adr as u8),
-                word: out,
-                seq: self.x.seq,
-            });
-        }
+            (dest & 0o37, Some((dest & 0o37) as u8))
+        };
+        // Matched now, against the register as this word finds it: its own
+        // destination-5 write lands at its EX's end, the next word's before
+        // this write lands at WB.
+        let bases = self.m.macro_dispatch.base_hits(Some(a as usize), m.map(usize::from));
+        self.x.am.push(AmWrite { a: Some(a), m, word: out, seq: self.x.seq, bases });
     }
 
     fn muldiv(&self) -> Option<muldiv::Op> {
@@ -738,20 +736,15 @@ impl Pipeline {
 
     /// `M-AP` and `A-LOCALP` as the word in EX finds them: the copies, with
     /// a write of either by the word in WB, which lands at this clock's
-    /// edge (d1, as the word's own operands take it).
+    /// edge (d1, as the word's own operands take it). A write is one of a
+    /// base as its writer's EX matched it ([`AmWrite::bases`]), not as the
+    /// register stands now.
     fn bases(&self) -> (u32, u32) {
         let d = &self.m.macro_dispatch;
-        let (ap_at, localp_at) = (
-            crate::machine::macro_dispatch::ap_address(d.register),
-            crate::machine::macro_dispatch::localp_address(d.register),
-        );
         let landing = |m_side: bool| {
             self.b.landing.am.iter().rev().find_map(|w| {
-                let at = if m_side {
-                    w.m.map(usize::from) == Some(ap_at)
-                } else {
-                    w.a.map(usize::from) == Some(localp_at)
-                };
+                let (localp, ap) = w.bases;
+                let at = if m_side { ap } else { localp };
                 at.then_some(w.word as u32 & crate::machine::macro_dispatch::BASE_BITS)
             })
         };
@@ -893,7 +886,16 @@ impl Pipeline {
         }
         self.m.macro_dispatch.operand = self.x.operand.take();
         if let Some(w) = self.m.macro_dispatch.m31.take() {
-            self.x.am.push(AmWrite { a: Some(0o31), m: Some(0o31), word: w, seq: self.x.seq });
+            // At the microcycle's end, as `micro` loads M 31 there, after
+            // the word's own destination-5 write.
+            let bases = self.m.macro_dispatch.base_hits(Some(0o31), Some(0o31));
+            self.x.am.push(AmWrite {
+                a: Some(0o31),
+                m: Some(0o31),
+                word: w,
+                seq: self.x.seq,
+                bases,
+            });
         }
         // A device register's write started before is taken no sooner than
         // the clock after this microcycle, so that this word's conditions
