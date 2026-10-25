@@ -633,3 +633,100 @@ fn destination_3_writes_only_m_at_revision_10() {
         }
     }
 }
+
+/// Timer 1, the scheduler's (contract Q11, amendment A1), one-shot with its
+/// interrupt enable, armed at `at` with a period of `us` microseconds.
+fn arm_scheduler_s(m: &mut Machine, at: u64, us: u32) {
+    write(m, at, period(1), us);
+    write(m, at, control(1), ON | ONE_SHOT | IE);
+}
+
+/// The handler's write of word 112: on, flag cleared, interrupt enable.
+const HANDLER_CLEAR: u32 = 0o403;
+
+/// **A risen and cleared one-shot, armed again**: timer 1 rises at 40 µs,
+/// the handler's 403 takes its flag down, and it stays down through 10
+/// periods; a period of 25 µs written then rises once, 25 µs after the
+/// write and not 0.5 ns before, and not again after its clear.
+#[test]
+fn a_period_write_arms_a_risen_and_cleared_one_shot_again() {
+    let mut m = quux();
+    let t0 = 3_001;
+    arm_scheduler_s(&mut m, t0, 40);
+    assert!(!up(&mut m, 1, t0 + 40 * US - 1), "early");
+    assert!(up(&mut m, 1, t0 + 40 * US), "the first rise");
+    write(&mut m, t0 + 40 * US + 7, control(1), HANDLER_CLEAR);
+    assert_eq!(m.bus_read(control(1)), (ON | ONE_SHOT | IE).into(), "cleared, on, one-shot");
+    for n in [2, 3, 10] {
+        assert!(!up(&mut m, 1, t0 + n * 40 * US), "cleared, a rise at {n} periods");
+    }
+    let t1 = t0 + 400 * US + 123;
+    write(&mut m, t1, period(1), 25);
+    assert!(!up(&mut m, 1, t1), "the period write raised it");
+    assert!(!up(&mut m, 1, t1 + 25 * US - 1), "armed again, early");
+    assert!(up(&mut m, 1, t1 + 25 * US), "armed again, 25 us after the write");
+    write(&mut m, t1 + 25 * US + 7, control(1), HANDLER_CLEAR);
+    for n in [2, 3, 10] {
+        assert!(!up(&mut m, 1, t1 + n * 25 * US), "armed again, a second rise at {n} periods");
+    }
+}
+
+/// **A re-arm while it counts, to an earlier rise**: armed for 100 µs at
+/// `t0`, a period of 30 µs written at `t0` + 10 µs rises at `t0` + 40 µs,
+/// not 0.5 ns before; cleared there, nothing rises at the old
+/// deadline, `t0` + 100 µs, or after it.
+#[test]
+fn a_re_arm_while_it_counts_to_an_earlier_rise() {
+    let mut m = quux();
+    let t0 = 5_003;
+    arm_scheduler_s(&mut m, t0, 100);
+    let t1 = t0 + 10 * US;
+    write(&mut m, t1, period(1), 30);
+    assert!(!up(&mut m, 1, t1 + 30 * US - 1), "early");
+    assert!(up(&mut m, 1, t1 + 30 * US), "30 us after the re-arm");
+    write(&mut m, t1 + 30 * US + 7, control(1), HANDLER_CLEAR);
+    for at in [t0 + 100 * US - 1, t0 + 100 * US, t0 + 200 * US, t0 + 10_000 * US] {
+        assert!(!up(&mut m, 1, at), "a rise at {at}, on the old deadline or after");
+    }
+}
+
+/// **A re-arm while it counts, to a later rise**: armed for 30 µs at `t0`,
+/// a period of 100 µs written at `t0` + 10 µs does not rise at the old
+/// deadline, `t0` + 30 µs, nor 0.5 ns before `t0` + 110 µs, and rises
+/// at `t0` + 110 µs, once.
+#[test]
+fn a_re_arm_while_it_counts_to_a_later_rise() {
+    let mut m = quux();
+    let t0 = 5_003;
+    arm_scheduler_s(&mut m, t0, 30);
+    let t1 = t0 + 10 * US;
+    write(&mut m, t1, period(1), 100);
+    for at in [t0 + 30 * US, t0 + 30 * US + 1, t0 + 60 * US, t1 + 100 * US - 1] {
+        assert!(!up(&mut m, 1, at), "a rise at {at}, before the new deadline");
+    }
+    assert!(up(&mut m, 1, t1 + 100 * US), "100 us after the re-arm");
+    write(&mut m, t1 + 100 * US + 7, control(1), HANDLER_CLEAR);
+    for n in [2, 3, 10] {
+        assert!(!up(&mut m, 1, t1 + n * 100 * US), "a second rise at {n} periods");
+    }
+}
+
+/// **Period 0 while it counts, the idle disarm**: armed for 50 µs at `t0`,
+/// a period of 0 written at `t0` + 10 µs leaves it on and one-shot with its
+/// flag down at the old deadline, `t0` + 50 µs, and through 10 s; a period
+/// of 20 µs written after that rises 20 µs after its write.
+#[test]
+fn period_0_while_it_counts_disarms_it() {
+    let mut m = quux();
+    let t0 = 5_003;
+    arm_scheduler_s(&mut m, t0, 50);
+    write(&mut m, t0 + 10 * US, period(1), 0);
+    for at in [t0 + 50 * US - 1, t0 + 50 * US, t0 + 100 * US, t0 + 10_000_000 * US] {
+        assert!(!up(&mut m, 1, at), "period 0, a rise at {at}");
+        assert_eq!(m.bus_read(control(1)), (ON | ONE_SHOT | IE).into(), "period 0, at {at}");
+    }
+    let t1 = t0 + 10_000_000 * US + 9;
+    write(&mut m, t1, period(1), 20);
+    assert!(!up(&mut m, 1, t1 + 20 * US - 1), "armed after period 0, early");
+    assert!(up(&mut m, 1, t1 + 20 * US), "armed after period 0, 20 us after the write");
+}
